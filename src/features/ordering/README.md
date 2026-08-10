@@ -13,6 +13,7 @@ Owns framework-independent order and bill calculation rules.
 - Station status derivation.
 - Order and item status normalization.
 - Order item count helpers.
+- Deterministic direct order status transition guards.
 
 ## Does Not Own
 
@@ -39,9 +40,8 @@ None directly.
 
 ## Security Notes
 
-Keep this module pure and framework-independent. Do not add browser storage or DOM access here.
+Keep this module pure and framework-independent. Do not add browser storage or DOM access here. Invalid direct status transitions should return a failed result without mutating the order.
 
 ## Tests
 
-No module tests yet. This should be the first module to receive unit tests.
-
+Module tests cover totals, bill quantity adjustment, status normalization, combo routing, station status derivation, and direct order transition guards.

@@ -100,6 +100,7 @@ Owns:
 - Combo expansion rules.
 - Order totals.
 - Order status normalization.
+- Direct order status transition guards.
 - Station status derivation.
 
 Does not own:
@@ -128,13 +129,19 @@ Current location:
 Owns:
 
 - Staff board.
-- Order acceptance/rejection.
-- Served confirmation.
-- Service request completion.
+- Staff-facing order metrics and selectors.
+- Staff action presentation for order acceptance/rejection and served confirmation.
+- Staff service request completion presentation.
 
 Current location:
 
-- Still inside `app.js`.
+- `src/features/staff-orders/index.js`
+
+Does not own:
+
+- Persistence or localStorage.
+- Payment capture.
+- Kitchen/bar/dessert station queue internals.
 
 ### kitchen
 

@@ -23,6 +23,7 @@ index.html
       -> features/cart
       -> features/customer-orders
       -> features/service-requests
+      -> features/staff-orders
 ```
 
 The current router is hash-based:
@@ -91,9 +92,10 @@ Phase B has extracted the first stable, low-risk modules:
 - `features/cart`
 - `features/customer-orders`
 - `features/service-requests`
+- `features/staff-orders`
 
 Larger UI decomposition should come later, after each phase validates.
 
 ## Current Known Coupling
 
-`app.js` still owns broad page composition, event binding, localStorage orchestration, admin actions, cashier actions, payments, reports, staff orders, and station workflow. Cart rules/UI, customer order status presentation, and customer service request event creation now live behind feature public APIs.
+`app.js` still owns broad page composition, event binding, localStorage orchestration, admin actions, cashier actions, payments, reports, and station workflow. Cart rules/UI, customer order status presentation, customer service request event creation, and staff board presentation/selectors now live behind feature public APIs.
