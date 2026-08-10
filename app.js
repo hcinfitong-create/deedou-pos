@@ -1,8 +1,8 @@
 import { COUNTER_DRAFT_KEY, COUNTER_SEARCH_KEY, PRODUCT_KEY, STATE_KEY, stationAliases, stations, tables } from "./src/shared/config/index.js";
 import { copy } from "./src/shared/i18n/index.js";
 import { escapeAttr, escapeHtml, formatMoney, normalizeSearch, slugify } from "./src/shared/utils/index.js";
-import { categories, categoryAliases, compareMenuItems, defaultProducts, menuKinds } from "./src/features/customer-menu/index.js";
-import { billableTotal, chargedQty, clampBillQty, countPrepItems, countServedItems, countStatusItems, lineSubtotal, normalizeItemStatus, normalizeOrderStatus, recalcOrderTotal, stationStatusFor } from "./src/features/ordering/index.js";
+import { categories, categoryAliases, compareMenuItems, defaultProducts, filterMenuItems, menuKinds } from "./src/features/customer-menu/index.js";
+import { billableTotal, chargedQty, clampBillQty, countPrepItems, countServedItems, countStatusItems, expandOrderLines, lineSubtotal, normalizeItemStatus, normalizeOrderStatus, recalcOrderTotal, stationStatusFor } from "./src/features/ordering/index.js";
 import { addCartItem, canSubmitCart, clearCart, decrementCartItem, removeCartItem, renderCartPanel } from "./src/features/cart/index.js";
 import { renderCustomerOrderStatusStrip } from "./src/features/customer-orders/index.js";
 import { createServiceRequestEvent, renderCustomerServiceActions } from "./src/features/service-requests/index.js";
@@ -206,12 +206,7 @@ function customerPage(token) {
   const period = currentPeriod();
   const visibleCategories = categories.filter((cat) => activeKind === "all" || cat.kind === activeKind);
   if (activeCategory !== "all" && !visibleCategories.some((cat) => cat.id === activeCategory)) activeCategory = "all";
-  const categoryIds = visibleCategories.map((cat) => cat.id);
-  const filtered = products.filter((item) => {
-    const kindMatch = activeKind === "all" || item.kind === activeKind;
-    const inPeriod = (item.periods || []).includes(period) || categoryIds.includes(item.category);
-    return kindMatch && inPeriod && (activeCategory === "all" || item.category === activeCategory);
-  }).sort(compareMenuItems);
+  const filtered = filterMenuItems(products, { period, activeKind, activeCategory }).sort(compareMenuItems);
 
   return `
     <section class="page customer-grid">
@@ -299,7 +294,7 @@ function staffPage() {
   return `
     <section class="page">
       <div class="summary-row">
-        <div class="metric"><span class="muted">New orders</span><strong>${state.orders.filter((o) => o.status === "PENDING").length}</strong></div>
+        <div class="metric"><span class="muted">New orders</span><strong>${state.orders.filter((o) => o.status === "PENDING_ACCEPTANCE").length}</strong></div>
         <div class="metric"><span class="muted">Open tables</span><strong>${new Set(state.orders.filter((o) => !["PAID", "REJECTED"].includes(o.status)).map((o) => o.table)).size}</strong></div>
         <div class="metric"><span class="muted">Service requests</span><strong>${state.events.filter((e) => !e.done).length}</strong></div>
         <div class="metric"><span class="muted">Today total</span><strong>${formatMoney(total)}</strong></div>
@@ -458,7 +453,11 @@ function tablePaymentPanel(table, orders, balance) {
 
 function counterOrderPanel(table) {
   const draftLines = counterDraft.items || [];
-  const total = draftLines.reduce((sum, line) => sum + line.qty * productById(line.id).price, 0);
+  const validDraftLines = draftLines.filter((line) => productById(line.id));
+  const total = validDraftLines.reduce((sum, line) => {
+    const item = productById(line.id);
+    return sum + line.qty * (Number(item.price) || 0);
+  }, 0);
   const query = normalizeSearch(counterSearch);
   const availableProducts = products.filter((item) => item.available && matchesCounterSearch(item, query)).sort(compareMenuItems);
   return `
@@ -494,7 +493,7 @@ function counterOrderPanel(table) {
         <aside class="counter-cart">
           <h3>Phiếu tạm</h3>
           <div class="cart-list">
-            ${draftLines.length ? draftLines.map(counterDraftLine).join("") : `<div class="empty">Chưa chọn món.</div>`}
+            ${validDraftLines.length ? validDraftLines.map(counterDraftLine).join("") : `<div class="empty">Chưa chọn món.</div>`}
           </div>
           <label>
             <span class="muted">Ghi chú lượt gọi món</span>
@@ -502,7 +501,7 @@ function counterOrderPanel(table) {
           </label>
           <div class="total"><span>Tổng tạm</span><strong>${formatMoney(total)}</strong></div>
           <div class="split-actions">
-            <button class="primary" data-counter-submit ${draftLines.length ? "" : "disabled"}>Khách xác nhận - Gửi bếp/bar</button>
+            <button class="primary" data-counter-submit ${validDraftLines.length ? "" : "disabled"}>Khách xác nhận - Gửi bếp/bar</button>
           </div>
         </aside>
       </div>
@@ -522,6 +521,7 @@ function counterProductButton(item) {
 
 function counterDraftLine(line) {
   const item = productById(line.id);
+  if (!item) return "";
   return `
     <div class="cart-line">
       <div><strong>${escapeHtml(item.vi)}</strong><br><span class="muted">${formatMoney(item.price)}</span></div>
@@ -886,6 +886,7 @@ function bindAdmin() {
   bindAdminForm();
   document.querySelectorAll("[data-toggle]").forEach((button) => button.addEventListener("click", () => {
     const item = productById(button.dataset.toggle);
+    if (!item) return;
     item.available = !item.available;
     saveProducts();
     audit("MENU_AVAILABILITY", `${item.en}: ${item.available ? "AVAILABLE" : "SOLD OUT"}`);
@@ -973,6 +974,7 @@ function loadProductIntoForm(id) {
   const target = productById(id);
   const panel = document.querySelector(".product-form")?.parentElement;
   if (!panel) return;
+  if (id && !target) return;
   panel.innerHTML = `<h2>${id ? "Sửa món" : "Thêm món ăn / đồ uống"}</h2>${productForm(id ? target : {})}`;
   bindAdminForm();
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -980,6 +982,7 @@ function loadProductIntoForm(id) {
 
 function deleteProduct(id) {
   const item = productById(id);
+  if (!item) return;
   if (!confirm(`Xóa ${item.vi}?`)) return;
   products = products.filter((productItem) => productItem.id !== id);
   state.cart = removeCartItem(state.cart, id);
@@ -990,10 +993,11 @@ function deleteProduct(id) {
 }
 
 function submitOrder(token) {
-  if (!canSubmitCart(state.cart)) return;
+  if (!canSubmitCart(state.cart, productById)) return;
   const table = tables.find((item) => item.token === token) || tables[0];
   const note = document.getElementById("note")?.value || "";
-  const items = expandCartLines(state.cart);
+  const items = expandOrderLines(state.cart, productById);
+  if (!items.length) return;
   const total = billableTotal(items);
   const orderNo = nextOrderNo();
   state.orders.push({
@@ -1017,39 +1021,6 @@ function submitOrder(token) {
   render();
 }
 
-function expandCartLines(cartLines) {
-  return cartLines.flatMap((line) => {
-    const item = productById(line.id);
-    const parent = {
-      id: item.id,
-      qty: line.qty,
-      station: item.components?.length ? "COMBO" : item.station,
-      nameVi: item.vi,
-      nameEn: item.en,
-      price: item.price,
-      billQty: line.qty,
-      status: "QUEUED",
-      isBillable: true,
-      isComponent: false,
-      parentComboId: ""
-    };
-    const components = (item.components || []).map((part, index) => ({
-      id: `${item.id}-component-${index}`,
-      qty: line.qty * part.qty,
-      station: part.station,
-      nameVi: part.vi,
-      nameEn: part.en,
-      price: 0,
-      billQty: 0,
-      status: "QUEUED",
-      isBillable: false,
-      isComponent: true,
-      parentComboId: item.id
-    }));
-    return [parent, ...components];
-  });
-}
-
 function serviceRequest(token, type) {
   const table = tables.find((item) => item.token === token) || tables[0];
   state.events.push(createServiceRequestEvent({ table, type }));
@@ -1070,7 +1041,7 @@ function openCounterOrder(tableCode) {
 
 function addCounterItem(id) {
   const item = productById(id);
-  if (!item.available) return;
+  if (!item?.available) return;
   const line = counterDraft.items.find((draftLine) => draftLine.id === id);
   if (line) line.qty = Math.min(20, line.qty + 1);
   else counterDraft.items.push({ id, qty: 1 });
@@ -1099,7 +1070,8 @@ function submitCounterOrder() {
   if (!counterDraft.active || !counterDraft.items.length) return;
   const tableCode = counterDraft.table;
   const orderNo = nextOrderNo();
-  const items = expandCartLines(counterDraft.items);
+  const items = expandOrderLines(counterDraft.items, productById);
+  if (!items.length) return;
   const total = billableTotal(items);
   state.orders.push({
     id: `D${Date.now().toString().slice(-6)}`,
@@ -1460,7 +1432,7 @@ function nextOrderNo() {
 }
 
 function productById(id) {
-  return products.find((item) => item.id === id) || defaultProducts[0];
+  return products.find((item) => item.id === id) || null;
 }
 
 function categoryLabel(id) {

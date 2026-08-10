@@ -51,6 +51,18 @@ export function compareMenuItems(a, b) {
   return (kindOrder[a.kind] ?? 9) - (kindOrder[b.kind] ?? 9) || (categoryOrder[a.category] ?? 99) - (categoryOrder[b.category] ?? 99) || a.vi.localeCompare(b.vi, "vi");
 }
 
+export function isProductAvailableInPeriod(item, period) {
+  return Array.isArray(item?.periods) && item.periods.includes(period);
+}
+
+export function filterMenuItems(items, { period, activeKind = "all", activeCategory = "all" } = {}) {
+  return (items || []).filter((item) => {
+    const kindMatch = activeKind === "all" || item.kind === activeKind;
+    const categoryMatch = activeCategory === "all" || item.category === activeCategory;
+    return kindMatch && categoryMatch && isProductAvailableInPeriod(item, period);
+  });
+}
+
 function product(id, kind, category, vi, en, descVi, descEn, price, station, available, color, art, periods, image = "", components = []) {
   return { id, kind, category, vi, en, descVi, descEn, price, station, available, color, art, periods, image, components };
 }
@@ -58,4 +70,3 @@ function product(id, kind, category, vi, en, descVi, descEn, price, station, ava
 function component(vi, en, qty, station) {
   return { vi, en, qty, station };
 }
-
