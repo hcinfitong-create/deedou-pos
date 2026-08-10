@@ -67,7 +67,8 @@ export function stationStatusFor(items, status) {
 
 export const DIRECT_ORDER_STATUS_TRANSITIONS = Object.freeze({
   PENDING_ACCEPTANCE: Object.freeze(["ACCEPTED", "REJECTED"]),
-  ACCEPTED: Object.freeze(["IN_PREPARATION"]),
+  ACCEPTED: Object.freeze(["IN_PREPARATION", "REJECTED"]),
+  IN_PREPARATION: Object.freeze(["READY"]),
   READY: Object.freeze(["SERVED"]),
   SERVED: Object.freeze(["PAID"])
 });
@@ -108,6 +109,16 @@ export function applyOrderStatusTransition(order, nextStatus) {
     });
   }
   if (to === "REJECTED") order.stationStatus = {};
+  if (to === "READY") {
+    const stationStatus = order.stationStatus || stationStatusFor(order.items, "QUEUED");
+    order.stationStatus = stationStatus;
+    Object.keys(stationStatus).forEach((station) => {
+      stationStatus[station] = "READY";
+    });
+    nonComboItems(order).forEach((item) => {
+      item.status = "READY";
+    });
+  }
   if (to === "SERVED") {
     nonComboItems(order).forEach((item) => {
       item.status = "SERVED";

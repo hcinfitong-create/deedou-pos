@@ -7,6 +7,7 @@ const STAFF_ACTION_COPY = {
   ACCEPTED: { label: "Accept", tone: "primary" },
   REJECTED: { label: "Reject", tone: "danger" },
   IN_PREPARATION: { label: "Send to prep", tone: "primary" },
+  READY: { label: "Ready", tone: "primary" },
   SERVED: { label: "Served", tone: "primary" },
   PAID: { label: "Paid and close", tone: "primary" }
 };

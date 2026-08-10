@@ -69,9 +69,14 @@ test("station status derives only non-combo stations", () => {
 
 test("direct order transition graph allows only deterministic staff and cashier moves", () => {
   assert.deepEqual(getAllowedOrderStatusTransitions("PENDING_ACCEPTANCE"), ["ACCEPTED", "REJECTED"]);
-  assert.equal(canTransitionOrderStatus("PENDING_ACCEPTANCE", "SERVED"), false);
+  assert.deepEqual(getAllowedOrderStatusTransitions("ACCEPTED"), ["IN_PREPARATION", "REJECTED"]);
+  assert.deepEqual(getAllowedOrderStatusTransitions("IN_PREPARATION"), ["READY"]);
+  assert.equal(canTransitionOrderStatus("PENDING_ACCEPTANCE", "READY"), false);
+  assert.equal(canTransitionOrderStatus("ACCEPTED", "REJECTED"), true);
   assert.equal(canTransitionOrderStatus("ACCEPTED", "IN_PREPARATION"), true);
+  assert.equal(canTransitionOrderStatus("IN_PREPARATION", "READY"), true);
   assert.equal(canTransitionOrderStatus("READY", "SERVED"), true);
+  assert.equal(canTransitionOrderStatus("SERVED", "PAID"), true);
 });
 
 test("invalid direct order status transition does not mutate order", () => {
@@ -81,13 +86,31 @@ test("invalid direct order status transition does not mutate order", () => {
     items: [{ station: "BAR_TEA", status: "QUEUED" }]
   };
 
-  const result = applyOrderStatusTransition(order, "SERVED");
+  const result = applyOrderStatusTransition(order, "READY");
 
   assert.equal(result.ok, false);
   assert.equal(result.reason, "INVALID_STATUS_TRANSITION");
   assert.deepEqual(order, {
     status: "PENDING_ACCEPTANCE",
     stationStatus: { BAR_TEA: "QUEUED" },
+    items: [{ station: "BAR_TEA", status: "QUEUED" }]
+  });
+});
+
+test("rejected orders reject further direct transitions without mutation", () => {
+  const order = {
+    status: "REJECTED",
+    stationStatus: {},
+    items: [{ station: "BAR_TEA", status: "QUEUED" }]
+  };
+
+  const result = applyOrderStatusTransition(order, "READY");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "INVALID_STATUS_TRANSITION");
+  assert.deepEqual(order, {
+    status: "REJECTED",
+    stationStatus: {},
     items: [{ station: "BAR_TEA", status: "QUEUED" }]
   });
 });
@@ -112,4 +135,24 @@ test("valid direct order status transitions preserve station side effects", () =
   assert.equal(order.status, "IN_PREPARATION");
   assert.deepEqual(order.stationStatus, { BAR_TEA: "PREPARING", KITCHEN_HOT: "PREPARING" });
   assert.deepEqual(order.items.map((item) => item.status), ["QUEUED", "PREPARING", "PREPARING"]);
+
+  assert.equal(applyOrderStatusTransition(order, "READY").ok, true);
+  assert.equal(order.status, "READY");
+  assert.deepEqual(order.stationStatus, { BAR_TEA: "READY", KITCHEN_HOT: "READY" });
+  assert.deepEqual(order.items.map((item) => item.status), ["QUEUED", "READY", "READY"]);
+});
+
+test("accepted orders can be rejected with existing rejection side effects", () => {
+  const order = {
+    status: "ACCEPTED",
+    stationStatus: { BAR_TEA: "QUEUED" },
+    items: [{ station: "BAR_TEA", status: "QUEUED" }]
+  };
+
+  const result = applyOrderStatusTransition(order, "REJECTED");
+
+  assert.equal(result.ok, true);
+  assert.equal(order.status, "REJECTED");
+  assert.deepEqual(order.stationStatus, {});
+  assert.deepEqual(order.items, [{ station: "BAR_TEA", status: "QUEUED" }]);
 });
