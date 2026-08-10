@@ -25,21 +25,28 @@ export function clearCart() {
 }
 
 export function cartSubtotal(cart, productById) {
-  return cart.reduce((sum, line) => sum + line.qty * productById(line.id).price, 0);
+  return (cart || []).reduce((sum, line) => {
+    const item = productById(line.id);
+    if (!item) return sum;
+    return sum + line.qty * (Number(item.price) || 0);
+  }, 0);
 }
 
-export function canSubmitCart(cart) {
-  return cart.length > 0;
+export function canSubmitCart(cart, productById = null) {
+  if (!(cart || []).length) return false;
+  if (!productById) return true;
+  return cart.every((line) => !!productById(line.id));
 }
 
 export function renderCartPanel({ table, cart, lang, copy, productById, orderStatusHtml = "" }) {
-  const total = cartSubtotal(cart, productById);
+  const validLines = (cart || []).filter((line) => !!productById(line.id));
+  const total = cartSubtotal(validLines, productById);
   return `
     <aside class="panel cart">
       <h2>${copy.cart}</h2>
       <p class="muted">${copy.table} ${table.code} - ${table.zone}</p>
       <div class="cart-list">
-        ${cart.length ? cart.map((line) => renderCartLine(line, { lang, productById })).join("") : `<div class="empty">${copy.empty}</div>`}
+        ${validLines.length ? validLines.map((line) => renderCartLine(line, { lang, productById })).join("") : `<div class="empty">${copy.empty}</div>`}
       </div>
       <label>
         <span class="muted">${copy.note}</span>
@@ -47,7 +54,7 @@ export function renderCartPanel({ table, cart, lang, copy, productById, orderSta
       </label>
       <div class="total"><span>${copy.total}</span><strong>${formatMoney(total)}</strong></div>
       <div class="actions">
-        <button class="primary" data-submit="${table.token}" ${canSubmitCart(cart) ? "" : "disabled"}>${copy.submit}</button>
+        <button class="primary" data-submit="${table.token}" ${canSubmitCart(validLines, productById) ? "" : "disabled"}>${copy.submit}</button>
       </div>
       ${orderStatusHtml}
     </aside>
@@ -56,6 +63,7 @@ export function renderCartPanel({ table, cart, lang, copy, productById, orderSta
 
 function renderCartLine(line, { lang, productById }) {
   const item = productById(line.id);
+  if (!item) return "";
   return `
     <div class="cart-line">
       <div><strong>${escapeHtml(item[lang])}</strong><br><span class="muted">${formatMoney(item.price)}</span></div>
