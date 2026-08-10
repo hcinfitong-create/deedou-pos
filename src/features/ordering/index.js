@@ -65,6 +65,62 @@ export function stationStatusFor(items, status) {
   return Object.fromEntries([...new Set((items || []).filter((item) => item.station !== "COMBO").map((item) => item.station))].map((station) => [station, initial]));
 }
 
+export const DIRECT_ORDER_STATUS_TRANSITIONS = Object.freeze({
+  PENDING_ACCEPTANCE: Object.freeze(["ACCEPTED", "REJECTED"]),
+  ACCEPTED: Object.freeze(["IN_PREPARATION"]),
+  READY: Object.freeze(["SERVED"]),
+  SERVED: Object.freeze(["PAID"])
+});
+
+export function getAllowedOrderStatusTransitions(status) {
+  return [...(DIRECT_ORDER_STATUS_TRANSITIONS[normalizeOrderStatus(status)] || [])];
+}
+
+export function canTransitionOrderStatus(currentStatus, nextStatus) {
+  const next = normalizeOrderStatus(nextStatus);
+  return getAllowedOrderStatusTransitions(currentStatus).includes(next);
+}
+
+export function applyOrderStatusTransition(order, nextStatus) {
+  if (!order) return { ok: false, reason: "ORDER_NOT_FOUND" };
+
+  const from = normalizeOrderStatus(order.status || "PENDING_ACCEPTANCE");
+  const to = normalizeOrderStatus(nextStatus);
+  if (!canTransitionOrderStatus(from, to)) {
+    return { ok: false, order, from, to, reason: "INVALID_STATUS_TRANSITION" };
+  }
+
+  order.status = to;
+  if (to === "ACCEPTED") {
+    order.stationStatus = stationStatusFor(order.items, "QUEUED");
+    nonComboItems(order).forEach((item) => {
+      item.status = "QUEUED";
+    });
+  }
+  if (to === "IN_PREPARATION") {
+    const stationStatus = order.stationStatus || stationStatusFor(order.items, "QUEUED");
+    order.stationStatus = stationStatus;
+    Object.keys(stationStatus).forEach((station) => {
+      if (stationStatus[station] === "QUEUED") stationStatus[station] = "PREPARING";
+    });
+    nonComboItems(order).filter((item) => item.status === "QUEUED").forEach((item) => {
+      item.status = "PREPARING";
+    });
+  }
+  if (to === "REJECTED") order.stationStatus = {};
+  if (to === "SERVED") {
+    nonComboItems(order).forEach((item) => {
+      item.status = "SERVED";
+    });
+  }
+
+  return { ok: true, order, from, to };
+}
+
+function nonComboItems(order) {
+  return (order.items || []).filter((item) => item.station !== "COMBO");
+}
+
 export function countPrepItems(orders) {
   return orders.flatMap((order) => order.items).filter((item) => item.station !== "COMBO").reduce((sum, item) => sum + item.qty, 0);
 }

@@ -2,9 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  applyOrderStatusTransition,
   billableTotal,
+  canTransitionOrderStatus,
   clampBillQty,
   expandOrderLines,
+  getAllowedOrderStatusTransitions,
   normalizeOrderStatus,
   stationStatusFor
 } from "../src/features/ordering/index.js";
@@ -62,4 +65,51 @@ test("station status derives only non-combo stations", () => {
     BAR_TEA: "QUEUED",
     KITCHEN_HOT: "QUEUED"
   });
+});
+
+test("direct order transition graph allows only deterministic staff and cashier moves", () => {
+  assert.deepEqual(getAllowedOrderStatusTransitions("PENDING_ACCEPTANCE"), ["ACCEPTED", "REJECTED"]);
+  assert.equal(canTransitionOrderStatus("PENDING_ACCEPTANCE", "SERVED"), false);
+  assert.equal(canTransitionOrderStatus("ACCEPTED", "IN_PREPARATION"), true);
+  assert.equal(canTransitionOrderStatus("READY", "SERVED"), true);
+});
+
+test("invalid direct order status transition does not mutate order", () => {
+  const order = {
+    status: "PENDING_ACCEPTANCE",
+    stationStatus: { BAR_TEA: "QUEUED" },
+    items: [{ station: "BAR_TEA", status: "QUEUED" }]
+  };
+
+  const result = applyOrderStatusTransition(order, "SERVED");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "INVALID_STATUS_TRANSITION");
+  assert.deepEqual(order, {
+    status: "PENDING_ACCEPTANCE",
+    stationStatus: { BAR_TEA: "QUEUED" },
+    items: [{ station: "BAR_TEA", status: "QUEUED" }]
+  });
+});
+
+test("valid direct order status transitions preserve station side effects", () => {
+  const order = {
+    status: "PENDING_ACCEPTANCE",
+    stationStatus: {},
+    items: [
+      { station: "COMBO", status: "QUEUED" },
+      { station: "BAR_TEA", status: "PENDING" },
+      { station: "KITCHEN_HOT", status: "PENDING" }
+    ]
+  };
+
+  assert.equal(applyOrderStatusTransition(order, "ACCEPTED").ok, true);
+  assert.equal(order.status, "ACCEPTED");
+  assert.deepEqual(order.stationStatus, { BAR_TEA: "QUEUED", KITCHEN_HOT: "QUEUED" });
+  assert.deepEqual(order.items.map((item) => item.status), ["QUEUED", "QUEUED", "QUEUED"]);
+
+  assert.equal(applyOrderStatusTransition(order, "IN_PREPARATION").ok, true);
+  assert.equal(order.status, "IN_PREPARATION");
+  assert.deepEqual(order.stationStatus, { BAR_TEA: "PREPARING", KITCHEN_HOT: "PREPARING" });
+  assert.deepEqual(order.items.map((item) => item.status), ["QUEUED", "PREPARING", "PREPARING"]);
 });

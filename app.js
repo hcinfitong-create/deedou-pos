@@ -2,10 +2,11 @@ import { COUNTER_DRAFT_KEY, COUNTER_SEARCH_KEY, PRODUCT_KEY, STATE_KEY, stationA
 import { copy } from "./src/shared/i18n/index.js";
 import { escapeAttr, escapeHtml, formatMoney, normalizeSearch, slugify } from "./src/shared/utils/index.js";
 import { categories, categoryAliases, compareMenuItems, defaultProducts, filterMenuItems, menuKinds } from "./src/features/customer-menu/index.js";
-import { billableTotal, chargedQty, clampBillQty, countPrepItems, countServedItems, countStatusItems, expandOrderLines, lineSubtotal, normalizeItemStatus, normalizeOrderStatus, recalcOrderTotal, stationStatusFor } from "./src/features/ordering/index.js";
+import { applyOrderStatusTransition, billableTotal, chargedQty, clampBillQty, countPrepItems, countServedItems, countStatusItems, expandOrderLines, lineSubtotal, normalizeItemStatus, normalizeOrderStatus, recalcOrderTotal, stationStatusFor } from "./src/features/ordering/index.js";
 import { addCartItem, canSubmitCart, clearCart, decrementCartItem, removeCartItem, renderCartPanel } from "./src/features/cart/index.js";
 import { renderCustomerOrderStatusStrip } from "./src/features/customer-orders/index.js";
 import { createServiceRequestEvent, renderCustomerServiceActions } from "./src/features/service-requests/index.js";
+import { renderStaffPage } from "./src/features/staff-orders/index.js";
 
 let products = loadProducts();
 let state = loadState();
@@ -289,32 +290,7 @@ function productVisual(item) {
 }
 
 function staffPage() {
-  const columns = ["PENDING_ACCEPTANCE", "ACCEPTED", "IN_PREPARATION", "READY", "SERVED"];
-  const total = state.orders.filter((order) => order.status !== "REJECTED").reduce((sum, order) => sum + order.total, 0);
-  return `
-    <section class="page">
-      <div class="summary-row">
-        <div class="metric"><span class="muted">New orders</span><strong>${state.orders.filter((o) => o.status === "PENDING_ACCEPTANCE").length}</strong></div>
-        <div class="metric"><span class="muted">Open tables</span><strong>${new Set(state.orders.filter((o) => !["PAID", "REJECTED"].includes(o.status)).map((o) => o.table)).size}</strong></div>
-        <div class="metric"><span class="muted">Service requests</span><strong>${state.events.filter((e) => !e.done).length}</strong></div>
-        <div class="metric"><span class="muted">Today total</span><strong>${formatMoney(total)}</strong></div>
-      </div>
-      <div class="board staff-board">
-        ${columns.map((status) => `
-          <section class="column">
-            <h2>${status}</h2>
-            ${state.orders.filter((order) => order.status === status).map(orderCard).join("") || `<div class="empty">No orders</div>`}
-          </section>
-        `).join("")}
-      </div>
-      <section class="panel section-pad">
-        <h2>Waiter and payment requests</h2>
-        <div class="cart-list">
-          ${state.events.slice().reverse().map(eventCard).join("") || `<div class="empty">No requests</div>`}
-        </div>
-      </section>
-    </section>
-  `;
+  return renderStaffPage({ orders: state.orders, events: state.events });
 }
 
 function cashierPage() {
@@ -590,38 +566,6 @@ function cashierBillLine(order, line, index) {
       </div>
       <strong>${formatMoney(lineSubtotal(line))}</strong>
     </li>
-  `;
-}
-
-function orderCard(order) {
-  return `
-    <article class="order-card">
-      <div class="order-head"><strong>${order.orderNo} - Table ${order.table}</strong><span class="muted">${order.time}</span></div>
-      <ul class="item-list">
-        ${order.items.map((line) => `<li class="${line.isComponent ? "component-line" : ""}">${line.isComponent ? "-> " : ""}${line.qty} x ${escapeHtml(line.nameEn)} <span class="station">${line.station}</span> <span class="station">${line.status}</span></li>`).join("")}
-      </ul>
-      ${order.note ? `<p class="muted">Note: ${escapeHtml(order.note)}</p>` : ""}
-      <div class="station-grid">${Object.entries(order.stationStatus || {}).map(([station, status]) => `<span class="status-pill"><span>${station}</span><strong>${status}</strong></span>`).join("")}</div>
-      <strong>${formatMoney(order.total)}</strong>
-      <div class="split-actions">
-        ${order.status === "PENDING_ACCEPTANCE" ? `<button class="primary" data-order="${order.id}" data-status="ACCEPTED">Accept</button><button class="danger" data-order="${order.id}" data-status="REJECTED">Reject</button>` : ""}
-        ${order.status === "ACCEPTED" ? `<button class="primary" data-order="${order.id}" data-status="IN_PREPARATION">Send to prep</button>` : ""}
-        ${order.status === "READY" ? `<button class="primary" data-order="${order.id}" data-status="SERVED">Served</button>` : ""}
-        ${order.status === "SERVED" ? `<button class="primary" data-order="${order.id}" data-status="PAID">Paid and close</button>` : ""}
-      </div>
-    </article>
-  `;
-}
-
-function eventCard(event) {
-  return `
-    <div class="status-pill ${event.done ? "done" : ""}">
-      <span>${event.type.replace("_", " ")} - Table ${event.table}</span>
-      <div class="split-actions">
-        <strong>${event.time}</strong>
-        ${event.done ? "" : `<button class="ghost compact" data-event="${event.id}">Done</button>`}
-      </div>
-    </div>
   `;
 }
 
@@ -1332,18 +1276,9 @@ function refundOrder(orderId) {
 function updateOrderStatus(orderId, status) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
-  order.status = status;
-  if (status === "ACCEPTED") order.stationStatus = stationStatusFor(order.items, "QUEUED");
-  if (status === "ACCEPTED") order.items.filter((item) => item.station !== "COMBO").forEach((item) => item.status = "QUEUED");
-  if (status === "IN_PREPARATION") {
-    Object.keys(order.stationStatus).forEach((station) => {
-      if (order.stationStatus[station] === "QUEUED") order.stationStatus[station] = "PREPARING";
-    });
-    order.items.filter((item) => item.station !== "COMBO" && item.status === "QUEUED").forEach((item) => item.status = "PREPARING");
-  }
-  if (status === "REJECTED") order.stationStatus = {};
-  if (status === "SERVED") order.items.filter((item) => item.station !== "COMBO").forEach((item) => item.status = "SERVED");
-  audit("ORDER_STATUS", `${order.orderNo} -> ${status}`);
+  const transition = applyOrderStatusTransition(order, status);
+  if (!transition.ok) return;
+  audit("ORDER_STATUS", `${order.orderNo} -> ${transition.to}`);
   saveState();
   render();
 }
