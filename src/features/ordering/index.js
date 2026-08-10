@@ -22,9 +22,47 @@ export function recalcOrderTotal(order) {
   return order.total;
 }
 
+export function expandOrderLines(cartLines, productById) {
+  return (cartLines || []).flatMap((line) => {
+    const item = productById(line.id);
+    if (!item) return [];
+
+    const qty = Math.max(1, Number(line.qty) || 1);
+    const parent = {
+      id: item.id,
+      qty,
+      station: item.components?.length ? "COMBO" : item.station,
+      nameVi: item.vi,
+      nameEn: item.en,
+      price: Number(item.price) || 0,
+      billQty: qty,
+      status: "QUEUED",
+      isBillable: true,
+      isComponent: false,
+      parentComboId: ""
+    };
+
+    const components = (item.components || []).map((part, index) => ({
+      id: `${item.id}-component-${index}`,
+      qty: qty * (Number(part.qty) || 1),
+      station: part.station,
+      nameVi: part.vi,
+      nameEn: part.en,
+      price: 0,
+      billQty: 0,
+      status: "QUEUED",
+      isBillable: false,
+      isComponent: true,
+      parentComboId: item.id
+    }));
+
+    return [parent, ...components];
+  });
+}
+
 export function stationStatusFor(items, status) {
-  const initial = ["PENDING", "PENDING_ACCEPTANCE"].includes(status) ? "QUEUED" : "QUEUED";
-  return Object.fromEntries([...new Set(items.filter((item) => item.station !== "COMBO").map((item) => item.station))].map((station) => [station, initial]));
+  const initial = "QUEUED";
+  return Object.fromEntries([...new Set((items || []).filter((item) => item.station !== "COMBO").map((item) => item.station))].map((station) => [station, initial]));
 }
 
 export function countPrepItems(orders) {
