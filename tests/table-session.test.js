@@ -17,6 +17,7 @@ import {
   getActiveTableSession,
   normalizeTableSessions,
   openOrReuseTableSession,
+  repairTableSessionGraph,
   reconcileTableSessions,
   selectOrdersForTableSession,
   transferTableSession
@@ -271,6 +272,34 @@ test("unsafe duplicate open session repair fails without blind closing or refere
   assert.deepEqual(result.events, events);
   assert.deepEqual(model.orders.map((order) => order.id), ["unsafe", "safe"]);
   assert.deepEqual(model.unresolvedRequests.map((event) => event.id), ["request-old"]);
+});
+
+test("unsafe duplicate graph blocks close reconcile and transfer without mutating active work", () => {
+  const sessions = [
+    { id: "TS-old", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: "2026-08-11T08:00:00.000Z", openedSource: "STAFF" },
+    { id: "TS-new", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: "2026-08-11T09:00:00.000Z", openedSource: "STAFF" }
+  ];
+  const orders = [
+    tableOrder({ id: "unsafe", orderNo: "D01-0001", table: "C01", zone: "Camping", tableSessionId: "TS-old" }),
+    tableOrder({ id: "safe", orderNo: "D01-0002", tableSessionId: "TS-new" })
+  ];
+  const events = [
+    { id: "request-old", type: "CALL_STAFF", table: "A01", zone: "Beach", tableSessionId: "TS-old", done: false }
+  ];
+  const graph = repairTableSessionGraph({ tableSessions: sessions, orders, events, tables, now: "2026-08-11T10:00:00.000Z" });
+  const closeResult = closeTableSession(sessions, "TS-new", { orders, events, tables, now: "2026-08-11T10:00:00.000Z" });
+  const reconcileResult = reconcileTableSessions(sessions, orders, { events, tables, now: "2026-08-11T10:00:00.000Z" });
+  const transferResult = transferTableSession({ tableSessions: sessions, orders, events, sessionId: "TS-new", toTable: tables[1], tables });
+
+  [graph, closeResult, reconcileResult, transferResult].forEach((result) => {
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "UNSAFE_DUPLICATE_OPEN_SESSION_REPAIR");
+    assert.deepEqual(result.tableSessions, sessions);
+    assert.deepEqual(result.orders, orders);
+    assert.deepEqual(result.events, events);
+  });
+  assert.deepEqual(closeResult.closedSessions, []);
+  assert.deepEqual(reconcileResult.closedSessions, []);
 });
 
 test("floor-plan selector marks a table vacant when no open session exists", () => {

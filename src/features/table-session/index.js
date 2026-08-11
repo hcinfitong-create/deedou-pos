@@ -115,10 +115,11 @@ export function selectOrdersForTableSession(orders = [], sessionOrId) {
 }
 
 export function deriveTableFloorModels({ tables = [], tableSessions = [], orders = [], events = [] } = {}) {
-  const repaired = repairDuplicateOpenSessionReferences({
-    sessions: normalizeTableSessionList(tableSessions, { tables }),
+  const repaired = repairTableSessionGraph({
+    tableSessions,
     orders,
     events,
+    tables,
     now: new Date().toISOString()
   });
   const sessions = repaired.ok ? repaired.tableSessions : normalizeTableSessionList(tableSessions, { tables });
@@ -176,10 +177,19 @@ export function canCloseTableSession(sessionOrId, orders = [], tableSessions = [
 }
 
 export function closeTableSession(tableSessions = [], sessionId, options = {}) {
-  const sessions = normalizeTableSessions(tableSessions, options);
+  const graph = repairTableSessionGraph({
+    tableSessions,
+    orders: options.orders || [],
+    events: options.events || [],
+    tables: options.tables || [],
+    now: options.now
+  });
+  if (!graph.ok) return { ...graph, closedSessions: [] };
+
+  const sessions = normalizeTableSessions(graph.tableSessions, options);
   const session = sessions.find((item) => item.id === sessionId);
-  const closeable = canCloseTableSession(session, options.orders || []);
-  if (!closeable.ok) return { ...closeable, tableSessions };
+  const closeable = canCloseTableSession(session, graph.orders || []);
+  if (!closeable.ok) return { ...closeable, tableSessions: sessions, orders: graph.orders, events: graph.events };
 
   const closedAt = normalizeIsoTimestamp(options.now) || new Date().toISOString();
   const nextSessions = sessions.map((item) => {
@@ -190,27 +200,42 @@ export function closeTableSession(tableSessions = [], sessionId, options = {}) {
     ok: true,
     tableSessions: nextSessions,
     session: nextSessions.find((item) => item.id === sessionId),
-    closedAt
+    closedAt,
+    orders: graph.orders,
+    events: graph.events
   };
 }
 
 export function reconcileTableSessions(tableSessions = [], orders = [], options = {}) {
-  const sessions = normalizeTableSessions(tableSessions, options);
+  const graph = repairTableSessionGraph({
+    tableSessions,
+    orders,
+    events: options.events || [],
+    tables: options.tables || [],
+    now: options.now
+  });
+  if (!graph.ok) return { ...graph, closedSessions: [] };
+
+  const sessions = normalizeTableSessions(graph.tableSessions, options);
+  const scopedOrders = graph.orders || [];
   const closedAt = normalizeIsoTimestamp(options.now) || new Date().toISOString();
   const closedSessions = [];
   const nextSessions = sessions.map((session) => {
     if (session.status !== TABLE_SESSION_STATUSES.OPEN) return session;
-    const linkedOrders = selectOrdersForTableSession(orders, session);
+    const linkedOrders = selectOrdersForTableSession(scopedOrders, session);
     if (!linkedOrders.length || !linkedOrders.every((order) => isClosedOrderStatus(order.status))) return session;
     const closedSession = { ...session, status: TABLE_SESSION_STATUSES.CLOSED, closedAt };
     closedSessions.push(closedSession);
     return closedSession;
   });
-  return { ok: true, tableSessions: nextSessions, closedSessions };
+  return { ok: true, tableSessions: nextSessions, orders: scopedOrders, events: graph.events, closedSessions };
 }
 
-export function canTransferTableSession({ tableSessions = [], sessionId, toTable, tables = [] } = {}) {
-  const sessions = normalizeTableSessions(tableSessions, { tables });
+export function canTransferTableSession({ tableSessions = [], orders = [], events = [], sessionId, toTable, tables = [], now } = {}) {
+  const graph = repairTableSessionGraph({ tableSessions, orders, events, tables, now });
+  if (!graph.ok) return graph;
+
+  const sessions = normalizeTableSessions(graph.tableSessions, { tables });
   const session = sessions.find((item) => item.id === sessionId);
   if (!session || session.status !== TABLE_SESSION_STATUSES.OPEN) return { ok: false, reason: "SESSION_NOT_OPEN" };
 
@@ -222,23 +247,23 @@ export function canTransferTableSession({ tableSessions = [], sessionId, toTable
   if (destinationSession && destinationSession.id !== session.id) {
     return { ok: false, reason: "DESTINATION_OCCUPIED", session, destination, destinationSession };
   }
-  return { ok: true, session, destination };
+  return { ok: true, session, destination, tableSessions: sessions, orders: graph.orders, events: graph.events };
 }
 
 export function transferTableSession({ tableSessions = [], orders = [], events = [], sessionId, toTable, tables = [] } = {}) {
-  const transfer = canTransferTableSession({ tableSessions, sessionId, toTable, tables });
+  const transfer = canTransferTableSession({ tableSessions, orders, events, sessionId, toTable, tables });
   if (!transfer.ok) return { ...transfer, tableSessions, orders, events };
 
   const { session, destination } = transfer;
-  const nextSessions = normalizeTableSessions(tableSessions, { tables }).map((item) => {
+  const nextSessions = transfer.tableSessions.map((item) => {
     if (item.id !== session.id) return item;
     return { ...item, tableCode: destination.code, zone: destination.zone || "" };
   });
-  const nextOrders = (orders || []).map((order) => {
+  const nextOrders = (transfer.orders || []).map((order) => {
     if (order.tableSessionId !== session.id) return order;
     return { ...order, table: destination.code, zone: destination.zone || "" };
   });
-  const nextEvents = (events || []).map((event) => {
+  const nextEvents = (transfer.events || []).map((event) => {
     if (!shouldMoveEventWithTransferredSession(event, session)) return event;
     return { ...event, table: destination.code, zone: destination.zone || "" };
   });
@@ -255,10 +280,11 @@ export function transferTableSession({ tableSessions = [], orders = [], events =
 }
 
 export function backfillLegacyTableSessions({ tableSessions = [], orders = [], events = [], tables = [], now } = {}) {
-  const repair = repairDuplicateOpenSessionReferences({
-    sessions: normalizeTableSessionList(tableSessions, { tables }),
+  const repair = repairTableSessionGraph({
+    tableSessions,
     orders,
     events,
+    tables,
     now
   });
   if (!repair.ok) {
@@ -285,6 +311,17 @@ export function backfillLegacyTableSessions({ tableSessions = [], orders = [], e
   });
 
   return { ok: true, tableSessions: nextSessions, orders: nextOrders, events: repair.events, createdSessions, repairedSessions: repair.repairedSessions };
+}
+
+export function repairTableSessionGraph({ tableSessions = [], orders = [], events = [], tables = [], now } = {}) {
+  const repair = repairDuplicateOpenSessionReferences({
+    sessions: normalizeTableSessionList(tableSessions, { tables }),
+    orders,
+    events,
+    now
+  });
+  if (repair.ok) return repair;
+  return { ...repair, tableSessions };
 }
 
 function normalizeTableSessionList(tableSessions = [], options = {}) {
@@ -327,13 +364,13 @@ function repairDuplicateOpenSessionReferences({ sessions = [], orders = [], even
   if (!canonicalByDuplicateId.size) return { ok: true, tableSessions: sessions, orders, events, repairedSessions: [] };
 
   const sessionsById = new Map(sessions.map((session) => [session.id, session]));
-  let unsafeOrder = null;
+  let unsafeRepair = null;
   const nextOrders = (orders || []).map((order) => {
     const canonical = canonicalByDuplicateId.get(order.tableSessionId);
     if (!canonical || !isOpenOrderStatus(order.status)) return order;
     const duplicate = sessionsById.get(order.tableSessionId);
     if (!canReconcileOrderToSession(order, duplicate, canonical)) {
-      unsafeOrder = order;
+      unsafeRepair = { order, duplicate, canonical };
       return order;
     }
     return {
@@ -344,14 +381,17 @@ function repairDuplicateOpenSessionReferences({ sessions = [], orders = [], even
     };
   });
 
-  if (unsafeOrder) {
+  if (unsafeRepair) {
     return {
       ok: false,
       reason: "UNSAFE_DUPLICATE_OPEN_SESSION_REPAIR",
       tableSessions: sessions,
       orders,
       events,
-      unsafeOrder
+      unsafeOrder: unsafeRepair.order,
+      unsafeSessionId: unsafeRepair.duplicate?.id || "",
+      canonicalSessionId: unsafeRepair.canonical?.id || "",
+      tableCode: unsafeRepair.duplicate?.tableCode || unsafeRepair.canonical?.tableCode || ""
     };
   }
 

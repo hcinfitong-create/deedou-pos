@@ -43,7 +43,7 @@ import {
   getActiveTableSession,
   openOrReuseTableSession,
   reconcileTableSessions,
-  selectOrdersForTableSession,
+  repairTableSessionGraph,
   transferTableSession
 } from "./src/features/table-session/index.js";
 
@@ -287,7 +287,8 @@ function pageFor(active, current) {
 
 function customerPage(token) {
   const table = tables.find((item) => item.token === token) || tables[0];
-  const activeSession = getActiveTableSession(state.tableSessions, table.code);
+  const repair = currentTableSessionRepair();
+  const activeSession = repair.ok === false ? null : getActiveTableSession(repair.tableSessions, table.code);
   const c = copy[lang];
   const period = currentPeriod();
   const visibleCategories = categories.filter((cat) => activeKind === "all" || cat.kind === activeKind);
@@ -379,6 +380,7 @@ function staffPage() {
 }
 
 function cashierPage() {
+  const repair = currentTableSessionRepair();
   const floorModels = deriveTableFloorModels({
     tables,
     tableSessions: state.tableSessions,
@@ -417,6 +419,7 @@ function cashierPage() {
         <div class="metric"><span class="muted">Paid today</span><strong>${state.orders.filter((o) => o.status === "PAID").length}</strong></div>
         <div class="metric"><span class="muted">Gross</span><strong>${formatMoney(total)}</strong></div>
       </div>
+      ${renderTableSessionRepairWarning(repair)}
       <div class="cashier-layout">
         <section class="panel section-pad">
           <h2>Sơ đồ bàn</h2>
@@ -541,6 +544,11 @@ function tablePaymentPanel(table, orders, balance) {
       </div>
     </section>
   `;
+}
+
+function renderTableSessionRepairWarning(repair) {
+  if (repair.ok !== false) return "";
+  return `<div class="empty repair-warning">Dữ liệu phiên bàn đang xung đột (${escapeHtml(repair.reason)}). Tạm khóa thao tác theo bàn để không ẩn order/yêu cầu đang mở.</div>`;
 }
 
 function counterOrderPanel(table) {
@@ -1015,6 +1023,7 @@ function deleteProduct(id) {
 function submitOrder(token) {
   if (!canSubmitCart(state.cart, productById)) return;
   const table = tables.find((item) => item.token === token) || tables[0];
+  if (blockUnsafeTableSessionMutation("ORDER_SUBMIT_BLOCKED", table.code)) return;
   const note = document.getElementById("note")?.value || "";
   const items = expandOrderLines(state.cart, productById);
   if (!items.length) return;
@@ -1068,7 +1077,8 @@ function submitOrder(token) {
 
 function serviceRequest(token, type) {
   const table = tables.find((item) => item.token === token) || tables[0];
-  const activeSession = getActiveTableSession(state.tableSessions, table.code);
+  const repair = currentTableSessionRepair();
+  const activeSession = repair.ok === false ? null : getActiveTableSession(repair.tableSessions, table.code);
   state.events.push(createServiceRequestEvent({ table, type, tableSessionId: activeSession?.id || "" }));
   audit("SERVICE_REQUEST", `${type} at table ${table.code}`);
   saveState();
@@ -1076,6 +1086,7 @@ function serviceRequest(token, type) {
 }
 
 function openTableSession(tableCode) {
+  if (blockUnsafeTableSessionMutation("TABLE_SESSION_OPEN_BLOCKED", tableCode)) return;
   const table = tables.find((item) => item.code === tableCode);
   if (!table) return;
   const result = openOrReuseTableSession(state.tableSessions, {
@@ -1093,8 +1104,11 @@ function openTableSession(tableCode) {
 }
 
 function closeActiveTableSession(sessionId) {
+  if (blockUnsafeTableSessionMutation("TABLE_SESSION_CLOSE_BLOCKED", sessionId)) return;
   const result = closeTableSession(state.tableSessions, sessionId, {
     orders: state.orders,
+    events: state.events,
+    tables,
     now: new Date().toISOString()
   });
   if (!result.ok) {
@@ -1105,12 +1119,15 @@ function closeActiveTableSession(sessionId) {
     return;
   }
   state.tableSessions = result.tableSessions;
+  state.orders = result.orders || state.orders;
+  state.events = result.events || state.events;
   audit("TABLE_SESSION_CLOSE", `${sessionId} closed`);
   saveState();
   render();
 }
 
 function transferActiveTableSession(sessionId, toTableCode) {
+  if (blockUnsafeTableSessionMutation("TABLE_SESSION_TRANSFER_BLOCKED", `${sessionId} -> ${toTableCode}`)) return;
   const destination = tables.find((table) => table.code === toTableCode);
   const result = transferTableSession({
     tableSessions: state.tableSessions,
@@ -1191,6 +1208,7 @@ function submitCounterOrder() {
   });
   let sessionResult = null;
   if (serviceContext.serviceMode === SERVICE_MODES.TABLE_SERVICE) {
+    if (blockUnsafeTableSessionMutation("COUNTER_ORDER_SUBMIT_BLOCKED", tableCode)) return;
     sessionResult = openOrReuseTableSession(state.tableSessions, {
       table,
       source: ORDER_SOURCES.COUNTER,
@@ -1272,10 +1290,18 @@ function appendPayment(order, method, amount, idPrefix = "PAY") {
 
 function reconcileOpenTableSessions(reason = "") {
   const result = reconcileTableSessions(state.tableSessions, state.orders, {
+    events: state.events,
+    tables,
     now: new Date().toISOString()
   });
-  if (!result.closedSessions.length) return [];
+  if (!result.ok) {
+    audit("TABLE_SESSION_RECONCILE_BLOCKED", `${result.reason}${reason ? ` after ${reason}` : ""}`);
+    return [];
+  }
   state.tableSessions = result.tableSessions;
+  state.orders = result.orders || state.orders;
+  state.events = result.events || state.events;
+  if (!result.closedSessions.length) return [];
   result.closedSessions.forEach((session) => {
     audit("TABLE_SESSION_RECONCILE", `${session.id} Table ${session.tableCode}${reason ? ` after ${reason}` : ""}`);
   });
@@ -1287,6 +1313,7 @@ function payableTableOrders(tableCode) {
 }
 
 function payTable(tableCode, method) {
+  if (blockUnsafeTableSessionMutation("TABLE_PAYMENT_BLOCKED", tableCode)) return;
   const orders = payableTableOrders(tableCode);
   const balance = orders.reduce((sum, order) => sum + orderBalance(order), 0);
   if (!balance) return;
@@ -1303,6 +1330,7 @@ function payTable(tableCode, method) {
 }
 
 function splitTableInTwo(tableCode) {
+  if (blockUnsafeTableSessionMutation("TABLE_SPLIT_BLOCKED", tableCode)) return;
   const orders = payableTableOrders(tableCode);
   const balance = orders.reduce((sum, order) => sum + orderBalance(order), 0);
   if (!balance) return;
@@ -1331,6 +1359,7 @@ function splitTableInTwo(tableCode) {
 }
 
 function preBillTable(tableCode) {
+  if (blockUnsafeTableSessionMutation("TABLE_PRE_BILL_BLOCKED", tableCode)) return;
   const orders = tableOrders(tableCode);
   if (!orders.length) return;
   const balance = orders.reduce((sum, order) => sum + orderBalance(order), 0);
@@ -1340,6 +1369,7 @@ function preBillTable(tableCode) {
 }
 
 function voidTable(tableCode) {
+  if (blockUnsafeTableSessionMutation("TABLE_VOID_BLOCKED", tableCode)) return;
   const orders = tableOrders(tableCode);
   if (!orders.length) return;
   const reason = prompt(`Lý do void toàn bộ bill bàn ${tableCode}?`);
@@ -1356,6 +1386,7 @@ function voidTable(tableCode) {
 }
 
 function refundTable(tableCode) {
+  if (blockUnsafeTableSessionMutation("TABLE_REFUND_BLOCKED", tableCode)) return;
   const orders = tableOrders(tableCode).filter((order) => (order.paidVnd || 0) > 0);
   const paid = orders.reduce((sum, order) => sum + (order.paidVnd || 0), 0);
   if (!paid) return;
@@ -1556,9 +1587,32 @@ function tableOrders(tableCode) {
         && context.fulfillmentType === FULFILLMENT_TYPES.TAKEAWAY;
     });
   }
-  const activeSession = getActiveTableSession(state.tableSessions, tableCode);
-  if (!activeSession) return [];
-  return selectOrdersForTableSession(state.orders, activeSession).filter((order) => isOpenOrderStatus(order.status));
+  const model = deriveTableFloorModels({
+    tables,
+    tableSessions: state.tableSessions,
+    orders: state.orders,
+    events: state.events
+  }).find((item) => item.tableCode === tableCode);
+  return (model?.orders || []).filter((order) => isOpenOrderStatus(order.status));
+}
+
+function currentTableSessionRepair() {
+  return repairTableSessionGraph({
+    tableSessions: state.tableSessions,
+    orders: state.orders,
+    events: state.events,
+    tables
+  });
+}
+
+function blockUnsafeTableSessionMutation(action, target = "") {
+  const repair = currentTableSessionRepair();
+  if (repair.ok !== false) return false;
+  audit(action, `${target ? `${target}: ` : ""}${repair.reason}`);
+  alert("Dữ liệu phiên bàn đang xung đột. Tạm khóa thao tác theo bàn để không mất order hoặc yêu cầu đang mở.");
+  saveState();
+  render();
+  return true;
 }
 
 function zoneNames() {
