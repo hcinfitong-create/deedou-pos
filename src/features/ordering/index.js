@@ -339,17 +339,6 @@ export function applyOrderStatusTransition(order, nextStatus, options = {}) {
     });
   }
   if (to === "IN_PREPARATION") {
-    setOrderTimestamp(order, "prepStartedAt", now);
-    const stationStatus = order.stationStatus || stationStatusFor(order.items, "QUEUED");
-    order.stationStatus = stationStatus;
-    Object.keys(stationStatus).forEach((station) => {
-      if (stationStatus[station] === "QUEUED") stationStatus[station] = "PREPARING";
-    });
-    nonComboItems(order).filter((item) => normalizePrepStatus(item.prepStatus || item.status) === "QUEUED").forEach((item) => {
-      item.status = "PREPARING";
-      item.prepStatus = "PREPARING";
-      if (!item.prepStartedAt) item.prepStartedAt = normalizeIsoTimestamp(now) || now;
-    });
     order.stationStatus = stationStatusFor(order.items);
   }
   if (to === "REJECTED") order.stationStatus = {};

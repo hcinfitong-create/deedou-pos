@@ -99,7 +99,6 @@ test("staff action presentation follows ordering transition rules", () => {
     { status: "REJECTED", label: "Reject", tone: "danger" }
   ]);
   assert.deepEqual(staffOrderActions({ status: "ACCEPTED" }), [
-    { status: "IN_PREPARATION", label: "Send to prep", tone: "primary" },
     { status: "REJECTED", label: "Reject", tone: "danger" }
   ]);
   assert.deepEqual(staffOrderActions({ status: "IN_PREPARATION" }), []);

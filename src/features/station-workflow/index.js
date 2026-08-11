@@ -2,9 +2,9 @@ import {
   applyPrepStatusTransition,
   canTransitionPrepStatus,
   FULFILLMENT_TYPES,
-  isOpenOrderStatus,
   isRequiredStationLine,
   normalizeOrderServiceContext,
+  normalizeOrderStatus,
   normalizePrepStatus,
   SERVICE_MODES
 } from "../ordering/index.js";
@@ -17,6 +17,7 @@ const STATION_ACTIONS = Object.freeze({
   ACKNOWLEDGED: Object.freeze({ status: "PREPARING", label: "Start" }),
   PREPARING: Object.freeze({ status: "READY", label: "Ready" })
 });
+const STATION_ELIGIBLE_ORDER_STATUSES = Object.freeze(["ACCEPTED", "IN_PREPARATION", "READY"]);
 
 export function selectStationTickets(orders = [], stationGroup, stationDefinitions = [], options = {}) {
   const stationMap = new Map((stationDefinitions || [])
@@ -25,7 +26,7 @@ export function selectStationTickets(orders = [], stationGroup, stationDefinitio
   const stationCodes = new Set(stationMap.keys());
   const now = options.now || new Date();
 
-  return (orders || []).filter((order) => isOpenOrderStatus(order.status)).flatMap((order) => {
+  return (orders || []).filter(isStationWorkflowEligible).flatMap((order) => {
     return [...stationCodes].map((stationCode) => {
       const lines = (order.items || []).filter((line) => {
         return isRequiredStationLine(line)
@@ -52,6 +53,10 @@ export function selectStationTickets(orders = [], stationGroup, stationDefinitio
       };
     }).filter(Boolean);
   });
+}
+
+function isStationWorkflowEligible(order = {}) {
+  return STATION_ELIGIBLE_ORDER_STATUSES.includes(normalizeOrderStatus(order.status));
 }
 
 export function deriveStationTicketState(ticketOrLines = []) {

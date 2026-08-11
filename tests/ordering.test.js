@@ -137,7 +137,7 @@ test("rejected orders reject further direct transitions without mutation", () =>
   });
 });
 
-test("valid direct order status transitions preserve station side effects", () => {
+test("valid direct order status transitions keep KDS prep mutations authoritative", () => {
   const order = {
     status: "PENDING_ACCEPTANCE",
     stationStatus: {},
@@ -155,8 +155,10 @@ test("valid direct order status transitions preserve station side effects", () =
 
   assert.equal(applyOrderStatusTransition(order, "IN_PREPARATION").ok, true);
   assert.equal(order.status, "IN_PREPARATION");
-  assert.deepEqual(order.stationStatus, { BAR_TEA: "PREPARING", KITCHEN_HOT: "PREPARING" });
-  assert.deepEqual(order.items.map((item) => item.status), ["QUEUED", "PREPARING", "PREPARING"]);
+  assert.deepEqual(order.stationStatus, { BAR_TEA: "QUEUED", KITCHEN_HOT: "QUEUED" });
+  assert.deepEqual(order.items.map((item) => item.status), ["QUEUED", "QUEUED", "QUEUED"]);
+  assert.deepEqual(order.items.map((item) => item.prepStatus), [undefined, "QUEUED", "QUEUED"]);
+  assert.equal(order.prepStartedAt, undefined);
 });
 
 test("accepted orders can be rejected with existing rejection side effects", () => {
@@ -314,7 +316,24 @@ test("prep status transitions are sequential and cannot set served", () => {
   assert.equal(canTransitionPrepStatus("ACKNOWLEDGED", "PREPARING"), true);
   assert.equal(canTransitionPrepStatus("PREPARING", "READY"), true);
   assert.equal(canTransitionPrepStatus("QUEUED", "READY"), false);
+  assert.equal(canTransitionPrepStatus("QUEUED", "PREPARING"), false);
   assert.equal(canTransitionPrepStatus("READY", "SERVED"), false);
+});
+
+test("first KDS acknowledge moves accepted order to preparation without skipping prep states", () => {
+  const order = {
+    status: "ACCEPTED",
+    stationStatus: { BAR_TEA: "QUEUED" },
+    items: [{ lineId: "tea-1", id: "tea", station: "BAR_TEA", qty: 1, status: "QUEUED", prepStatus: "QUEUED", servedQty: 0 }]
+  };
+
+  const update = applyPrepStatusTransition(order, { stationCode: "BAR_TEA" }, "ACKNOWLEDGED", { now: "2026-08-11T00:10:00.000Z" });
+
+  assert.equal(update.ok, true);
+  assert.equal(order.status, "IN_PREPARATION");
+  assert.deepEqual(order.stationStatus, { BAR_TEA: "ACKNOWLEDGED" });
+  assert.equal(order.items[0].prepStatus, "ACKNOWLEDGED");
+  assert.equal(order.items[0].status, "ACKNOWLEDGED");
 });
 
 test("invalid prep skip does not mutate the order", () => {

@@ -23,6 +23,25 @@ test("station workflow exports prep transition guards without served action", ()
   assert.equal(canTransitionPrepStatus("PREPARING", "SERVED"), false);
 });
 
+test("station tickets exclude pending QR orders until staff accepts them", () => {
+  const pendingOrder = {
+    id: "pending-qr",
+    orderNo: "D01-0009",
+    status: "PENDING_ACCEPTANCE",
+    table: "A01",
+    serviceMode: "TABLE_SERVICE",
+    fulfillmentType: "DINE_IN",
+    items: [
+      { lineId: "coffee", station: "BAR_COFFEE", qty: 1, nameVi: "Cà phê", nameEn: "Coffee", prepStatus: "QUEUED", status: "QUEUED" }
+    ]
+  };
+
+  assert.deepEqual(selectStationTickets([pendingOrder], "BAR", stations), []);
+
+  const acceptedOrder = { ...pendingOrder, status: "ACCEPTED" };
+  assert.deepEqual(selectStationTickets([acceptedOrder], "BAR", stations).map((ticket) => ticket.orderId), ["pending-qr"]);
+});
+
 test("station tickets keep BAR_COFFEE and BAR_TEA independently accountable", () => {
   const orders = [{
     id: "order-1",
