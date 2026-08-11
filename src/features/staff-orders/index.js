@@ -11,6 +11,7 @@ import {
   ORDER_SOURCES,
   SERVICE_MODES
 } from "../ordering/index.js";
+import { selectOpenTableSessions } from "../table-session/index.js";
 import { escapeAttr, escapeHtml, formatMoney } from "../../shared/utils/index.js";
 
 export const STAFF_ORDER_COLUMNS = ["PENDING_ACCEPTANCE", "ACCEPTED", "IN_PREPARATION", "READY", "SERVED"];
@@ -23,8 +24,8 @@ const STAFF_ACTION_COPY = {
   PAID: { label: "Paid and close", tone: "primary" }
 };
 
-export function staffOrderMetrics({ orders = [], events = [] } = {}) {
-  const openTablesByZone = selectOpenTablesByPhysicalZone(orders);
+export function staffOrderMetrics({ orders = [], events = [], tableSessions = [] } = {}) {
+  const openTablesByZone = selectOpenTablesByPhysicalZone(orders, tableSessions);
   return {
     newOrders: selectNewOrders(orders).length,
     tableServiceOpenOrders: selectTableServiceOpenOrders(orders).length,
@@ -78,7 +79,17 @@ export function selectUnresolvedServiceRequests(events = []) {
   return events.filter((event) => !event.done);
 }
 
-export function selectOpenTablesByPhysicalZone(orders = []) {
+export function selectOpenTablesByPhysicalZone(orders = [], tableSessions = []) {
+  const openSessions = selectOpenTableSessions(tableSessions);
+  if (openSessions.length || tableSessions.length) {
+    return openSessions.reduce((zones, session) => {
+      const zone = session.zone || "Unassigned";
+      zones[zone] = zones[zone] || [];
+      if (!zones[zone].includes(session.tableCode)) zones[zone].push(session.tableCode);
+      zones[zone].sort();
+      return zones;
+    }, {});
+  }
   return selectTableServiceOpenOrders(orders).filter(isOpenPhysicalTableOrder).reduce((zones, order) => {
     const context = normalizeOrderServiceContext(order);
     const zone = context.zone || "Unassigned";
@@ -105,8 +116,8 @@ export function staffOrderActions(order) {
   }));
 }
 
-export function renderStaffPage({ orders = [], events = [] } = {}) {
-  const metrics = staffOrderMetrics({ orders, events });
+export function renderStaffPage({ orders = [], events = [], tableSessions = [] } = {}) {
+  const metrics = staffOrderMetrics({ orders, events, tableSessions });
   const columns = ordersByStaffColumn(orders);
   return `
     <section class="page">

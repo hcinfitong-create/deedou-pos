@@ -7,13 +7,21 @@ export function renderCustomerServiceActions(copy) {
   `;
 }
 
-export function createServiceRequestEvent({ table, type }) {
-  return {
-    id: `E${Date.now().toString().slice(-6)}`,
+export function createServiceRequestEvent({ table, type, tableSessionId = "", now = new Date(), generateId } = {}) {
+  const timestamp = new Date(now);
+  const id = typeof generateId === "function"
+    ? generateId({ table, type, tableSessionId, now })
+    : `E${timestamp.getTime().toString().slice(-6)}`;
+  const event = {
+    id,
     type,
     table: table.code,
     done: false,
-    time: new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
+    time: timestamp.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
+  };
+  if (table.zone) event.zone = table.zone;
+  if (tableSessionId) event.tableSessionId = tableSessionId;
+  return {
+    ...event
   };
 }
-

@@ -10,6 +10,7 @@ Owns customer service request UI and event creation.
 - Customer "request bill" action.
 - Service request event shape for the local-first app.
 - Initial pending/done state for a customer service request.
+- Optional `tableSessionId` association when the app has an active table session.
 
 ## Does Not Own
 
@@ -26,6 +27,8 @@ Import from `src/features/service-requests/index.js`.
 
 None. Table context is passed in by the app composition layer.
 
+DD-004 session context is also passed in by the app composition layer; this module does not create, close, or transfer table sessions.
+
 ## Database Tables Used
 
 None. Current persistence is browser `localStorage`.
@@ -40,5 +43,4 @@ Do not add payment-side behavior to `REQUEST_BILL`; it is only a customer servic
 
 ## Tests
 
-No module tests yet.
-
+Module tests cover customer action rendering, deterministic event creation, session-aware request IDs, and legacy requests without `tableSessionId`.

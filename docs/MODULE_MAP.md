@@ -130,11 +130,26 @@ Current files:
 Owns:
 
 - Business meaning of an active dining visit at a table.
-- Opening, viewing, closing, and transferring table context when implemented.
+- Table session normalization.
+- Open/reuse rules and the one-open-session-per-table invariant.
+- Stable session identity with injectable generation for tests.
+- Attaching table-service order batches to an active session.
+- Selecting active sessions, session orders, and floor-plan view models.
+- Deterministic close/reconciliation.
+- Table transfer to a vacant physical table.
+- Legacy active table-order runtime backfill.
 
 Current location:
 
-- Not yet implemented as a distinct data object. Table state is inferred from open orders.
+- `src/features/table-session/index.js`
+
+Does not own:
+
+- Physical table CRUD or QR token regeneration.
+- Payment, split, refund, or void business rules.
+- Station/KDS preparation.
+- Item-level serving.
+- Persistence, audit logging, DOM binding, realtime sync, or table merge/join.
 
 ### staff-orders
 
@@ -356,6 +371,7 @@ After Phase B:
 - `src/features/service-requests/index.js`
 - `src/features/staff-orders/index.js`
 - `src/features/station-workflow/index.js`
+- `src/features/table-session/index.js`
 
 ## Protected Modules By Common Task
 
@@ -378,3 +394,8 @@ Change station workflow:
 
 - Target: `station-workflow`, `staff-orders`, and `ordering` status/service contracts
 - Protected: `customer-menu`, `admin-menu`, `payments` unless status affects payable state
+
+Change table session or floor occupancy:
+
+- Target: `table-session` plus app shell wiring for persistence/audit/DOM
+- Protected: `station-workflow`, item-level serving, payment provider/split/refund rules, menu/admin CRUD, physical table CRUD, and table merge/join

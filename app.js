@@ -35,6 +35,17 @@ import { renderCustomerOrderStatusStrip } from "./src/features/customer-orders/i
 import { createServiceRequestEvent, renderCustomerServiceActions } from "./src/features/service-requests/index.js";
 import { renderStaffPage } from "./src/features/staff-orders/index.js";
 import { applyPrepStatusTransition, renderStationPage } from "./src/features/station-workflow/index.js";
+import {
+  attachOrderToTableSession,
+  backfillLegacyTableSessions,
+  closeTableSession,
+  deriveTableFloorModels,
+  getActiveTableSession,
+  openOrReuseTableSession,
+  reconcileTableSessions,
+  repairTableSessionGraph,
+  transferTableSession
+} from "./src/features/table-session/index.js";
 
 let products = loadProducts();
 let state = loadState();
@@ -66,7 +77,11 @@ render();
 function loadState() {
   const saved = localStorage.getItem(STATE_KEY);
   if (saved) return normalizeState(JSON.parse(saved));
-  return { cart: [], orders: [], events: [], audit: [], sequence: 1 };
+  return defaultState();
+}
+
+function defaultState() {
+  return { cart: [], orders: [], events: [], audit: [], sequence: 1, tableSessions: [] };
 }
 
 function emptyCounterDraft() {
@@ -85,12 +100,22 @@ function saveCounterDraft() {
 }
 
 function normalizeState(value) {
+  const orders = (value.orders || []).map(normalizeOrder);
+  const events = value.events || [];
+  const backfilled = backfillLegacyTableSessions({
+    tableSessions: value.tableSessions || [],
+    orders,
+    events,
+    tables
+  });
+  const repairFailed = backfilled.ok === false;
   return {
     cart: value.cart || [],
-    orders: (value.orders || []).map(normalizeOrder),
-    events: value.events || [],
+    orders: repairFailed ? orders : backfilled.orders,
+    events: repairFailed ? events : backfilled.events,
     audit: value.audit || [],
-    sequence: value.sequence || Math.max(1, (value.orders || []).length + 1)
+    sequence: value.sequence || Math.max(1, (value.orders || []).length + 1),
+    tableSessions: backfilled.tableSessions
   };
 }
 
@@ -262,6 +287,8 @@ function pageFor(active, current) {
 
 function customerPage(token) {
   const table = tables.find((item) => item.token === token) || tables[0];
+  const repair = currentTableSessionRepair();
+  const activeSession = repair.ok === false ? null : getActiveTableSession(repair.tableSessions, table.code);
   const c = copy[lang];
   const period = currentPeriod();
   const visibleCategories = categories.filter((cat) => activeKind === "all" || cat.kind === activeKind);
@@ -297,7 +324,7 @@ function customerPage(token) {
         lang,
         copy: c,
         productById,
-        orderStatusHtml: renderCustomerOrderStatusStrip({ orders: state.orders, tableCode: table.code, lang, copy })
+        orderStatusHtml: renderCustomerOrderStatusStrip({ orders: state.orders, tableSessionId: activeSession?.id || "", lang, copy })
       })}
     </section>
   `;
@@ -349,15 +376,30 @@ function productVisual(item) {
 }
 
 function staffPage() {
-  return renderStaffPage({ orders: state.orders, events: state.events });
+  return renderStaffPage({ orders: state.orders, events: state.events, tableSessions: state.tableSessions });
 }
 
 function cashierPage() {
+  const repair = currentTableSessionRepair();
+  const floorModels = deriveTableFloorModels({
+    tables,
+    tableSessions: state.tableSessions,
+    orders: state.orders,
+    events: state.events
+  });
   const openOrders = state.orders.filter((order) => !["PAID", "REJECTED", "VOIDED"].includes(order.status));
-  const openTables = tables.filter((table) => tableOrders(table.code).length);
+  const openTables = floorModels.filter((model) => model.occupied);
   if (!tables.some((table) => table.code === activeCashierTable) && activeCashierTable !== "TAKEAWAY") activeCashierTable = tables[0].code;
+  const selectedModel = floorModels.find((model) => model.tableCode === activeCashierTable) || {
+    table: { code: activeCashierTable, zone: "Takeaway" },
+    tableCode: activeCashierTable,
+    zone: "Takeaway",
+    occupied: false,
+    session: null,
+    sessionId: "",
+    orders: []
+  };
   const selectedOrders = tableOrders(activeCashierTable);
-  const selectedTable = tables.find((table) => table.code === activeCashierTable) || { code: activeCashierTable, zone: "Takeaway" };
   const paidOrders = state.orders.filter((order) => ["PAID", "VOIDED"].includes(order.status)).slice(-6).reverse();
   const total = state.orders.filter((order) => order.status !== "REJECTED").reduce((sum, order) => sum + order.total, 0);
   return `
@@ -377,6 +419,7 @@ function cashierPage() {
         <div class="metric"><span class="muted">Paid today</span><strong>${state.orders.filter((o) => o.status === "PAID").length}</strong></div>
         <div class="metric"><span class="muted">Gross</span><strong>${formatMoney(total)}</strong></div>
       </div>
+      ${renderTableSessionRepairWarning(repair)}
       <div class="cashier-layout">
         <section class="panel section-pad">
           <h2>Sơ đồ bàn</h2>
@@ -385,14 +428,14 @@ function cashierPage() {
               <section class="zone-section">
                 <div class="zone-title">${zoneLabel(zone)}</div>
                 <div class="table-map">
-                  ${tables.filter((table) => table.zone === zone).map(tableTile).join("")}
+                  ${floorModels.filter((model) => model.zone === zone).map(tableTile).join("")}
                 </div>
               </section>
             `).join("")}
           </div>
         </section>
         <section class="panel section-pad">
-          ${cashierTableDetail(selectedTable, selectedOrders)}
+          ${cashierTableDetail(selectedModel, selectedOrders)}
         </section>
       </div>
       <section class="panel section-pad">
@@ -411,37 +454,44 @@ function cashierPage() {
   `;
 }
 
-function tableTile(table) {
-  const orders = tableOrders(table.code);
-  const total = orders.reduce((sum, order) => sum + order.total - (order.paidVnd || 0), 0);
-  const served = countServedItems(orders);
-  const totalItems = countPrepItems(orders);
+function tableTile(model) {
+  const table = model.table;
+  const details = [];
+  if (model.pendingQrCount) details.push(`${model.pendingQrCount} QR`);
+  if (model.billRequestCount) details.push("Xin bill");
+  else if (model.unresolvedRequestCount) details.push(`${model.unresolvedRequestCount} yêu cầu`);
   return `
-    <button class="table-tile ${orders.length ? "busy" : ""} ${activeCashierTable === table.code ? "selected" : ""}" data-select-table="${table.code}">
+    <button class="table-tile ${model.occupied ? "busy" : ""} ${activeCashierTable === table.code ? "selected" : ""}" data-select-table="${table.code}">
       <strong>${table.code}</strong>
       <span>${zoneLabel(table.zone)}</span>
-      <small>${orders.length ? `${orders.length} batch - ${formatMoney(total)}` : "Trống"}</small>
-      ${orders.length ? `<small>${served}/${totalItems} món đã phục vụ</small>` : ""}
+      <small>${model.occupied ? `${model.orderBatchCount} batch - ${formatMoney(model.outstandingBalance)}` : "Trống"}</small>
+      ${model.occupied ? `<small>${model.servedQty}/${model.serviceableQty} món đã phục vụ</small>` : ""}
+      ${details.length ? `<small>${details.join(" · ")}</small>` : ""}
     </button>
   `;
 }
 
-function cashierTableDetail(table, orders) {
-  const balance = orders.reduce((sum, order) => sum + order.total - (order.paidVnd || 0), 0);
-  const served = countServedItems(orders);
-  const ready = countStatusItems(orders, "READY");
-  const preparing = countStatusItems(orders, "PREPARING") + countStatusItems(orders, "ACKNOWLEDGED") + countStatusItems(orders, "QUEUED");
+function cashierTableDetail(model, orders) {
+  const table = model.table;
+  const balance = model.outstandingBalance ?? orders.reduce((sum, order) => sum + order.total - (order.paidVnd || 0), 0);
+  const served = model.servedQty ?? countServedItems(orders);
+  const totalItems = model.serviceableQty ?? countPrepItems(orders);
+  const ready = model.readyCount ?? countStatusItems(orders, "READY");
+  const preparing = model.preparingCount ?? countStatusItems(orders, "PREPARING") + countStatusItems(orders, "ACKNOWLEDGED") + countStatusItems(orders, "QUEUED");
   return `
     <div class="order-head table-detail-head">
       <div>
         <h2>Chi tiết bàn ${table.code}</h2>
-        <p class="muted">${zoneLabel(table.zone)} - ${orders.length ? "Đang có khách" : "Chưa mở bàn"}</p>
+        <p class="muted">${zoneLabel(table.zone)} - ${model.occupied ? `Phiên ${escapeHtml(model.sessionId)}` : "Chưa mở bàn"}</p>
       </div>
-      <button class="primary" data-counter-open="${table.code}">Gọi món tại quầy</button>
+      <div class="split-actions compact-actions">
+        <button class="primary" data-counter-open="${table.code}">Gọi món tại quầy</button>
+        ${renderTableSessionControls(model)}
+      </div>
     </div>
     <div class="reconcile-grid">
       <div class="metric"><span class="muted">Order batches</span><strong>${orders.length}</strong></div>
-      <div class="metric"><span class="muted">Đã phục vụ</span><strong>${served}</strong></div>
+      <div class="metric"><span class="muted">Đã phục vụ</span><strong>${served}/${totalItems}</strong></div>
       <div class="metric"><span class="muted">Đang chờ/bếp</span><strong>${preparing}</strong></div>
       <div class="metric"><span class="muted">Sẵn sàng</span><strong>${ready}</strong></div>
       <div class="metric"><span class="muted">Còn phải thu</span><strong>${formatMoney(balance)}</strong></div>
@@ -451,6 +501,16 @@ function cashierTableDetail(table, orders) {
       ${orders.map(cashierOrderCard).join("") || `<div class="empty">Bàn này chưa có order. Bấm “Gọi món tại quầy” nếu khách gọi trực tiếp, hoặc chờ khách QR order.</div>`}
     </div>
     ${orders.length ? tablePaymentPanel(table, orders, balance) : ""}
+  `;
+}
+
+function renderTableSessionControls(model) {
+  if (model.table.code === "TAKEAWAY") return "";
+  if (!model.session) return `<button class="ghost" data-open-session="${model.table.code}">Mở bàn</button>`;
+  const targets = tables.filter((table) => table.code !== model.table.code);
+  return `
+    <button class="ghost" data-close-session="${escapeAttr(model.session.id)}">Đóng phiên</button>
+    ${targets.map((table) => `<button class="ghost" data-transfer-session="${escapeAttr(model.session.id)}" data-transfer-to="${escapeAttr(table.code)}">Chuyển ${table.code}</button>`).join("")}
   `;
 }
 
@@ -484,6 +544,11 @@ function tablePaymentPanel(table, orders, balance) {
       </div>
     </section>
   `;
+}
+
+function renderTableSessionRepairWarning(repair) {
+  if (repair.ok !== false) return "";
+  return `<div class="empty repair-warning">Dữ liệu phiên bàn đang xung đột (${escapeHtml(repair.reason)}). Tạm khóa thao tác theo bàn để không ẩn order/yêu cầu đang mở.</div>`;
 }
 
 function counterOrderPanel(table) {
@@ -817,6 +882,9 @@ function bindCashier() {
   document.querySelectorAll("[data-table-void]").forEach((button) => button.addEventListener("click", () => voidTable(button.dataset.tableVoid)));
   document.querySelectorAll("[data-table-refund]").forEach((button) => button.addEventListener("click", () => refundTable(button.dataset.tableRefund)));
   document.querySelectorAll("[data-select-table]").forEach((button) => button.addEventListener("click", () => selectCashierTable(button.dataset.selectTable)));
+  document.querySelectorAll("[data-open-session]").forEach((button) => button.addEventListener("click", () => openTableSession(button.dataset.openSession)));
+  document.querySelectorAll("[data-close-session]").forEach((button) => button.addEventListener("click", () => closeActiveTableSession(button.dataset.closeSession)));
+  document.querySelectorAll("[data-transfer-session]").forEach((button) => button.addEventListener("click", () => transferActiveTableSession(button.dataset.transferSession, button.dataset.transferTo)));
   document.querySelectorAll("[data-counter-open]").forEach((button) => button.addEventListener("click", () => openCounterOrder(button.dataset.counterOpen)));
   document.querySelectorAll("[data-counter-add]").forEach((button) => button.addEventListener("click", () => addCounterItem(button.dataset.counterAdd)));
   document.querySelectorAll("[data-counter-inc]").forEach((button) => button.addEventListener("click", () => addCounterItem(button.dataset.counterInc)));
@@ -955,6 +1023,7 @@ function deleteProduct(id) {
 function submitOrder(token) {
   if (!canSubmitCart(state.cart, productById)) return;
   const table = tables.find((item) => item.token === token) || tables[0];
+  if (blockUnsafeTableSessionMutation("ORDER_SUBMIT_BLOCKED", table.code)) return;
   const note = document.getElementById("note")?.value || "";
   const items = expandOrderLines(state.cart, productById);
   if (!items.length) return;
@@ -969,7 +1038,13 @@ function submitOrder(token) {
     zone: table.zone
   });
   if (!validateOrderServiceContext(serviceContext).ok) return;
-  state.orders.push({
+  const sessionResult = openOrReuseTableSession(state.tableSessions, {
+    table,
+    source: ORDER_SOURCES.CUSTOMER_QR,
+    now
+  });
+  if (!sessionResult.ok) return;
+  const order = {
     id: `D${Date.now().toString().slice(-6)}`,
     orderNo,
     ...serviceContext,
@@ -988,8 +1063,13 @@ function submitOrder(token) {
     readyAt: "",
     servedAt: "",
     time: new Date(now).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
-  });
+  };
+  const attached = attachOrderToTableSession(order, sessionResult.session);
+  if (!attached.ok) return;
+  state.tableSessions = sessionResult.tableSessions;
+  state.orders.push(attached.order);
   state.cart = clearCart();
+  audit(sessionResult.created ? "TABLE_SESSION_OPEN" : "TABLE_SESSION_REUSE", `${sessionResult.session.id} Table ${table.code}`);
   audit("ORDER_SUBMIT", `${orderNo} Table ${table.code} submitted ${formatMoney(total)}`);
   saveState();
   render();
@@ -997,8 +1077,79 @@ function submitOrder(token) {
 
 function serviceRequest(token, type) {
   const table = tables.find((item) => item.token === token) || tables[0];
-  state.events.push(createServiceRequestEvent({ table, type }));
+  const repair = currentTableSessionRepair();
+  const activeSession = repair.ok === false ? null : getActiveTableSession(repair.tableSessions, table.code);
+  state.events.push(createServiceRequestEvent({ table, type, tableSessionId: activeSession?.id || "" }));
   audit("SERVICE_REQUEST", `${type} at table ${table.code}`);
+  saveState();
+  render();
+}
+
+function openTableSession(tableCode) {
+  if (blockUnsafeTableSessionMutation("TABLE_SESSION_OPEN_BLOCKED", tableCode)) return;
+  const table = tables.find((item) => item.code === tableCode);
+  if (!table) return;
+  const result = openOrReuseTableSession(state.tableSessions, {
+    table,
+    source: "STAFF",
+    now: new Date().toISOString()
+  });
+  if (!result.ok) return;
+  state.tableSessions = result.tableSessions;
+  activeCashierTable = table.code;
+  localStorage.setItem("deedou_cashier_table", activeCashierTable);
+  audit(result.created ? "TABLE_SESSION_OPEN" : "TABLE_SESSION_REUSE", `${result.session.id} Table ${table.code}`);
+  saveState();
+  render();
+}
+
+function closeActiveTableSession(sessionId) {
+  if (blockUnsafeTableSessionMutation("TABLE_SESSION_CLOSE_BLOCKED", sessionId)) return;
+  const result = closeTableSession(state.tableSessions, sessionId, {
+    orders: state.orders,
+    events: state.events,
+    tables,
+    now: new Date().toISOString()
+  });
+  if (!result.ok) {
+    audit("TABLE_SESSION_CLOSE_BLOCKED", `${sessionId}: ${result.reason}`);
+    alert(result.reason === "ACTIVE_ORDERS" ? "Phiên bàn còn order đang mở, chưa thể đóng." : "Không thể đóng phiên bàn.");
+    saveState();
+    render();
+    return;
+  }
+  state.tableSessions = result.tableSessions;
+  state.orders = result.orders || state.orders;
+  state.events = result.events || state.events;
+  audit("TABLE_SESSION_CLOSE", `${sessionId} closed`);
+  saveState();
+  render();
+}
+
+function transferActiveTableSession(sessionId, toTableCode) {
+  if (blockUnsafeTableSessionMutation("TABLE_SESSION_TRANSFER_BLOCKED", `${sessionId} -> ${toTableCode}`)) return;
+  const destination = tables.find((table) => table.code === toTableCode);
+  const result = transferTableSession({
+    tableSessions: state.tableSessions,
+    orders: state.orders,
+    events: state.events,
+    sessionId,
+    toTable: destination,
+    tables
+  });
+  if (!result.ok) {
+    audit("TABLE_SESSION_TRANSFER_BLOCKED", `${sessionId} -> ${toTableCode}: ${result.reason}`);
+    alert(result.reason === "DESTINATION_OCCUPIED" ? "Bàn đích đang có khách, không thể chuyển." : "Không thể chuyển bàn.");
+    saveState();
+    render();
+    return;
+  }
+  state.tableSessions = result.tableSessions;
+  state.orders = result.orders;
+  state.events = result.events;
+  activeCashierTable = result.toTableCode;
+  localStorage.setItem("deedou_cashier_table", activeCashierTable);
+  audit("TABLE_SESSION_TRANSFER", `${sessionId}: ${result.fromTableCode} -> ${result.toTableCode}`);
   saveState();
   render();
 }
@@ -1055,7 +1206,17 @@ function submitCounterOrder() {
   items.forEach((line) => {
     if (!line.queuedAt) line.queuedAt = now;
   });
-  state.orders.push({
+  let sessionResult = null;
+  if (serviceContext.serviceMode === SERVICE_MODES.TABLE_SERVICE) {
+    if (blockUnsafeTableSessionMutation("COUNTER_ORDER_SUBMIT_BLOCKED", tableCode)) return;
+    sessionResult = openOrReuseTableSession(state.tableSessions, {
+      table,
+      source: ORDER_SOURCES.COUNTER,
+      now
+    });
+    if (!sessionResult.ok) return;
+  }
+  const order = {
     id: `D${Date.now().toString().slice(-6)}`,
     orderNo,
     ...serviceContext,
@@ -1074,7 +1235,14 @@ function submitCounterOrder() {
     readyAt: "",
     servedAt: "",
     time: new Date(now).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
-  });
+  };
+  const attached = attachOrderToTableSession(order, sessionResult?.session || null);
+  if (!attached.ok) return;
+  if (sessionResult) {
+    state.tableSessions = sessionResult.tableSessions;
+    audit(sessionResult.created ? "TABLE_SESSION_OPEN" : "TABLE_SESSION_REUSE", `${sessionResult.session.id} Table ${table.code}`);
+  }
+  state.orders.push(attached.order);
   audit("COUNTER_ORDER_SUBMIT", `${orderNo} ${tableCode} ${formatMoney(total)}`);
   counterDraft = emptyCounterDraft();
   counterSearch = "";
@@ -1120,11 +1288,32 @@ function appendPayment(order, method, amount, idPrefix = "PAY") {
   });
 }
 
+function reconcileOpenTableSessions(reason = "") {
+  const result = reconcileTableSessions(state.tableSessions, state.orders, {
+    events: state.events,
+    tables,
+    now: new Date().toISOString()
+  });
+  if (!result.ok) {
+    audit("TABLE_SESSION_RECONCILE_BLOCKED", `${result.reason}${reason ? ` after ${reason}` : ""}`);
+    return [];
+  }
+  state.tableSessions = result.tableSessions;
+  state.orders = result.orders || state.orders;
+  state.events = result.events || state.events;
+  if (!result.closedSessions.length) return [];
+  result.closedSessions.forEach((session) => {
+    audit("TABLE_SESSION_RECONCILE", `${session.id} Table ${session.tableCode}${reason ? ` after ${reason}` : ""}`);
+  });
+  return result.closedSessions;
+}
+
 function payableTableOrders(tableCode) {
   return tableOrders(tableCode).filter((order) => orderBalance(order) > 0);
 }
 
 function payTable(tableCode, method) {
+  if (blockUnsafeTableSessionMutation("TABLE_PAYMENT_BLOCKED", tableCode)) return;
   const orders = payableTableOrders(tableCode);
   const balance = orders.reduce((sum, order) => sum + orderBalance(order), 0);
   if (!balance) return;
@@ -1134,12 +1323,14 @@ function payTable(tableCode, method) {
     order.paidVnd = (order.paidVnd || 0) + amount;
     order.status = "PAID";
   });
+  reconcileOpenTableSessions("table payment");
   audit("TABLE_PAYMENT_SUCCEEDED", `${tableCode} ${method} ${formatMoney(balance)}`);
   saveState();
   render();
 }
 
 function splitTableInTwo(tableCode) {
+  if (blockUnsafeTableSessionMutation("TABLE_SPLIT_BLOCKED", tableCode)) return;
   const orders = payableTableOrders(tableCode);
   const balance = orders.reduce((sum, order) => sum + orderBalance(order), 0);
   if (!balance) return;
@@ -1161,12 +1352,14 @@ function splitTableInTwo(tableCode) {
     }
     order.status = "PAID";
   });
+  reconcileOpenTableSessions("table split");
   audit("TABLE_SPLIT_BILL", `${tableCode} split 2 payments: ${formatMoney(first)} + ${formatMoney(second)}`);
   saveState();
   render();
 }
 
 function preBillTable(tableCode) {
+  if (blockUnsafeTableSessionMutation("TABLE_PRE_BILL_BLOCKED", tableCode)) return;
   const orders = tableOrders(tableCode);
   if (!orders.length) return;
   const balance = orders.reduce((sum, order) => sum + orderBalance(order), 0);
@@ -1176,6 +1369,7 @@ function preBillTable(tableCode) {
 }
 
 function voidTable(tableCode) {
+  if (blockUnsafeTableSessionMutation("TABLE_VOID_BLOCKED", tableCode)) return;
   const orders = tableOrders(tableCode);
   if (!orders.length) return;
   const reason = prompt(`Lý do void toàn bộ bill bàn ${tableCode}?`);
@@ -1185,12 +1379,14 @@ function voidTable(tableCode) {
     order.voidReason = reason;
     order.items.forEach((item) => item.status = "CANCELLED");
   });
+  reconcileOpenTableSessions("table void");
   audit("TABLE_VOID", `${tableCode}: ${reason}`);
   saveState();
   render();
 }
 
 function refundTable(tableCode) {
+  if (blockUnsafeTableSessionMutation("TABLE_REFUND_BLOCKED", tableCode)) return;
   const orders = tableOrders(tableCode).filter((order) => (order.paidVnd || 0) > 0);
   const paid = orders.reduce((sum, order) => sum + (order.paidVnd || 0), 0);
   if (!paid) return;
@@ -1206,6 +1402,7 @@ function refundTable(tableCode) {
     order.status = order.paidVnd > 0 ? "PARTIALLY_REFUNDED" : "REFUNDED";
     remaining -= refund;
   });
+  reconcileOpenTableSessions("table refund");
   audit("TABLE_REFUND", `${tableCode} ${formatMoney(amount)}`);
   saveState();
   render();
@@ -1227,6 +1424,7 @@ function payOrder(orderId, method) {
   });
   order.paidVnd = (order.paidVnd || 0) + balance;
   order.status = "PAID";
+  reconcileOpenTableSessions("order payment");
   audit("PAYMENT_SUCCEEDED", `${order.orderNo} ${method} ${formatMoney(balance)}`);
   saveState();
   render();
@@ -1252,6 +1450,7 @@ function splitOrderInTwo(orderId) {
   });
   order.paidVnd = (order.paidVnd || 0) + balance;
   order.status = "PAID";
+  reconcileOpenTableSessions("order split");
   audit("SPLIT_BILL", `${order.orderNo} split 2 payments: ${formatMoney(first)} + ${formatMoney(second)}`);
   saveState();
   render();
@@ -1288,6 +1487,7 @@ function voidOrder(orderId, reason = "") {
   order.voidReason = voidReason;
   order.items.forEach((item) => item.status = "CANCELLED");
   pendingVoidOrderId = "";
+  reconcileOpenTableSessions("order void");
   audit("VOID_BATCH", `${order.orderNo}: ${voidReason}`);
   saveState();
   render();
@@ -1311,6 +1511,7 @@ function refundOrder(orderId) {
   });
   order.paidVnd = paid - amount;
   order.status = order.paidVnd > 0 ? "PARTIALLY_REFUNDED" : "REFUNDED";
+  reconcileOpenTableSessions("order refund");
   audit("REFUND", `${order.orderNo} ${formatMoney(amount)}`);
   saveState();
   render();
@@ -1321,6 +1522,7 @@ function updateOrderStatus(orderId, status) {
   if (!order) return;
   const transition = applyOrderStatusTransition(order, status);
   if (!transition.ok) return;
+  reconcileOpenTableSessions(`order status ${transition.to}`);
   audit("ORDER_STATUS", `${order.orderNo} -> ${transition.to}`);
   saveState();
   render();
@@ -1359,7 +1561,7 @@ function updateStationStatus(orderId, stationCode, status) {
 function resetDemoData() {
   if (!confirm("Reset toàn bộ dữ liệu demo, menu và order?")) return;
   products = structuredClone(defaultProducts);
-  state = { cart: [], orders: [], events: [], audit: [], sequence: 1 };
+  state = defaultState();
   counterDraft = emptyCounterDraft();
   saveCounterDraft();
   saveProducts();
@@ -1377,14 +1579,40 @@ function audit(type, detail) {
 }
 
 function tableOrders(tableCode) {
-  return state.orders.filter((order) => {
-    const context = normalizeOrderServiceContext(order);
-    if (!isOpenOrderStatus(order.status)) return false;
-    if (tableCode === "TAKEAWAY") {
-      return context.serviceMode === SERVICE_MODES.COUNTER_SERVICE && context.fulfillmentType === FULFILLMENT_TYPES.TAKEAWAY;
-    }
-    return context.serviceMode === SERVICE_MODES.TABLE_SERVICE && context.table === tableCode;
+  if (tableCode === "TAKEAWAY") {
+    return state.orders.filter((order) => {
+      const context = normalizeOrderServiceContext(order);
+      return isOpenOrderStatus(order.status)
+        && context.serviceMode === SERVICE_MODES.COUNTER_SERVICE
+        && context.fulfillmentType === FULFILLMENT_TYPES.TAKEAWAY;
+    });
+  }
+  const model = deriveTableFloorModels({
+    tables,
+    tableSessions: state.tableSessions,
+    orders: state.orders,
+    events: state.events
+  }).find((item) => item.tableCode === tableCode);
+  return (model?.orders || []).filter((order) => isOpenOrderStatus(order.status));
+}
+
+function currentTableSessionRepair() {
+  return repairTableSessionGraph({
+    tableSessions: state.tableSessions,
+    orders: state.orders,
+    events: state.events,
+    tables
   });
+}
+
+function blockUnsafeTableSessionMutation(action, target = "") {
+  const repair = currentTableSessionRepair();
+  if (repair.ok !== false) return false;
+  audit(action, `${target ? `${target}: ` : ""}${repair.reason}`);
+  alert("Dữ liệu phiên bàn đang xung đột. Tạm khóa thao tác theo bàn để không mất order hoặc yêu cầu đang mở.");
+  saveState();
+  render();
+  return true;
 }
 
 function zoneNames() {
