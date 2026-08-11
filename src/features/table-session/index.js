@@ -41,9 +41,7 @@ export function normalizeTableSession(session = {}, options = {}) {
 }
 
 export function normalizeTableSessions(tableSessions = [], options = {}) {
-  const sessions = (tableSessions || [])
-    .map((session) => normalizeTableSession(session, options))
-    .filter((session) => session.id && session.tableCode);
+  const sessions = normalizeTableSessionList(tableSessions, options);
   return enforceOneOpenSessionPerTable(sessions, options);
 }
 
@@ -117,10 +115,16 @@ export function selectOrdersForTableSession(orders = [], sessionOrId) {
 }
 
 export function deriveTableFloorModels({ tables = [], tableSessions = [], orders = [], events = [] } = {}) {
-  const sessions = normalizeTableSessions(tableSessions, { tables });
+  const repaired = repairDuplicateOpenSessionReferences({
+    sessions: normalizeTableSessionList(tableSessions, { tables }),
+    orders,
+    now: new Date().toISOString()
+  });
+  const sessions = repaired.ok ? repaired.tableSessions : normalizeTableSessions(tableSessions, { tables });
+  const scopedOrders = repaired.ok ? repaired.orders : orders;
   return (tables || []).map((table) => {
     const session = getActiveTableSession(sessions, table.code);
-    const sessionOrders = session ? selectOrdersForTableSession(orders, session) : [];
+    const sessionOrders = session ? selectOrdersForTableSession(scopedOrders, session) : [];
     const activeSessionOrders = sessionOrders.filter((order) => isOpenOrderStatus(order.status));
     const unresolvedRequests = session
       ? selectUnresolvedSessionRequests(events, session)
@@ -230,7 +234,7 @@ export function transferTableSession({ tableSessions = [], orders = [], events =
     return { ...order, table: destination.code, zone: destination.zone || "" };
   });
   const nextEvents = (events || []).map((event) => {
-    if (event.done || event.tableSessionId !== session.id) return event;
+    if (!shouldMoveEventWithTransferredSession(event, session)) return event;
     return { ...event, table: destination.code, zone: destination.zone || "" };
   });
 
@@ -246,10 +250,18 @@ export function transferTableSession({ tableSessions = [], orders = [], events =
 }
 
 export function backfillLegacyTableSessions({ tableSessions = [], orders = [], tables = [], now } = {}) {
-  const sessions = normalizeTableSessions(tableSessions, { tables });
+  const repair = repairDuplicateOpenSessionReferences({
+    sessions: normalizeTableSessionList(tableSessions, { tables }),
+    orders,
+    now
+  });
+  if (!repair.ok) {
+    return { ok: false, reason: repair.reason, tableSessions: repair.tableSessions, orders: repair.orders, createdSessions: [] };
+  }
+  const sessions = repair.tableSessions;
   const nextSessions = [...sessions];
   const createdSessions = [];
-  const nextOrders = (orders || []).map((order) => {
+  const nextOrders = (repair.orders || []).map((order) => {
     const context = normalizeOrderServiceContext(order);
     if (order.tableSessionId || !isTableServiceContext(context) || !isOpenOrderStatus(order.status)) return order;
 
@@ -266,7 +278,13 @@ export function backfillLegacyTableSessions({ tableSessions = [], orders = [], t
     };
   });
 
-  return { ok: true, tableSessions: nextSessions, orders: nextOrders, createdSessions };
+  return { ok: true, tableSessions: nextSessions, orders: nextOrders, createdSessions, repairedSessions: repair.repairedSessions };
+}
+
+function normalizeTableSessionList(tableSessions = [], options = {}) {
+  return (tableSessions || [])
+    .map((session) => normalizeTableSession(session, options))
+    .filter((session) => session.id && session.tableCode);
 }
 
 function createLegacySession(context, sessions, tables, now) {
@@ -280,6 +298,78 @@ function createLegacySession(context, sessions, tables, now) {
     closedAt: "",
     openedSource: TABLE_SESSION_SOURCES.LEGACY
   };
+}
+
+function repairDuplicateOpenSessionReferences({ sessions = [], orders = [], now } = {}) {
+  const canonicalByDuplicateId = new Map();
+  const openEntriesByTable = new Map();
+  sessions.forEach((session, index) => {
+    if (session.status !== TABLE_SESSION_STATUSES.OPEN || !session.tableCode) return;
+    const entries = openEntriesByTable.get(session.tableCode) || [];
+    entries.push({ session, index });
+    openEntriesByTable.set(session.tableCode, entries);
+  });
+
+  openEntriesByTable.forEach((entries) => {
+    if (entries.length <= 1) return;
+    const [canonical, ...duplicates] = entries.sort((left, right) => compareSessionNewestFirst(left.session, right.session));
+    duplicates.forEach((entry) => {
+      canonicalByDuplicateId.set(entry.session.id, canonical.session);
+    });
+  });
+
+  if (!canonicalByDuplicateId.size) return { ok: true, tableSessions: sessions, orders, repairedSessions: [] };
+
+  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+  let unsafeOrder = null;
+  const nextOrders = (orders || []).map((order) => {
+    const canonical = canonicalByDuplicateId.get(order.tableSessionId);
+    if (!canonical || !isOpenOrderStatus(order.status)) return order;
+    const duplicate = sessionsById.get(order.tableSessionId);
+    if (!canReconcileOrderToSession(order, duplicate, canonical)) {
+      unsafeOrder = order;
+      return order;
+    }
+    return {
+      ...order,
+      tableSessionId: canonical.id,
+      table: canonical.tableCode,
+      zone: canonical.zone || order.zone || ""
+    };
+  });
+
+  if (unsafeOrder) {
+    return {
+      ok: false,
+      reason: "UNSAFE_DUPLICATE_OPEN_SESSION_REPAIR",
+      tableSessions: sessions,
+      orders,
+      unsafeOrder
+    };
+  }
+
+  const repairedSessions = [];
+  const nextSessions = sessions.map((session) => {
+    const canonical = canonicalByDuplicateId.get(session.id);
+    if (!canonical) return session;
+    const repaired = {
+      ...session,
+      status: TABLE_SESSION_STATUSES.CLOSED,
+      closedAt: duplicateSessionClosedAt(session, canonical, { now })
+    };
+    repairedSessions.push(repaired);
+    return repaired;
+  });
+
+  return { ok: true, tableSessions: nextSessions, orders: nextOrders, repairedSessions };
+}
+
+function canReconcileOrderToSession(order, duplicate, canonical) {
+  if (!duplicate?.id || !canonical?.id) return false;
+  const context = normalizeOrderServiceContext(order);
+  if (!isTableServiceContext(context)) return false;
+  const orderTable = normalizePhysicalTableCode(order.table || context.table);
+  return !orderTable || orderTable === duplicate.tableCode || orderTable === canonical.tableCode;
 }
 
 function enforceOneOpenSessionPerTable(sessions = [], options = {}) {
@@ -329,6 +419,12 @@ function selectUnresolvedSessionRequests(events = [], session) {
 
 function selectLegacyTableRequests(events = [], tableCode) {
   return (events || []).filter((event) => !event.done && !event.tableSessionId && event.table === tableCode);
+}
+
+function shouldMoveEventWithTransferredSession(event = {}, session = {}) {
+  if (event.done) return false;
+  if (event.tableSessionId) return event.tableSessionId === session.id;
+  return normalizePhysicalTableCode(event.table) === session.tableCode;
 }
 
 function aggregateServiceProgress(orders = []) {

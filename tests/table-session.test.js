@@ -185,6 +185,40 @@ test("normalization closes duplicate open sessions for one physical table", () =
   assert.deepEqual(sessions.filter((session) => session.status === "OPEN").map((session) => session.id), ["TS-new", "TS-B01"]);
 });
 
+test("duplicate open session repair preserves active order references in the canonical visit", () => {
+  const sessions = [
+    { id: "TS-old", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: "2026-08-11T08:00:00.000Z", openedSource: "STAFF" },
+    { id: "TS-new", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: "2026-08-11T09:00:00.000Z", openedSource: "STAFF" }
+  ];
+  const oldItems = [{ lineId: "tea-1", station: "BAR_TEA", qty: 2, prepStatus: "PREPARING", status: "PREPARING", servedQty: 1, billQty: 2, isBillable: true }];
+  const newItems = [{ lineId: "coffee-1", station: "BAR_COFFEE", qty: 1, prepStatus: "QUEUED", status: "QUEUED", servedQty: 0, billQty: 1, isBillable: true }];
+  const oldPayments = [{ id: "PAY-old", amountVnd: 20000, method: "CASH" }];
+  const orders = [
+    tableOrder({ id: "O1", orderNo: "D01-0001", tableSessionId: "TS-old", status: "IN_PREPARATION", total: 120000, paidVnd: 20000, payments: oldPayments, items: oldItems }),
+    tableOrder({ id: "O2", orderNo: "D01-0002", tableSessionId: "TS-new", status: "ACCEPTED", total: 39000, paidVnd: 0, payments: [], items: newItems })
+  ];
+
+  const result = backfillLegacyTableSessions({ tableSessions: sessions, orders, tables, now: "2026-08-11T10:00:00.000Z" });
+  const openA01Sessions = result.tableSessions.filter((session) => session.tableCode === "A01" && session.status === "OPEN");
+  const closedSessionIds = new Set(result.tableSessions.filter((session) => session.status === "CLOSED").map((session) => session.id));
+  const activeOrders = result.orders.filter((order) => ["O1", "O2"].includes(order.id));
+  const model = deriveTableFloorModels({ tables, tableSessions: result.tableSessions, orders: result.orders, events: [] }).find((item) => item.tableCode === "A01");
+  const directModel = deriveTableFloorModels({ tables, tableSessions: sessions, orders, events: [] }).find((item) => item.tableCode === "A01");
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(openA01Sessions.map((session) => session.id), ["TS-new"]);
+  assert.deepEqual(activeOrders.map((order) => order.tableSessionId), ["TS-new", "TS-new"]);
+  assert.deepEqual(activeOrders.filter((order) => closedSessionIds.has(order.tableSessionId)), []);
+  assert.deepEqual(selectOrdersForTableSession(result.orders, "TS-new").map((order) => order.id), ["O1", "O2"]);
+  assert.deepEqual(model.orders.map((order) => order.id), ["O1", "O2"]);
+  assert.deepEqual(directModel.orders.map((order) => order.id), ["O1", "O2"]);
+  assert.equal(result.orders[0].total, 120000);
+  assert.equal(result.orders[0].paidVnd, 20000);
+  assert.deepEqual(result.orders[0].payments, oldPayments);
+  assert.deepEqual(result.orders[0].items, oldItems);
+  assert.deepEqual(result.orders[1].items, newItems);
+});
+
 test("floor-plan selector marks a table vacant when no open session exists", () => {
   const models = deriveTableFloorModels({ tables, tableSessions: [], orders: [], events: [] });
 
@@ -355,6 +389,23 @@ test("unresolved service request follows a transferred session", () => {
 
   assert.equal(result.events[0].table, "B01");
   assert.equal(result.events[0].zone, "Indoor");
+});
+
+test("legacy unresolved service request follows a transferred active table session", () => {
+  const session = { id: "TS-move", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: now, openedSource: "STAFF" };
+  const events = [
+    { id: "legacy-open", type: "CALL_STAFF", table: "A01", zone: "Beach", done: false },
+    { id: "legacy-done", type: "REQUEST_BILL", table: "A01", zone: "Beach", done: true },
+    { id: "modern-other", type: "CALL_STAFF", table: "A01", zone: "Beach", tableSessionId: "TS-other", done: false },
+    { id: "unrelated", type: "CALL_STAFF", table: "C01", zone: "Camping", done: false }
+  ];
+
+  const result = transferTableSession({ tableSessions: [session], orders: [], events, sessionId: "TS-move", toTable: tables[1], tables });
+
+  assert.deepEqual(result.events.find((event) => event.id === "legacy-open"), { id: "legacy-open", type: "CALL_STAFF", table: "B01", zone: "Indoor", done: false });
+  assert.equal(result.events.find((event) => event.id === "legacy-done").table, "A01");
+  assert.equal(result.events.find((event) => event.id === "modern-other").table, "A01");
+  assert.equal(result.events.find((event) => event.id === "unrelated").table, "C01");
 });
 
 test("source table becomes vacant and destination occupied after transfer", () => {
