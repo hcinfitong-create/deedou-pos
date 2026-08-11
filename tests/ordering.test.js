@@ -3,21 +3,32 @@ import assert from "node:assert/strict";
 
 import {
   applyOrderStatusTransition,
+  applyPrepStatusTransition,
   applyStationStatusUpdate,
   billableTotal,
   buildCounterOrderServiceContext,
+  canServeLine,
+  canTransitionPrepStatus,
   canTransitionOrderStatus,
   clampBillQty,
   deriveOrderStatusFromStations,
+  deriveOrderOperationalStatus,
   expandOrderLines,
   FULFILLMENT_TYPES,
   getAllowedOrderStatusTransitions,
+  getServiceProgress,
   isOpenPhysicalTableOrder,
+  isLineFullyServed,
+  normalizeOrderLineOperationalFields,
   normalizeOrderServiceContext,
   normalizeOrderSource,
   normalizeOrderStatus,
   normalizeOrderTimestamps,
+  normalizePrepStatus,
+  normalizeServiceProgress,
   ORDER_SOURCES,
+  serveAllReady,
+  serveLineQuantity,
   SERVICE_MODES,
   validateOrderServiceContext,
   stationStatusFor
@@ -126,7 +137,7 @@ test("rejected orders reject further direct transitions without mutation", () =>
   });
 });
 
-test("valid direct order status transitions preserve station side effects", () => {
+test("valid direct order status transitions keep KDS prep mutations authoritative", () => {
   const order = {
     status: "PENDING_ACCEPTANCE",
     stationStatus: {},
@@ -144,8 +155,10 @@ test("valid direct order status transitions preserve station side effects", () =
 
   assert.equal(applyOrderStatusTransition(order, "IN_PREPARATION").ok, true);
   assert.equal(order.status, "IN_PREPARATION");
-  assert.deepEqual(order.stationStatus, { BAR_TEA: "PREPARING", KITCHEN_HOT: "PREPARING" });
-  assert.deepEqual(order.items.map((item) => item.status), ["QUEUED", "PREPARING", "PREPARING"]);
+  assert.deepEqual(order.stationStatus, { BAR_TEA: "QUEUED", KITCHEN_HOT: "QUEUED" });
+  assert.deepEqual(order.items.map((item) => item.status), ["QUEUED", "QUEUED", "QUEUED"]);
+  assert.deepEqual(order.items.map((item) => item.prepStatus), [undefined, "QUEUED", "QUEUED"]);
+  assert.equal(order.prepStartedAt, undefined);
 });
 
 test("accepted orders can be rejected with existing rejection side effects", () => {
@@ -264,20 +277,24 @@ test("station updates derive READY only when every required station is ready", (
     status: "ACCEPTED",
     stationStatus: { BAR_TEA: "QUEUED", KITCHEN_HOT: "QUEUED" },
     items: [
-      { station: "BAR_TEA", status: "QUEUED" },
-      { station: "KITCHEN_HOT", status: "QUEUED" }
+      { lineId: "tea", station: "BAR_TEA", status: "QUEUED", prepStatus: "QUEUED", qty: 1 },
+      { lineId: "hot", station: "KITCHEN_HOT", status: "QUEUED", prepStatus: "QUEUED", qty: 1 }
     ]
   };
 
-  const first = applyStationStatusUpdate(order, ["BAR_TEA"], "READY", { now: "2026-08-11T00:00:00.000Z" });
+  assert.equal(applyStationStatusUpdate(order, ["BAR_TEA"], "ACKNOWLEDGED", { now: "2026-08-11T00:00:00.000Z" }).ok, true);
+  assert.equal(applyStationStatusUpdate(order, ["BAR_TEA"], "PREPARING", { now: "2026-08-11T00:00:30.000Z" }).ok, true);
+  const first = applyStationStatusUpdate(order, ["BAR_TEA"], "READY", { now: "2026-08-11T00:01:00.000Z" });
   assert.equal(first.ok, true);
   assert.equal(order.status, "IN_PREPARATION");
   assert.equal(order.readyAt, undefined);
 
-  const second = applyStationStatusUpdate(order, ["KITCHEN_HOT"], "READY", { now: "2026-08-11T00:01:00.000Z" });
+  assert.equal(applyStationStatusUpdate(order, ["KITCHEN_HOT"], "ACKNOWLEDGED", { now: "2026-08-11T00:01:30.000Z" }).ok, true);
+  assert.equal(applyStationStatusUpdate(order, ["KITCHEN_HOT"], "PREPARING", { now: "2026-08-11T00:02:00.000Z" }).ok, true);
+  const second = applyStationStatusUpdate(order, ["KITCHEN_HOT"], "READY", { now: "2026-08-11T00:03:00.000Z" });
   assert.equal(second.ok, true);
   assert.equal(order.status, "READY");
-  assert.equal(order.readyAt, "2026-08-11T00:01:00.000Z");
+  assert.equal(order.readyAt, "2026-08-11T00:03:00.000Z");
 });
 
 test("combo and meta lines do not block station-derived readiness", () => {
@@ -292,6 +309,207 @@ test("combo and meta lines do not block station-derived readiness", () => {
   };
 
   assert.equal(deriveOrderStatusFromStations(order), "READY");
+});
+
+test("prep status transitions are sequential and cannot set served", () => {
+  assert.equal(canTransitionPrepStatus("QUEUED", "ACKNOWLEDGED"), true);
+  assert.equal(canTransitionPrepStatus("ACKNOWLEDGED", "PREPARING"), true);
+  assert.equal(canTransitionPrepStatus("PREPARING", "READY"), true);
+  assert.equal(canTransitionPrepStatus("QUEUED", "READY"), false);
+  assert.equal(canTransitionPrepStatus("QUEUED", "PREPARING"), false);
+  assert.equal(canTransitionPrepStatus("READY", "SERVED"), false);
+});
+
+test("first KDS acknowledge moves accepted order to preparation without skipping prep states", () => {
+  const order = {
+    status: "ACCEPTED",
+    stationStatus: { BAR_TEA: "QUEUED" },
+    items: [{ lineId: "tea-1", id: "tea", station: "BAR_TEA", qty: 1, status: "QUEUED", prepStatus: "QUEUED", servedQty: 0 }]
+  };
+
+  const update = applyPrepStatusTransition(order, { stationCode: "BAR_TEA" }, "ACKNOWLEDGED", { now: "2026-08-11T00:10:00.000Z" });
+
+  assert.equal(update.ok, true);
+  assert.equal(order.status, "IN_PREPARATION");
+  assert.deepEqual(order.stationStatus, { BAR_TEA: "ACKNOWLEDGED" });
+  assert.equal(order.items[0].prepStatus, "ACKNOWLEDGED");
+  assert.equal(order.items[0].status, "ACKNOWLEDGED");
+});
+
+test("invalid prep skip does not mutate the order", () => {
+  const order = {
+    status: "ACCEPTED",
+    stationStatus: { BAR_TEA: "QUEUED" },
+    items: [{ lineId: "tea-1", id: "tea", station: "BAR_TEA", qty: 1, status: "QUEUED", prepStatus: "QUEUED", servedQty: 0 }]
+  };
+  const before = structuredClone(order);
+
+  const result = applyPrepStatusTransition(order, { stationCode: "BAR_TEA" }, "READY");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "INVALID_PREP_STATUS_TRANSITION");
+  assert.deepEqual(order, before);
+});
+
+test("station prep update never mutates served quantity", () => {
+  const order = {
+    status: "IN_PREPARATION",
+    stationStatus: { BAR_TEA: "ACKNOWLEDGED" },
+    items: [{ lineId: "tea-1", station: "BAR_TEA", qty: 2, status: "ACKNOWLEDGED", prepStatus: "ACKNOWLEDGED", servedQty: 1 }]
+  };
+
+  const result = applyPrepStatusTransition(order, { stationCode: "BAR_TEA" }, "PREPARING", { now: "2026-08-11T01:00:00.000Z" });
+
+  assert.equal(result.ok, true);
+  assert.equal(order.items[0].servedQty, 1);
+  assert.equal(order.items[0].prepStartedAt, "2026-08-11T01:00:00.000Z");
+});
+
+test("unready line cannot be served and ready line supports partial service", () => {
+  const order = {
+    status: "IN_PREPARATION",
+    items: [
+      { lineId: "coffee", station: "BAR_COFFEE", qty: 2, prepStatus: "READY", status: "READY", servedQty: 0, billQty: 2, isBillable: true },
+      { lineId: "squid", station: "KITCHEN_HOT", qty: 1, prepStatus: "PREPARING", status: "PREPARING", servedQty: 0, billQty: 1, isBillable: true }
+    ]
+  };
+
+  assert.equal(canServeLine(order.items[1]), false);
+  assert.equal(serveLineQuantity(order, "squid", 1).ok, false);
+
+  const served = serveLineQuantity(order, "coffee", 1, { now: "2026-08-11T02:00:00.000Z" });
+  assert.equal(served.ok, true);
+  assert.equal(order.items[0].servedQty, 1);
+  assert.equal(order.items[0].billQty, 2);
+  assert.equal(order.items[0].status, "READY");
+  assert.equal(order.status, "IN_PREPARATION");
+});
+
+test("served quantity clamps to line quantity and targets exactly one line", () => {
+  const order = {
+    status: "READY",
+    items: [
+      { lineId: "same-product-a", id: "tea", station: "BAR_TEA", qty: 2, prepStatus: "READY", status: "READY", servedQty: 1, billQty: 2, isBillable: true },
+      { lineId: "same-product-b", id: "tea", station: "BAR_TEA", qty: 2, prepStatus: "READY", status: "READY", servedQty: 0, billQty: 2, isBillable: true }
+    ]
+  };
+
+  assert.equal(serveLineQuantity(order, "same-product-a", -1).ok, false);
+  const result = serveLineQuantity(order, "same-product-a", 5, { now: "2026-08-11T02:05:00.000Z" });
+
+  assert.equal(result.ok, true);
+  assert.equal(order.items[0].servedQty, 2);
+  assert.equal(order.items[0].status, "SERVED");
+  assert.equal(order.items[1].servedQty, 0);
+  assert.equal(order.items[0].billQty, 2);
+});
+
+test("aggregate status separates served progress from prep readiness", () => {
+  const mixedPreparing = {
+    status: "READY",
+    items: [
+      { lineId: "served", station: "BAR_TEA", qty: 1, prepStatus: "READY", status: "SERVED", servedQty: 1 },
+      { lineId: "prep", station: "KITCHEN_HOT", qty: 1, prepStatus: "PREPARING", status: "PREPARING", servedQty: 0 },
+      { lineId: "ready", station: "DESSERT", qty: 1, prepStatus: "READY", status: "READY", servedQty: 0 }
+    ]
+  };
+  assert.equal(deriveOrderOperationalStatus(mixedPreparing), "IN_PREPARATION");
+
+  const allRemainingReady = structuredClone(mixedPreparing);
+  allRemainingReady.items[1].prepStatus = "READY";
+  allRemainingReady.items[1].status = "READY";
+  assert.equal(deriveOrderOperationalStatus(allRemainingReady), "READY");
+
+  allRemainingReady.items[1].servedQty = 1;
+  allRemainingReady.items[1].status = "SERVED";
+  allRemainingReady.items[2].servedQty = 1;
+  allRemainingReady.items[2].status = "SERVED";
+  assert.equal(deriveOrderOperationalStatus(allRemainingReady), "SERVED");
+});
+
+test("legacy line statuses normalize without destructive migration", () => {
+  const ready = normalizeOrderLineOperationalFields({ lineId: "ready", station: "BAR_TEA", qty: 2, status: "READY" });
+  assert.equal(ready.prepStatus, "READY");
+  assert.equal(ready.servedQty, 0);
+
+  const served = normalizeOrderLineOperationalFields({ lineId: "served", station: "BAR_TEA", qty: 2, status: "SERVED" });
+  assert.equal(served.prepStatus, "READY");
+  assert.equal(served.servedQty, 2);
+  assert.equal(normalizePrepStatus("SERVED"), "READY");
+});
+
+test("combo/meta lines do not affect service progress", () => {
+  const order = {
+    status: "READY",
+    items: [
+      { lineId: "combo", station: "COMBO", qty: 1, prepStatus: "QUEUED", status: "QUEUED", isBillable: true },
+      { lineId: "meta", station: "KITCHEN_HOT", qty: 1, prepStatus: "QUEUED", status: "QUEUED", type: "META" },
+      { lineId: "component", station: "BAR_TEA", qty: 1, prepStatus: "READY", status: "READY", servedQty: 0, isComponent: true }
+    ]
+  };
+
+  assert.deepEqual(getServiceProgress(order), { serviceableQty: 1, servedQty: 0, remainingQty: 1 });
+  assert.equal(isLineFullyServed(order.items[0]), true);
+  assert.equal(deriveOrderOperationalStatus(order), "READY");
+});
+
+test("counter serveAllReady fast path works without a table", () => {
+  const order = {
+    status: "READY",
+    serviceMode: SERVICE_MODES.COUNTER_SERVICE,
+    fulfillmentType: FULFILLMENT_TYPES.TAKEAWAY,
+    orderSource: ORDER_SOURCES.COUNTER,
+    table: "",
+    items: [
+      { lineId: "coffee", station: "BAR_COFFEE", qty: 1, prepStatus: "READY", status: "READY", servedQty: 0 },
+      { lineId: "cake", station: "DESSERT", qty: 1, prepStatus: "READY", status: "READY", servedQty: 0 }
+    ]
+  };
+
+  const result = serveAllReady(order, { now: "2026-08-11T03:00:00.000Z" });
+
+  assert.equal(result.ok, true);
+  assert.equal(order.status, "SERVED");
+  assert.equal(order.servedAt, "2026-08-11T03:00:00.000Z");
+  assert.deepEqual(order.items.map((line) => line.servedQty), [1, 1]);
+});
+
+test("direct READY to SERVED no longer blanket-serves table-service orders", () => {
+  const order = {
+    status: "READY",
+    serviceMode: SERVICE_MODES.TABLE_SERVICE,
+    fulfillmentType: FULFILLMENT_TYPES.DINE_IN,
+    orderSource: ORDER_SOURCES.CUSTOMER_QR,
+    table: "A01",
+    stationStatus: { BAR_TEA: "READY" },
+    items: [{ lineId: "tea", station: "BAR_TEA", qty: 1, prepStatus: "READY", status: "READY", servedQty: 0 }]
+  };
+  const before = structuredClone(order);
+
+  const result = applyOrderStatusTransition(order, "SERVED");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "LINE_SERVING_REQUIRED");
+  assert.deepEqual(order, before);
+});
+
+test("line timestamps are deterministic with injected now", () => {
+  const order = {
+    status: "ACCEPTED",
+    stationStatus: { BAR_TEA: "QUEUED" },
+    items: [{ lineId: "tea", station: "BAR_TEA", qty: 1, prepStatus: "QUEUED", status: "QUEUED", servedQty: 0 }]
+  };
+
+  assert.equal(applyPrepStatusTransition(order, { stationCode: "BAR_TEA" }, "ACKNOWLEDGED", { now: "2026-08-11T04:00:00.000Z" }).ok, true);
+  assert.equal(applyPrepStatusTransition(order, { stationCode: "BAR_TEA" }, "PREPARING", { now: "2026-08-11T04:01:00.000Z" }).ok, true);
+  assert.equal(applyPrepStatusTransition(order, { stationCode: "BAR_TEA" }, "READY", { now: "2026-08-11T04:03:00.000Z" }).ok, true);
+  assert.equal(serveLineQuantity(order, "tea", 1, { now: "2026-08-11T04:04:00.000Z" }).ok, true);
+
+  assert.equal(order.items[0].queuedAt, "2026-08-11T04:00:00.000Z");
+  assert.equal(order.items[0].acknowledgedAt, "2026-08-11T04:00:00.000Z");
+  assert.equal(order.items[0].prepStartedAt, "2026-08-11T04:01:00.000Z");
+  assert.equal(order.items[0].readyAt, "2026-08-11T04:03:00.000Z");
+  assert.equal(order.items[0].servedAt, "2026-08-11T04:04:00.000Z");
 });
 
 test("legacy orders without service context normalize safely", () => {

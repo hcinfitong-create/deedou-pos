@@ -4,7 +4,6 @@ import { escapeAttr, escapeHtml, formatMoney, normalizeSearch, slugify } from ".
 import { categories, categoryAliases, compareMenuItems, defaultProducts, filterMenuItems, menuKinds } from "./src/features/customer-menu/index.js";
 import {
   applyOrderStatusTransition,
-  applyStationStatusUpdate,
   billableTotal,
   buildCounterOrderServiceContext,
   chargedQty,
@@ -14,6 +13,7 @@ import {
   countStatusItems,
   expandOrderLines,
   FULFILLMENT_TYPES,
+  getServiceProgress,
   isOpenOrderStatus,
   lineSubtotal,
   normalizeItemStatus,
@@ -25,6 +25,8 @@ import {
   ORDER_SOURCES,
   recalcOrderTotal,
   SERVICE_MODES,
+  serveAllReady,
+  serveLineQuantity,
   stationStatusFor,
   validateOrderServiceContext
 } from "./src/features/ordering/index.js";
@@ -32,6 +34,7 @@ import { addCartItem, canSubmitCart, clearCart, decrementCartItem, removeCartIte
 import { renderCustomerOrderStatusStrip } from "./src/features/customer-orders/index.js";
 import { createServiceRequestEvent, renderCustomerServiceActions } from "./src/features/service-requests/index.js";
 import { renderStaffPage } from "./src/features/staff-orders/index.js";
+import { applyPrepStatusTransition, renderStationPage } from "./src/features/station-workflow/index.js";
 
 let products = loadProducts();
 let state = loadState();
@@ -92,25 +95,36 @@ function normalizeState(value) {
 }
 
 function normalizeOrder(order) {
+  const lineOccurrences = {};
   const items = (order.items || []).map((line) => {
     const source = products.find((item) => item.id === line.id) || {};
     const station = stationAliases[line.station] || line.station || source.station || "KITCHEN_HOT";
     const qty = Number(line.qty || 1);
     const isComponent = !!line.isComponent;
     const isBillable = line.isBillable ?? !isComponent;
+    const legacyKey = [order.id || order.orderNo || "legacy", line.id || source.id || "line", station, line.parentComboId || "", line.nameVi || source.vi || "", line.nameEn || source.en || ""].join(":");
+    lineOccurrences[legacyKey] = (lineOccurrences[legacyKey] || 0) + 1;
+    const operationalFields = normalizeOrderLineOperationalFields({
+      ...line,
+      qty,
+      station,
+      prepStatus: line.prepStatus || line.status || order.stationStatus?.[station] || order.status
+    }, { fallbackLineId: `${legacyKey}:${lineOccurrences[legacyKey]}` });
+    const serviceDisplayStatus = operationalFields.servedQty >= qty ? "SERVED" : operationalFields.prepStatus;
     return {
       id: line.id,
+      lineId: operationalFields.lineId,
       qty,
       billQty: isBillable ? clampBillQty(line.billQty, qty) : 0,
       station,
       nameVi: line.nameVi || source.vi || line.id,
       nameEn: line.nameEn || source.en || line.id,
       price: line.price || source.price || 0,
-      status: normalizeItemStatus(line.status || order.status),
+      status: normalizeItemStatus(serviceDisplayStatus),
       isComponent,
       isBillable,
       parentComboId: line.parentComboId || "",
-      ...normalizeOrderLineOperationalFields({ ...line, station })
+      ...operationalFields
     };
   });
   const payments = order.payments || [];
@@ -119,10 +133,7 @@ function normalizeOrder(order) {
     ...order,
     zone: order.zone || tableZoneFor(order.table)
   });
-  const stationStatus = Object.fromEntries(Object.entries(order.stationStatus || stationStatusFor(items, "QUEUED")).map(([station, status]) => [
-    stationAliases[station] || station,
-    normalizeItemStatus(status)
-  ]));
+  const stationStatus = stationStatusFor(items);
   return {
     ...order,
     ...serviceContext,
@@ -243,9 +254,9 @@ function pageFor(active, current) {
   if (active === "customer") return customerPage(current.token);
   if (active === "cashier") return cashierPage();
   if (active === "staff") return staffPage();
-  if (active === "bar") return stationPage("BAR");
-  if (active === "kitchen") return stationPage("KITCHEN");
-  if (active === "dessert") return stationPage("DESSERT");
+  if (active === "bar") return renderStationPage({ orders: state.orders, stationGroup: "BAR", stations });
+  if (active === "kitchen") return renderStationPage({ orders: state.orders, stationGroup: "KITCHEN", stations });
+  if (active === "dessert") return renderStationPage({ orders: state.orders, stationGroup: "DESSERT", stations });
   return adminPage();
 }
 
@@ -559,8 +570,7 @@ function counterDraftLine(line) {
 }
 
 function cashierOrderCard(order) {
-  const served = countServedItems([order]);
-  const totalItems = countPrepItems([order]);
+  const progress = getServiceProgress(order);
   const billableItems = order.items.map((line, index) => ({ line, index })).filter((item) => item.line.isBillable);
   return `
     <article class="order-card cashier-card compact-batch">
@@ -570,7 +580,7 @@ function cashierOrderCard(order) {
       </div>
       <div class="batch-meta">
         <span>Đối soát phục vụ</span>
-        <strong>${served}/${totalItems} món</strong>
+        <strong>${progress.servedQty}/${progress.serviceableQty} món</strong>
         <strong>${formatMoney(order.total)}</strong>
       </div>
       <ul class="item-list compact-items">
@@ -600,13 +610,14 @@ function cashierOrderCard(order) {
 function cashierBillLine(order, line, index) {
   const billQty = chargedQty(line);
   const returnedQty = Math.max(0, line.qty - billQty);
+  const servedQty = Math.min(line.qty, Math.max(0, Number(line.servedQty) || 0));
   return `
     <li class="bill-adjust-line">
       <div class="bill-item-main">
         <span>${line.qty} x ${escapeHtml(line.nameVi)}</span>
-        <small class="muted">${returnedQty ? `Tính tiền ${billQty}/${line.qty} - trả ${returnedQty}` : `Tính tiền đủ ${billQty}/${line.qty}`}</small>
+        <small class="muted">${returnedQty ? `Tính tiền ${billQty}/${line.qty} - trả ${returnedQty}` : `Tính tiền đủ ${billQty}/${line.qty}`} · phục vụ ${servedQty}/${line.qty}</small>
       </div>
-      <span class="station">${line.status}</span>
+      <span class="station">${line.prepStatus || line.status}</span>
       <div class="bill-qty-control" aria-label="Điều chỉnh số lượng tính tiền">
         <button class="ghost compact" data-bill-dec="${order.id}" data-line-index="${index}" ${billQty <= 0 ? "disabled" : ""}>-</button>
         <strong>${billQty}</strong>
@@ -614,51 +625,6 @@ function cashierBillLine(order, line, index) {
       </div>
       <strong>${formatMoney(lineSubtotal(line))}</strong>
     </li>
-  `;
-}
-
-function stationPage(stationGroup) {
-  const groupStations = stations.filter((station) => station.group === stationGroup).map((station) => station.code);
-  const relevant = state.orders.filter((order) => {
-    return groupStations.some((station) => {
-      const stationState = order.stationStatus?.[station];
-      return stationState && stationState !== "READY";
-    }) && ["ACCEPTED", "IN_PREPARATION"].includes(order.status);
-  });
-  return `
-    <section class="page">
-      <div class="ops-head">
-        <div>
-          <div class="kicker">${stationGroup} display</div>
-          <h1>${stationGroup === "BAR" ? "Bar drinks queue" : stationGroup === "DESSERT" ? "Dessert queue" : "Kitchen queue"}</h1>
-          <p class="muted">Only accepted orders appear here. Combo items are exploded into station-level tickets.</p>
-        </div>
-        <button class="ghost" data-route="#/staff">Back to staff</button>
-      </div>
-      <div class="station-board">
-        ${relevant.map((order) => stationTicket(order, stationGroup, groupStations)).join("") || `<div class="empty">No active ${stationGroup.toLowerCase()} tickets.</div>`}
-      </div>
-    </section>
-  `;
-}
-
-function stationTicket(order, stationGroup, groupStations) {
-  const stationItems = order.items.filter((item) => groupStations.includes(item.station));
-  const activeStatuses = stationItems.map((item) => item.status);
-  const status = activeStatuses.includes("PREPARING") ? "PREPARING" : activeStatuses.includes("ACKNOWLEDGED") ? "ACKNOWLEDGED" : "QUEUED";
-  return `
-    <article class="order-card ticket">
-      <div class="order-head"><strong>${order.orderNo} - ${orderLocationLabel(order)}</strong><span class="station">${status}</span></div>
-      <ul class="item-list">
-        ${stationItems.map((line) => `<li><strong>${line.qty} x ${escapeHtml(line.nameVi)}</strong> <span class="station">${line.station}</span><br><span class="muted">${escapeHtml(line.nameEn)} - ${line.status}</span></li>`).join("")}
-      </ul>
-      ${order.note ? `<p class="muted">Note: ${escapeHtml(order.note)}</p>` : ""}
-      <div class="split-actions">
-        ${status === "QUEUED" ? `<button class="primary" data-station-order="${order.id}" data-station-group="${stationGroup}" data-station-status="ACKNOWLEDGED">Acknowledge</button>` : ""}
-        ${status === "ACKNOWLEDGED" ? `<button class="primary" data-station-order="${order.id}" data-station-group="${stationGroup}" data-station-status="PREPARING">Start</button>` : ""}
-        ${status === "PREPARING" ? `<button class="primary" data-station-order="${order.id}" data-station-group="${stationGroup}" data-station-status="READY">Ready</button>` : ""}
-      </div>
-    </article>
   `;
 }
 
@@ -822,6 +788,8 @@ function bindCustomer(token) {
 function bindStaff() {
   bindGlobal();
   document.querySelectorAll("[data-order]").forEach((button) => button.addEventListener("click", () => updateOrderStatus(button.dataset.order, button.dataset.status)));
+  document.querySelectorAll("[data-serve-line]").forEach((button) => button.addEventListener("click", () => serveReadyLine(button.dataset.serveOrder, button.dataset.serveLine, button.dataset.serveQty)));
+  document.querySelectorAll("[data-serve-all]").forEach((button) => button.addEventListener("click", () => serveAllReadyLines(button.dataset.serveAll)));
   document.querySelectorAll("[data-event]").forEach((button) => button.addEventListener("click", () => {
     const event = state.events.find((item) => item.id === button.dataset.event);
     if (event) event.done = true;
@@ -869,7 +837,7 @@ function bindCashier() {
 function bindStation() {
   bindGlobal();
   document.querySelectorAll("[data-station-order]").forEach((button) => button.addEventListener("click", () => {
-    updateStationStatus(button.dataset.stationOrder, button.dataset.stationGroup, button.dataset.stationStatus);
+    updateStationStatus(button.dataset.stationOrder, button.dataset.stationCode, button.dataset.stationStatus);
   }));
 }
 
@@ -1084,6 +1052,9 @@ function submitCounterOrder() {
   const now = new Date().toISOString();
   const serviceContext = buildCounterOrderServiceContext({ tableCode, physicalTable: table });
   if (!validateOrderServiceContext(serviceContext).ok) return;
+  items.forEach((line) => {
+    if (!line.queuedAt) line.queuedAt = now;
+  });
   state.orders.push({
     id: `D${Date.now().toString().slice(-6)}`,
     orderNo,
@@ -1355,13 +1326,32 @@ function updateOrderStatus(orderId, status) {
   render();
 }
 
-function updateStationStatus(orderId, stationGroup, status) {
+function serveReadyLine(orderId, lineId, qty) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
-  const groupStations = stations.filter((station) => station.group === stationGroup).map((station) => station.code);
-  const update = applyStationStatusUpdate(order, groupStations, status);
+  const update = serveLineQuantity(order, lineId, Number(qty || 1));
   if (!update.ok) return;
-  audit("STATION_STATUS", `${stationGroup} ${order.orderNo} -> ${status} / order ${update.to}`);
+  audit("SERVE_LINE", `${order.orderNo} ${update.line.nameVi}: ${update.from}/${update.line.qty} -> ${update.to}/${update.line.qty}`);
+  saveState();
+  render();
+}
+
+function serveAllReadyLines(orderId) {
+  const order = state.orders.find((item) => item.id === orderId);
+  if (!order) return;
+  const update = serveAllReady(order);
+  if (!update.ok) return;
+  audit("SERVE_ALL_READY", `${order.orderNo} ${update.servedLines.length} lines`);
+  saveState();
+  render();
+}
+
+function updateStationStatus(orderId, stationCode, status) {
+  const order = state.orders.find((item) => item.id === orderId);
+  if (!order) return;
+  const update = applyPrepStatusTransition(order, { stationCode }, status);
+  if (!update.ok) return;
+  audit("STATION_STATUS", `${stationCode} ${order.orderNo} -> ${status} / order ${update.to}`);
   saveState();
   render();
 }

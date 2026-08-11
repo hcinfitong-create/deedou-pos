@@ -105,9 +105,12 @@ Owns:
   - `orderSource`: `CUSTOMER_QR`, `STAFF`, or `COUNTER`.
   - Physical `zone`/`table` context when table service requires it.
 - Machine-readable order timestamps used by operations views.
+- Line-level operational identity (`lineId`) for item-level service actions.
+- Line-level preparation state (`prepStatus`) as the canonical KDS source of truth.
+- Line-level serving progress (`servedQty`) independent from bill quantity.
 - Order status normalization.
 - Direct order status transition guards.
-- Station-derived aggregate order readiness.
+- Station-derived aggregate order readiness and service completion.
 - Optional future hooks for course/hold/seat/prep-time metadata.
 
 Does not own:
@@ -116,6 +119,7 @@ Does not own:
 - Cashier payment capture.
 - Admin product editing.
 - Kitchen/bar/dessert presentation.
+- Kitchen/bar/dessert ticket selection/rendering.
 
 Current files:
 
@@ -141,6 +145,8 @@ Owns:
 - Staff action presentation for order acceptance/rejection and served confirmation.
 - Staff service request completion presentation.
 - Staff presentation of service mode, fulfillment type, source, zone/table context, and order age when machine-readable timestamps exist.
+- Staff-facing ready-to-serve line selectors and presentation.
+- FOH presentation for serving one ready line/quantity and counter/takeaway serve-all-ready handoff.
 
 Current location:
 
@@ -153,6 +159,33 @@ Does not own:
 - Kitchen/bar/dessert station queue internals.
 - Table definitions.
 
+### station-workflow
+
+Owns:
+
+- Station/KDS ticket selection.
+- Station-specific preparation action model.
+- KDS ticket derivation.
+- Ticket age/wait age.
+- Thin reusable Kitchen, Bar, and Dessert rendering.
+
+Does not own:
+
+- Serving progress or FOH delivery.
+- Billing quantity, payment, split, refund, or void logic.
+- Menu/admin CRUD.
+- Table definitions or table-session behavior.
+
+Current location:
+
+- `src/features/station-workflow/index.js`
+
+Notes:
+
+- Preparation state is `prepStatus`: `QUEUED -> ACKNOWLEDGED -> PREPARING -> READY`.
+- KDS must never set `SERVED`.
+- `stationStatus` remains a readable compatibility summary derived from line preparation state.
+
 ### kitchen
 
 Owns:
@@ -162,7 +195,7 @@ Owns:
 
 Current location:
 
-- Still inside `app.js`, sharing station rendering with bar and dessert.
+- Thin route composition remains in `app.js`; shared KDS selection/rendering and prep action model live in `station-workflow`.
 
 ### bar
 
@@ -173,7 +206,7 @@ Owns:
 
 Current location:
 
-- Still inside `app.js`.
+- Thin route composition remains in `app.js`; shared KDS selection/rendering and prep action model live in `station-workflow`.
 
 ### dessert
 
@@ -184,7 +217,7 @@ Owns:
 
 Current location:
 
-- Still inside `app.js`.
+- Thin route composition remains in `app.js`; shared KDS selection/rendering and prep action model live in `station-workflow`.
 
 ### admin-menu
 
@@ -322,6 +355,7 @@ After Phase B:
 - `src/features/customer-orders/index.js`
 - `src/features/service-requests/index.js`
 - `src/features/staff-orders/index.js`
+- `src/features/station-workflow/index.js`
 
 ## Protected Modules By Common Task
 
@@ -342,5 +376,5 @@ Change payment method:
 
 Change station workflow:
 
-- Target: `staff-orders`, `kitchen`, `bar`, `dessert`, `ordering` status contracts
+- Target: `station-workflow`, `staff-orders`, and `ordering` status/service contracts
 - Protected: `customer-menu`, `admin-menu`, `payments` unless status affects payable state

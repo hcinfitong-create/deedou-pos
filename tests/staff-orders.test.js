@@ -7,6 +7,7 @@ import {
   renderStaffOrderCard,
   selectCounterServiceOpenOrders,
   selectOpenTablesByPhysicalZone,
+  selectReadyToServeLines,
   selectReadyToServeOrders,
   selectTableServiceOpenOrders,
   STAFF_ORDER_COLUMNS,
@@ -64,6 +65,20 @@ test("staff selector finds ready-to-serve orders", () => {
   assert.deepEqual(selectReadyToServeOrders(orders).map((order) => order.id), ["ready"]);
 });
 
+test("staff selector finds ready lines while order remains in preparation", () => {
+  const order = {
+    id: "mixed",
+    status: "IN_PREPARATION",
+    items: [
+      { lineId: "coffee", station: "BAR_COFFEE", qty: 2, prepStatus: "READY", status: "READY", servedQty: 1 },
+      { lineId: "squid", station: "KITCHEN_HOT", qty: 1, prepStatus: "PREPARING", status: "PREPARING", servedQty: 0 }
+    ]
+  };
+
+  assert.deepEqual(selectReadyToServeLines(order).map((line) => [line.lineId, line.remainingQty]), [["coffee", 1]]);
+  assert.deepEqual(selectReadyToServeOrders([order]).map((item) => item.id), ["mixed"]);
+});
+
 test("staff selectors group orders by operational column", () => {
   const orders = [
     { id: "1", status: "PENDING_ACCEPTANCE" },
@@ -84,13 +99,10 @@ test("staff action presentation follows ordering transition rules", () => {
     { status: "REJECTED", label: "Reject", tone: "danger" }
   ]);
   assert.deepEqual(staffOrderActions({ status: "ACCEPTED" }), [
-    { status: "IN_PREPARATION", label: "Send to prep", tone: "primary" },
     { status: "REJECTED", label: "Reject", tone: "danger" }
   ]);
   assert.deepEqual(staffOrderActions({ status: "IN_PREPARATION" }), []);
-  assert.deepEqual(staffOrderActions({ status: "READY" }), [
-    { status: "SERVED", label: "Served", tone: "primary" }
-  ]);
+  assert.deepEqual(staffOrderActions({ status: "READY" }), []);
   assert.deepEqual(staffOrderActions({ status: "PAID" }), []);
 });
 
@@ -108,7 +120,7 @@ test("staff order card renders escaped item content and valid action buttons", (
     total: 52000,
     note: "<script>",
     stationStatus: { BAR_TEA: "QUEUED" },
-    items: [{ qty: 1, nameEn: "<Tea>", station: "BAR_TEA", status: "QUEUED", isComponent: false }]
+    items: [{ lineId: "tea-1", qty: 1, nameEn: "<Tea>", station: "BAR_TEA", status: "QUEUED", prepStatus: "QUEUED", servedQty: 0, isComponent: false }]
   });
 
   assert.match(html, /D01-0001 - Beach Table A01/);
@@ -119,6 +131,27 @@ test("staff order card renders escaped item content and valid action buttons", (
   assert.match(html, /Note: &lt;script&gt;/);
   assert.match(html, /data-status="ACCEPTED"/);
   assert.match(html, /data-status="REJECTED"/);
+  assert.doesNotMatch(html, /data-status="SERVED"/);
+});
+
+test("staff order card renders item-level serving controls", () => {
+  const html = renderStaffOrderCard({
+    id: "order-2",
+    orderNo: "D01-0002",
+    serviceMode: "COUNTER_SERVICE",
+    fulfillmentType: "TAKEAWAY",
+    orderSource: "COUNTER",
+    table: "",
+    status: "READY",
+    total: 104000,
+    stationStatus: { BAR_COFFEE: "READY" },
+    items: [{ lineId: "coffee-1", qty: 2, nameEn: "Coffee", station: "BAR_COFFEE", prepStatus: "READY", status: "READY", servedQty: 1, isComponent: false }]
+  });
+
+  assert.match(html, /Service/);
+  assert.match(html, /1\/2/);
+  assert.match(html, /data-serve-line="coffee-1"/);
+  assert.match(html, /data-serve-all="order-2"/);
   assert.doesNotMatch(html, /data-status="SERVED"/);
 });
 

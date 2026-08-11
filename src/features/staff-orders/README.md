@@ -13,6 +13,13 @@ DD-002.1 makes the staff board service-aware:
 - Takeaway is displayed as a fulfillment type, not counted as an open physical table.
 - Overall `READY` is not a staff direct action from `IN_PREPARATION`; it is derived by `ordering` from station/item readiness.
 - Cards display service mode, fulfillment type, source, location context, and waiting age when `createdAt` is available.
+- DD-003 adds FOH serving presentation:
+  - ready-to-serve line/quantity selectors;
+  - item-level service progress (`servedQty / qty`);
+  - partial quantity service controls;
+  - counter/takeaway serve-all-ready handoff presentation.
+- Staff serving controls call ordering service-progress APIs through the app shell. This module does not mutate orders directly.
+- KDS preparation remains owned by `station-workflow` and must not set `SERVED`.
 
 Public API:
 
@@ -22,6 +29,7 @@ Public API:
 - `selectTableServiceOpenOrders`
 - `selectCounterServiceOpenOrders`
 - `selectReadyToServeOrders`
+- `selectReadyToServeLines`
 - `selectUnresolvedServiceRequests`
 - `selectOpenTablesByPhysicalZone`
 - `ordersByStaffColumn`
