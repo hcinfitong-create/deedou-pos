@@ -76,9 +76,17 @@ const ORDER_SOURCE_ALIASES = Object.freeze({
 
 const OPEN_ORDER_STATUSES = Object.freeze(["PENDING_ACCEPTANCE", "ACCEPTED", "IN_PREPARATION", "READY", "SERVED"]);
 const CLOSED_ORDER_STATUSES = Object.freeze(["PAID", "REJECTED", "VOIDED", "REFUNDED"]);
-const READY_ITEM_STATUSES = Object.freeze(["READY", "SERVED"]);
+export const PREP_STATUSES = Object.freeze(["QUEUED", "ACKNOWLEDGED", "PREPARING", "READY"]);
+const READY_PREP_STATUSES = Object.freeze(["READY"]);
 const ACTIVE_STATION_STATUSES = Object.freeze(["ACKNOWLEDGED", "PREPARING", "READY"]);
+const PREP_STATUS_TRANSITIONS = Object.freeze({
+  QUEUED: Object.freeze(["ACKNOWLEDGED"]),
+  ACKNOWLEDGED: Object.freeze(["PREPARING"]),
+  PREPARING: Object.freeze(["READY"]),
+  READY: Object.freeze([])
+});
 const ORDER_TIMESTAMP_FIELDS = Object.freeze(["createdAt", "acceptedAt", "prepStartedAt", "readyAt", "servedAt"]);
+const LINE_TIMESTAMP_FIELDS = Object.freeze(["queuedAt", "acknowledgedAt", "prepStartedAt", "readyAt", "servedAt"]);
 
 export function normalizeServiceMode(value, context = {}) {
   const normalized = enumAlias(value, SERVICE_MODE_ALIASES);
@@ -110,14 +118,20 @@ export function normalizeOrderTimestamps(order = {}) {
   return Object.fromEntries(ORDER_TIMESTAMP_FIELDS.map((field) => [field, normalizeIsoTimestamp(order[field])]));
 }
 
-export function normalizeOrderLineOperationalFields(line = {}) {
+export function normalizeOrderLineOperationalFields(line = {}, options = {}) {
+  const qty = normalizeLineQty(line.qty);
+  const prepStatus = normalizePrepStatus(line.prepStatus || line.status);
   return {
+    lineId: normalizeLineId(line.lineId || options.fallbackLineId || ""),
     course: line.course || "",
     holdState: line.holdState || "",
     seat: line.seat || "",
     targetPrepStation: line.targetPrepStation || line.station || "",
     targetPrepMinutes: normalizeOptionalPositiveNumber(line.targetPrepMinutes),
-    ticketAgeAlertMinutes: normalizeOptionalPositiveNumber(line.ticketAgeAlertMinutes)
+    ticketAgeAlertMinutes: normalizeOptionalPositiveNumber(line.ticketAgeAlertMinutes),
+    prepStatus,
+    servedQty: normalizeServedQty(line, qty),
+    ...normalizeLineTimestamps(line)
   };
 }
 
@@ -197,13 +211,15 @@ export function isOpenPhysicalTableOrder(order) {
 }
 
 export function expandOrderLines(cartLines, productById) {
-  return (cartLines || []).flatMap((line) => {
+  return (cartLines || []).flatMap((line, cartIndex) => {
     const item = productById(line.id);
     if (!item) return [];
 
     const qty = Math.max(1, Number(line.qty) || 1);
+    const parentLineId = line.lineId || createOperationalLineId(item.id, cartIndex, "item");
     const parent = {
       id: item.id,
+      lineId: parentLineId,
       qty,
       station: item.components?.length ? "COMBO" : item.station,
       nameVi: item.vi,
@@ -211,14 +227,25 @@ export function expandOrderLines(cartLines, productById) {
       price: Number(item.price) || 0,
       billQty: qty,
       status: "QUEUED",
+      prepStatus: "QUEUED",
+      servedQty: 0,
       isBillable: true,
       isComponent: false,
       parentComboId: "",
-      ...normalizeOrderLineOperationalFields({ ...line, station: item.station })
+      ...normalizeOrderLineOperationalFields({
+        ...line,
+        lineId: parentLineId,
+        qty,
+        station: item.station,
+        status: "QUEUED",
+        prepStatus: "QUEUED",
+        servedQty: 0
+      })
     };
 
     const components = (item.components || []).map((part, index) => ({
       id: `${item.id}-component-${index}`,
+      lineId: `${parentLineId}:component-${index}`,
       qty: qty * (Number(part.qty) || 1),
       station: part.station,
       nameVi: part.vi,
@@ -226,10 +253,20 @@ export function expandOrderLines(cartLines, productById) {
       price: 0,
       billQty: 0,
       status: "QUEUED",
+      prepStatus: "QUEUED",
+      servedQty: 0,
       isBillable: false,
       isComponent: true,
       parentComboId: item.id,
-      ...normalizeOrderLineOperationalFields({ ...part, station: part.station })
+      ...normalizeOrderLineOperationalFields({
+        ...part,
+        lineId: `${parentLineId}:component-${index}`,
+        qty: qty * (Number(part.qty) || 1),
+        station: part.station,
+        status: "QUEUED",
+        prepStatus: "QUEUED",
+        servedQty: 0
+      })
     }));
 
     return [parent, ...components];
@@ -237,8 +274,12 @@ export function expandOrderLines(cartLines, productById) {
 }
 
 export function stationStatusFor(items, status) {
-  const initial = normalizeItemStatus(status === "PENDING_ACCEPTANCE" ? "QUEUED" : status);
-  return Object.fromEntries([...new Set((items || []).filter(isRequiredStationLine).map((item) => item.station))].map((station) => [station, initial]));
+  const initial = normalizePrepStatus(status === "PENDING_ACCEPTANCE" ? "QUEUED" : status);
+  const requiredItems = (items || []).filter(isRequiredStationLine);
+  if (arguments.length > 1) {
+    return Object.fromEntries([...new Set(requiredItems.map((item) => item.station))].map((station) => [station, initial]));
+  }
+  return stationStatusSummaryForItems(requiredItems, initial);
 }
 
 export const DIRECT_ORDER_STATUS_TRANSITIONS = Object.freeze({
@@ -268,12 +309,33 @@ export function applyOrderStatusTransition(order, nextStatus, options = {}) {
   }
 
   const now = options.now || new Date().toISOString();
+  if (to === "SERVED") {
+    const serviceContext = normalizeOrderServiceContext(order);
+    const progress = getServiceProgress(order);
+    if (serviceContext.serviceMode === SERVICE_MODES.TABLE_SERVICE && progress.servedQty < progress.serviceableQty) {
+      return { ok: false, order, from, to, reason: "LINE_SERVING_REQUIRED" };
+    }
+    if (progress.servedQty < progress.serviceableQty && !requiredStationItems(order).every(isLinePrepReady)) {
+      return { ok: false, order, from, to, reason: "ORDER_NOT_READY" };
+    }
+    if (progress.servedQty < progress.serviceableQty) {
+      const handoff = serveAllReady(order, { now });
+      if (!handoff.ok) return { ok: false, order, from, to, reason: handoff.reason };
+    }
+    order.status = deriveOrderOperationalStatus(order);
+    if (order.status !== "SERVED") return { ok: false, order, from, to, reason: "ORDER_NOT_FULLY_SERVED" };
+    setOrderTimestamp(order, "servedAt", now);
+    return { ok: true, order, from, to };
+  }
+
   order.status = to;
   if (to === "ACCEPTED") {
     setOrderTimestamp(order, "acceptedAt", now);
     order.stationStatus = stationStatusFor(order.items, "QUEUED");
     nonComboItems(order).forEach((item) => {
       item.status = "QUEUED";
+      item.prepStatus = "QUEUED";
+      if (!item.queuedAt) item.queuedAt = normalizeIsoTimestamp(now) || now;
     });
   }
   if (to === "IN_PREPARATION") {
@@ -283,22 +345,26 @@ export function applyOrderStatusTransition(order, nextStatus, options = {}) {
     Object.keys(stationStatus).forEach((station) => {
       if (stationStatus[station] === "QUEUED") stationStatus[station] = "PREPARING";
     });
-    nonComboItems(order).filter((item) => item.status === "QUEUED").forEach((item) => {
+    nonComboItems(order).filter((item) => normalizePrepStatus(item.prepStatus || item.status) === "QUEUED").forEach((item) => {
       item.status = "PREPARING";
+      item.prepStatus = "PREPARING";
+      if (!item.prepStartedAt) item.prepStartedAt = normalizeIsoTimestamp(now) || now;
     });
+    order.stationStatus = stationStatusFor(order.items);
   }
   if (to === "REJECTED") order.stationStatus = {};
-  if (to === "SERVED") {
-    setOrderTimestamp(order, "servedAt", now);
-    nonComboItems(order).forEach((item) => {
-      item.status = "SERVED";
-    });
-  }
 
   return { ok: true, order, from, to };
 }
 
-export function applyStationStatusUpdate(order, targetStations, nextStatus, options = {}) {
+export function canTransitionPrepStatus(currentStatus, nextStatus) {
+  const current = normalizePrepStatus(currentStatus);
+  const next = normalizePrepStatus(nextStatus);
+  if (String(nextStatus || "").trim().toUpperCase() === "SERVED") return false;
+  return (PREP_STATUS_TRANSITIONS[current] || []).includes(next);
+}
+
+export function applyPrepStatusTransition(order, target = {}, nextStatus, options = {}) {
   if (!order) return { ok: false, reason: "ORDER_NOT_FOUND" };
   if (isClosedOrderStatus(order.status)) return { ok: false, order, reason: "ORDER_CLOSED" };
   const previousStatus = normalizeOrderStatus(order.status || "PENDING_ACCEPTANCE");
@@ -306,47 +372,71 @@ export function applyStationStatusUpdate(order, targetStations, nextStatus, opti
     return { ok: false, order, reason: "ORDER_NOT_IN_STATION_WORKFLOW" };
   }
 
-  const stations = new Set((targetStations || []).filter(Boolean));
+  const stations = new Set([
+    target.stationCode,
+    ...(target.stationCodes || []),
+    ...(target.stations || [])
+  ].filter(Boolean));
   if (!stations.size) return { ok: false, order, reason: "NO_STATIONS" };
 
-  const status = normalizeItemStatus(nextStatus);
+  if (String(nextStatus || "").trim().toUpperCase() === "SERVED") {
+    return { ok: false, order, reason: "INVALID_PREP_STATUS" };
+  }
+  const status = normalizePrepStatus(nextStatus);
   const now = options.now || new Date().toISOString();
-  const stationStatus = order.stationStatus || stationStatusFor(order.items, "QUEUED");
-  order.stationStatus = stationStatus;
+  const targetLineId = normalizeLineId(target.lineId || "");
+  const candidates = requiredStationItems(order).filter((item) => {
+    return stations.has(item.station) && (!targetLineId || item.lineId === targetLineId);
+  });
+  if (!candidates.length) return { ok: false, order, reason: "NO_LINES" };
 
-  stations.forEach((station) => {
-    if (stationStatus[station] || (order.items || []).some((item) => item.station === station)) {
-      stationStatus[station] = status;
-    }
-  });
-  requiredStationItems(order).filter((item) => stations.has(item.station)).forEach((item) => {
+  const changedLines = [];
+  candidates.forEach((item) => {
+    const current = normalizePrepStatus(item.prepStatus || item.status);
+    if (!canTransitionPrepStatus(current, status)) return;
+    item.prepStatus = status;
     item.status = status;
+    setLinePrepTimestamp(item, status, now);
+    changedLines.push(item.lineId);
   });
+  if (!changedLines.length) return { ok: false, order, reason: "INVALID_PREP_STATUS_TRANSITION" };
 
   if (ACTIVE_STATION_STATUSES.includes(status)) setOrderTimestamp(order, "prepStartedAt", now);
-  const derivedStatus = deriveOrderStatusFromStations(order);
+  order.stationStatus = stationStatusFor(order.items);
+  const derivedStatus = deriveOrderOperationalStatus(order);
   order.status = derivedStatus;
   if (derivedStatus === "READY") setOrderTimestamp(order, "readyAt", now);
 
-  return { ok: true, order, from: previousStatus, to: derivedStatus, stationStatus: status };
+  return { ok: true, order, from: previousStatus, to: derivedStatus, stationStatus: status, changedLines };
+}
+
+export function applyStationStatusUpdate(order, targetStations, nextStatus, options = {}) {
+  return applyPrepStatusTransition(order, { stations: targetStations }, nextStatus, options);
 }
 
 export function deriveOrderStatusFromStations(order) {
+  return deriveOrderOperationalStatus(order);
+}
+
+export function deriveOrderOperationalStatus(order) {
   if (!order) return "PENDING_ACCEPTANCE";
   const current = normalizeOrderStatus(order.status || "PENDING_ACCEPTANCE");
-  if (["PENDING_ACCEPTANCE", "REJECTED", "PAID", "VOIDED", "REFUNDED", "SERVED"].includes(current)) return current;
+  if (["REJECTED", "PAID", "VOIDED", "REFUNDED"].includes(current)) return current;
 
   const requiredItems = requiredStationItems(order);
   if (!requiredItems.length) return current;
 
-  const requiredStations = [...new Set(requiredItems.map((item) => item.station).filter(Boolean))];
-  const everyStationReady = requiredStations.every((station) => stationReady(order, requiredItems, station));
-  const everyLineReady = requiredItems.every((item) => READY_ITEM_STATUSES.includes(normalizeItemStatus(item.status)));
-  if (everyStationReady && everyLineReady) return "READY";
+  const progress = getServiceProgress(order);
+  if (progress.serviceableQty > 0 && progress.servedQty >= progress.serviceableQty) return "SERVED";
 
-  const anyStationTouched = Object.values(order.stationStatus || {}).some((status) => ACTIVE_STATION_STATUSES.includes(normalizeItemStatus(status)))
-    || requiredItems.some((item) => ACTIVE_STATION_STATUSES.includes(normalizeItemStatus(item.status)));
+  const remainingItems = requiredItems.filter((item) => !isLineFullyServed(item));
+  if (remainingItems.length && remainingItems.every(isLinePrepReady)) return "READY";
+
+  const anyStationTouched = Object.values(order.stationStatus || {}).some((status) => ACTIVE_STATION_STATUSES.includes(normalizePrepStatus(status)))
+    || requiredItems.some((item) => ACTIVE_STATION_STATUSES.includes(normalizePrepStatus(item.prepStatus || item.status)));
+  const anyServedProgress = progress.servedQty > 0;
   if (anyStationTouched || current === "READY" || current === "IN_PREPARATION") return "IN_PREPARATION";
+  if (anyServedProgress) return "IN_PREPARATION";
   return current;
 }
 
@@ -364,15 +454,22 @@ function nonComboItems(order) {
 }
 
 export function countPrepItems(orders) {
-  return orders.flatMap((order) => order.items).filter(isRequiredStationLine).reduce((sum, item) => sum + item.qty, 0);
+  return orderLines(orders).filter(isRequiredStationLine).reduce((sum, item) => sum + normalizeLineQty(item.qty), 0);
 }
 
 export function countServedItems(orders) {
-  return orders.flatMap((order) => order.items).filter((item) => isRequiredStationLine(item) && item.status === "SERVED").reduce((sum, item) => sum + item.qty, 0);
+  return orderLines(orders).filter(isRequiredStationLine).reduce((sum, item) => sum + normalizeServiceProgress(item).servedQty, 0);
 }
 
 export function countStatusItems(orders, status) {
-  return orders.flatMap((order) => order.items).filter((item) => isRequiredStationLine(item) && item.status === status).reduce((sum, item) => sum + item.qty, 0);
+  const normalizedStatus = normalizeItemStatus(status);
+  if (normalizedStatus === "SERVED") return countServedItems(orders);
+  const prepStatus = normalizePrepStatus(status);
+  return orderLines(orders).filter((item) => isRequiredStationLine(item) && normalizePrepStatus(item.prepStatus || item.status) === prepStatus).reduce((sum, item) => {
+    const qty = normalizeLineQty(item.qty);
+    if (prepStatus === "READY") return sum + Math.max(0, qty - normalizeServiceProgress(item).servedQty);
+    return sum + qty;
+  }, 0);
 }
 
 export function normalizeOrderStatus(status) {
@@ -381,7 +478,8 @@ export function normalizeOrderStatus(status) {
     PREPARING: "IN_PREPARATION",
     CANCELLED: "VOIDED"
   };
-  return aliases[status] || status;
+  const key = String(status || "").trim().toUpperCase();
+  return aliases[key] || key;
 }
 
 export function normalizeItemStatus(status) {
@@ -392,21 +490,172 @@ export function normalizeItemStatus(status) {
     IN_PROGRESS: "PREPARING",
     COMPLETED: "READY"
   };
-  return aliases[status] || status || "QUEUED";
+  const key = String(status || "").trim().toUpperCase();
+  return aliases[key] || key || "QUEUED";
+}
+
+export function normalizePrepStatus(status) {
+  const normalized = normalizeItemStatus(status);
+  if (normalized === "SERVED") return "READY";
+  return PREP_STATUSES.includes(normalized) ? normalized : "QUEUED";
+}
+
+export function normalizeServiceProgress(line = {}) {
+  const qty = normalizeLineQty(line.qty);
+  const servedQty = isRequiredStationLine(line) ? normalizeServedQty(line, qty) : 0;
+  return {
+    serviceableQty: isRequiredStationLine(line) ? qty : 0,
+    servedQty,
+    remainingQty: Math.max(0, qty - servedQty),
+    fullyServed: isRequiredStationLine(line) ? servedQty >= qty : true
+  };
+}
+
+export function getServiceProgress(order = {}) {
+  return requiredStationItems(order).reduce((progress, line) => {
+    const lineProgress = normalizeServiceProgress(line);
+    progress.serviceableQty += lineProgress.serviceableQty;
+    progress.servedQty += lineProgress.servedQty;
+    progress.remainingQty += lineProgress.remainingQty;
+    return progress;
+  }, { serviceableQty: 0, servedQty: 0, remainingQty: 0 });
+}
+
+export function isLineFullyServed(line = {}) {
+  return normalizeServiceProgress(line).fullyServed;
+}
+
+export function canServeLine(line = {}, quantity = 1) {
+  const qty = Number(quantity);
+  if (!Number.isFinite(qty) || qty <= 0) return false;
+  return isRequiredStationLine(line)
+    && isLinePrepReady(line)
+    && normalizeServiceProgress(line).remainingQty > 0;
+}
+
+export function serveLineQuantity(order, lineId, quantity = 1, options = {}) {
+  if (!order) return { ok: false, reason: "ORDER_NOT_FOUND" };
+  if (isClosedOrderStatus(order.status)) return { ok: false, order, reason: "ORDER_CLOSED" };
+  const normalizedLineId = normalizeLineId(lineId);
+  if (!normalizedLineId) return { ok: false, order, reason: "LINE_ID_REQUIRED" };
+
+  const line = requiredStationItems(order).find((item) => item.lineId === normalizedLineId);
+  if (!line) return { ok: false, order, reason: "LINE_NOT_FOUND" };
+  if (!canServeLine(line, quantity)) return { ok: false, order, reason: "LINE_NOT_READY" };
+
+  const serviceQty = Number(quantity);
+  const oldServedQty = normalizeServiceProgress(line).servedQty;
+  const nextServedQty = clampServiceQty(oldServedQty + serviceQty, normalizeLineQty(line.qty));
+  if (nextServedQty === oldServedQty) return { ok: false, order, reason: "NO_SERVICE_QUANTITY_CHANGE" };
+
+  const now = options.now || new Date().toISOString();
+  line.servedQty = nextServedQty;
+  line.servedAt = normalizeIsoTimestamp(now) || now;
+  if (isLineFullyServed(line)) line.status = "SERVED";
+  order.status = deriveOrderOperationalStatus(order);
+  if (order.status === "SERVED") setOrderTimestamp(order, "servedAt", now);
+  return { ok: true, order, line, lineId: normalizedLineId, from: oldServedQty, to: nextServedQty };
+}
+
+export function serveAllReady(order, options = {}) {
+  if (!order) return { ok: false, reason: "ORDER_NOT_FOUND" };
+  if (isClosedOrderStatus(order.status)) return { ok: false, order, reason: "ORDER_CLOSED" };
+
+  const now = options.now || new Date().toISOString();
+  const readyLines = requiredStationItems(order).filter((line) => isLinePrepReady(line) && !isLineFullyServed(line));
+  if (!readyLines.length) return { ok: false, order, reason: "NO_READY_LINES" };
+
+  readyLines.forEach((line) => {
+    line.servedQty = normalizeLineQty(line.qty);
+    line.servedAt = normalizeIsoTimestamp(now) || now;
+    line.status = "SERVED";
+  });
+  order.status = deriveOrderOperationalStatus(order);
+  if (order.status === "SERVED") setOrderTimestamp(order, "servedAt", now);
+  return { ok: true, order, servedLines: readyLines.map((line) => line.lineId) };
 }
 
 function requiredStationItems(order) {
   return (order.items || []).filter(isRequiredStationLine);
 }
 
-function stationReady(order, requiredItems, station) {
-  const stationState = normalizeItemStatus(order.stationStatus?.[station]);
-  if (READY_ITEM_STATUSES.includes(stationState)) return true;
-  return requiredItems.filter((item) => item.station === station).every((item) => READY_ITEM_STATUSES.includes(normalizeItemStatus(item.status)));
+function isLinePrepReady(line = {}) {
+  return READY_PREP_STATUSES.includes(normalizePrepStatus(line.prepStatus || line.status));
+}
+
+function stationStatusSummaryForItems(items, fallbackStatus = "QUEUED") {
+  const byStation = (items || []).filter(isRequiredStationLine).reduce((groups, item) => {
+    groups[item.station] = groups[item.station] || [];
+    groups[item.station].push(item);
+    return groups;
+  }, {});
+  return Object.fromEntries(Object.entries(byStation).map(([station, stationItems]) => [
+    station,
+    deriveStationPrepStatus(stationItems, fallbackStatus)
+  ]));
+}
+
+function deriveStationPrepStatus(items, fallbackStatus = "QUEUED") {
+  if (!items?.length) return normalizePrepStatus(fallbackStatus);
+  const statuses = items.map((item) => normalizePrepStatus(item.prepStatus || item.status));
+  if (statuses.every((status) => status === "READY")) return "READY";
+  if (statuses.includes("PREPARING")) return "PREPARING";
+  if (statuses.includes("ACKNOWLEDGED")) return "ACKNOWLEDGED";
+  return "QUEUED";
+}
+
+function setLinePrepTimestamp(line, prepStatus, now) {
+  const timestamp = normalizeIsoTimestamp(now) || now;
+  if (!line.queuedAt) line.queuedAt = timestamp;
+  if (prepStatus === "ACKNOWLEDGED" && !line.acknowledgedAt) line.acknowledgedAt = timestamp;
+  if (prepStatus === "PREPARING") {
+    if (!line.acknowledgedAt) line.acknowledgedAt = timestamp;
+    if (!line.prepStartedAt) line.prepStartedAt = timestamp;
+  }
+  if (prepStatus === "READY") {
+    if (!line.acknowledgedAt) line.acknowledgedAt = timestamp;
+    if (!line.prepStartedAt) line.prepStartedAt = timestamp;
+    if (!line.readyAt) line.readyAt = timestamp;
+  }
 }
 
 function setOrderTimestamp(order, field, now) {
   if (!order[field]) order[field] = normalizeIsoTimestamp(now) || now;
+}
+
+function normalizeLineTimestamps(line = {}) {
+  return Object.fromEntries(LINE_TIMESTAMP_FIELDS.map((field) => [field, normalizeIsoTimestamp(line[field])]));
+}
+
+function orderLines(orders = []) {
+  return (orders || []).flatMap((order) => order.items || []);
+}
+
+function normalizeLineQty(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? Math.round(number) : 1;
+}
+
+function normalizeServedQty(line, qty) {
+  const legacyServed = line.servedQty === undefined
+    && normalizeItemStatus(line.status) === "SERVED";
+  return clampServiceQty(legacyServed ? qty : line.servedQty, qty);
+}
+
+function clampServiceQty(value, maxQty) {
+  const max = Math.max(0, Number(maxQty) || 0);
+  const rawValue = value === undefined || value === null || value === "" ? 0 : Number(value);
+  const safeValue = Number.isFinite(rawValue) ? rawValue : 0;
+  return Math.min(max, Math.max(0, Math.round(safeValue)));
+}
+
+function normalizeLineId(value) {
+  return String(value || "").trim();
+}
+
+function createOperationalLineId(productId, index, suffix) {
+  const safeProductId = String(productId || "line").replace(/[^a-zA-Z0-9_-]+/g, "-");
+  return `${safeProductId}:${Number(index) + 1}:${suffix}`;
 }
 
 function enumAlias(value, aliases) {

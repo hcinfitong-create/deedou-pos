@@ -1,13 +1,17 @@
 import {
+  canServeLine,
   FULFILLMENT_TYPES,
   getAllowedOrderStatusTransitions,
+  getServiceProgress,
   isOpenOrderStatus,
   isOpenPhysicalTableOrder,
+  normalizeServiceProgress,
   normalizeOrderServiceContext,
+  normalizePrepStatus,
   ORDER_SOURCES,
   SERVICE_MODES
 } from "../ordering/index.js";
-import { escapeHtml, formatMoney } from "../../shared/utils/index.js";
+import { escapeAttr, escapeHtml, formatMoney } from "../../shared/utils/index.js";
 
 export const STAFF_ORDER_COLUMNS = ["PENDING_ACCEPTANCE", "ACCEPTED", "IN_PREPARATION", "READY", "SERVED"];
 
@@ -55,7 +59,20 @@ export function selectCounterServiceOpenOrders(orders = []) {
 }
 
 export function selectReadyToServeOrders(orders = []) {
-  return orders.filter((order) => order.status === "READY");
+  return orders.filter((order) => {
+    return isOpenOrderStatus(order.status)
+      && (selectReadyToServeLines(order).length > 0 || order.status === "READY");
+  });
+}
+
+export function selectReadyToServeLines(order = {}) {
+  return (order.items || []).filter((line) => canServeLine(line)).map((line) => {
+    const progress = normalizeServiceProgress(line);
+    return {
+      ...line,
+      remainingQty: progress.remainingQty
+    };
+  });
 }
 
 export function selectUnresolvedServiceRequests(events = []) {
@@ -81,7 +98,7 @@ export function ordersByStaffColumn(orders = []) {
 }
 
 export function staffOrderActions(order) {
-  return getAllowedOrderStatusTransitions(order?.status).map((status) => ({
+  return getAllowedOrderStatusTransitions(order?.status).filter((status) => status !== "SERVED").map((status) => ({
     status,
     ...(STAFF_ACTION_COPY[status] || { label: status, tone: "primary" })
   }));
@@ -122,6 +139,8 @@ export function renderStaffPage({ orders = [], events = [] } = {}) {
 export function renderStaffOrderCard(order) {
   const context = normalizeOrderServiceContext(order);
   const age = formatOrderAge(order);
+  const serviceProgress = getServiceProgress(order);
+  const readyLines = selectReadyToServeLines(order);
   return `
     <article class="order-card">
       <div class="order-head"><strong>${escapeHtml(order.orderNo)} - ${escapeHtml(orderContextLabel(context))}</strong><span class="muted">${escapeHtml(age || order.time || "")}</span></div>
@@ -129,10 +148,12 @@ export function renderStaffOrderCard(order) {
         <span class="status-pill"><span>Mode</span><strong>${escapeHtml(serviceModeLabel(context.serviceMode))}</strong></span>
         <span class="status-pill"><span>Fulfillment</span><strong>${escapeHtml(fulfillmentLabel(context.fulfillmentType))}</strong></span>
         <span class="status-pill"><span>Source</span><strong>${escapeHtml(sourceLabel(context.orderSource))}</strong></span>
+        <span class="status-pill"><span>Service</span><strong>${serviceProgress.servedQty}/${serviceProgress.serviceableQty}</strong></span>
       </div>
       <ul class="item-list">
-        ${order.items.map((line) => `<li class="${line.isComponent ? "component-line" : ""}">${line.isComponent ? "-> " : ""}${line.qty} x ${escapeHtml(line.nameEn)} <span class="station">${line.station}</span> <span class="station">${line.status}</span></li>`).join("")}
+        ${order.items.map((line) => renderStaffLine(line)).join("")}
       </ul>
+      ${readyLines.length ? renderReadyServiceActions(order, context, readyLines) : ""}
       ${order.note ? `<p class="muted">Note: ${escapeHtml(order.note)}</p>` : ""}
       <div class="station-grid">${Object.entries(order.stationStatus || {}).map(([station, status]) => `<span class="status-pill"><span>${station}</span><strong>${status}</strong></span>`).join("")}</div>
       <strong>${formatMoney(order.total)}</strong>
@@ -140,6 +161,33 @@ export function renderStaffOrderCard(order) {
         ${staffOrderActions(order).map((action) => `<button class="${action.tone}" data-order="${order.id}" data-status="${action.status}">${action.label}</button>`).join("")}
       </div>
     </article>
+  `;
+}
+
+function renderStaffLine(line) {
+  const progress = normalizeServiceProgress(line);
+  const prepStatus = normalizePrepStatus(line.prepStatus || line.status);
+  return `<li class="${line.isComponent ? "component-line" : ""}">${line.isComponent ? "-> " : ""}${line.qty} x ${escapeHtml(line.nameEn)} <span class="station">${escapeHtml(line.station)}</span> <span class="station">${prepStatus}</span> <span class="station">served ${progress.servedQty}/${progress.serviceableQty || line.qty}</span></li>`;
+}
+
+function renderReadyServiceActions(order, context, readyLines) {
+  const counterFastPath = context.serviceMode === SERVICE_MODES.COUNTER_SERVICE;
+  return `
+    <div class="service-actions">
+      <strong>Ready to serve</strong>
+      <ul class="item-list compact-items">
+        ${readyLines.map((line) => `
+          <li>
+            <span>${line.remainingQty} x ${escapeHtml(line.nameEn)} <span class="station">${escapeHtml(line.station)}</span></span>
+            <span class="split-actions compact-actions">
+              <button class="primary compact" data-serve-order="${escapeAttr(order.id)}" data-serve-line="${escapeAttr(line.lineId)}" data-serve-qty="1">Serve 1</button>
+              ${line.remainingQty > 1 ? `<button class="ghost compact" data-serve-order="${escapeAttr(order.id)}" data-serve-line="${escapeAttr(line.lineId)}" data-serve-qty="${line.remainingQty}">Serve all line</button>` : ""}
+            </span>
+          </li>
+        `).join("")}
+      </ul>
+      ${counterFastPath ? `<button class="primary compact" data-serve-all="${escapeAttr(order.id)}">Serve all ready</button>` : ""}
+    </div>
   `;
 }
 

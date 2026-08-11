@@ -24,6 +24,7 @@ index.html
       -> features/customer-orders
       -> features/service-requests
       -> features/staff-orders
+      -> features/station-workflow
 ```
 
 The current router is hash-based:
@@ -44,7 +45,10 @@ Orders now carry explicit service context so DeeDou can support both cafe/counte
 - `fulfillmentType` describes how the guest receives the order: `DINE_IN` or `TAKEAWAY`.
 - `orderSource` describes who captured it: `CUSTOMER_QR`, `STAFF`, or `COUNTER`.
 - `zone` and `table` describe the physical service area only when a physical table is involved.
-- Aggregate `order.status` is separate from station/item status. Staff can accept, reject, send to prep, serve, and close compatible paid orders. Overall `READY` is derived from required station/item readiness.
+- Aggregate `order.status` is separate from station preparation, serving progress, and billing progress.
+- Line-level `prepStatus` is the canonical preparation source of truth for KDS: `QUEUED -> ACKNOWLEDGED -> PREPARING -> READY`.
+- Line-level `servedQty` tracks FOH delivery to guests and is independent from `billQty`.
+- Overall `READY` is derived when all remaining unserved required lines are prep-ready. Overall `SERVED` is derived only when all serviceable quantities are fully served.
 
 Counter/takeaway orders may have no table. Takeaway is a fulfillment type, not a physical service area.
 
@@ -105,9 +109,10 @@ Phase B has extracted the first stable, low-risk modules:
 - `features/customer-orders`
 - `features/service-requests`
 - `features/staff-orders`
+- `features/station-workflow`
 
 Larger UI decomposition should come later, after each phase validates.
 
 ## Current Known Coupling
 
-`app.js` still owns broad page composition, event binding, localStorage orchestration, admin actions, cashier actions, payments, reports, and station page orchestration. Cart rules/UI, customer order status presentation, customer service request event creation, ordering contracts, and staff board presentation/selectors now live behind feature public APIs.
+`app.js` still owns broad page composition, event binding, localStorage orchestration, admin actions, cashier actions, payments, reports, and station persistence orchestration. Cart rules/UI, customer order status presentation, customer service request event creation, ordering contracts, staff board presentation/selectors, and station/KDS rendering/selectors now live behind feature public APIs.

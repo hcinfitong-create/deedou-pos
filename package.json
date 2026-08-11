@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "check": "node --check app.js && node --check src/features/customer-menu/index.js && node --check src/features/ordering/index.js && node --check src/features/cart/index.js && node --check src/features/customer-orders/index.js && node --check src/features/service-requests/index.js && node --check src/features/staff-orders/index.js"
+    "check": "node --check app.js && node --check src/features/customer-menu/index.js && node --check src/features/ordering/index.js && node --check src/features/cart/index.js && node --check src/features/customer-orders/index.js && node --check src/features/service-requests/index.js && node --check src/features/staff-orders/index.js && node --check src/features/station-workflow/index.js"
   },
   "engines": {
     "node": ">=20"

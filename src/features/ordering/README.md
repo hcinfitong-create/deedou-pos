@@ -15,11 +15,20 @@ Owns framework-independent order and bill calculation rules.
 - Charged quantity.
 - Line subtotal.
 - Order total recalculation.
-- Station status derivation.
-- Aggregate readiness derivation from required station/item readiness.
+- Stable per-order operational line identity (`lineId`).
+- Preparation state normalization (`prepStatus`) as the canonical station/KDS source of truth.
+- Serving progress (`servedQty`) independent from `billQty`.
+- Station status compatibility summary derivation.
+- Aggregate readiness/service derivation from required station/item readiness and served quantities.
 - Machine-readable operational timestamps:
   - `createdAt`
   - `acceptedAt`
+  - `prepStartedAt`
+  - `readyAt`
+  - `servedAt`
+- Line-level operational timestamps:
+  - `queuedAt`
+  - `acknowledgedAt`
   - `prepStartedAt`
   - `readyAt`
   - `servedAt`
@@ -34,6 +43,7 @@ Owns framework-independent order and bill calculation rules.
 - Cashier payment capture.
 - Admin product editing.
 - Kitchen/bar/dessert presentation.
+- Staff/KDS DOM event binding.
 - Payment provider, split, refund, or void behavior.
 
 ## Public API
@@ -48,10 +58,32 @@ Important DD-002.1 APIs:
 - `normalizeOrderSource`
 - `normalizeOrderTimestamps`
 - `normalizeOrderLineOperationalFields`
+- `normalizePrepStatus`
+- `normalizeServiceProgress`
+- `getServiceProgress`
+- `isLineFullyServed`
+- `canServeLine`
+- `serveLineQuantity`
+- `serveAllReady`
+- `deriveOrderOperationalStatus`
+- `canTransitionPrepStatus`
+- `applyPrepStatusTransition`
 - `applyOrderStatusTransition`
 - `applyStationStatusUpdate`
 - `deriveOrderStatusFromStations`
 - `isOpenPhysicalTableOrder`
+
+## DD-003 Contract
+
+Preparation state, serving progress, and billing progress are separate:
+
+```text
+prepStatus != servedQty != billQty
+```
+
+KDS preparation uses `QUEUED -> ACKNOWLEDGED -> PREPARING -> READY`. `SERVED` is not a preparation state. For legacy lines, `status: "SERVED"` normalizes to `prepStatus: "READY"` and `servedQty: qty`.
+
+Table-service serving must use line/quantity service APIs. Counter/takeaway can use `serveAllReady(...)` as a deliberate handoff fast path. Direct `SERVED -> PAID` compatibility remains outside station workflow.
 
 ## Dependencies
 
@@ -71,4 +103,4 @@ Keep this module pure and framework-independent. Do not add browser storage or D
 
 ## Tests
 
-Module tests cover totals, bill quantity adjustment, status normalization, combo routing, service context validation, source normalization, machine-readable timestamp normalization, station-derived readiness, combo/meta readiness exclusion, and direct order transition guards.
+Module tests cover totals, bill quantity adjustment, status normalization, combo routing, service context validation, source normalization, machine-readable timestamp normalization, station-derived readiness, prep transition guards, item-level serving, partial service, combo/meta readiness exclusion, and direct order transition guards.
