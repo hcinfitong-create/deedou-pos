@@ -146,6 +146,31 @@ export function normalizeOrderServiceContext(order = {}) {
   };
 }
 
+export function buildCounterOrderServiceContext({ tableCode = "", physicalTable = null } = {}) {
+  const isTakeaway = String(tableCode || "").trim().toUpperCase() === FULFILLMENT_TYPES.TAKEAWAY;
+  if (isTakeaway) {
+    return normalizeOrderServiceContext({
+      serviceMode: SERVICE_MODES.COUNTER_SERVICE,
+      fulfillmentType: FULFILLMENT_TYPES.TAKEAWAY,
+      orderSource: ORDER_SOURCES.COUNTER
+    });
+  }
+  if (physicalTable?.code) {
+    return normalizeOrderServiceContext({
+      serviceMode: SERVICE_MODES.TABLE_SERVICE,
+      fulfillmentType: FULFILLMENT_TYPES.DINE_IN,
+      orderSource: ORDER_SOURCES.COUNTER,
+      table: physicalTable.code,
+      zone: physicalTable.zone || ""
+    });
+  }
+  return normalizeOrderServiceContext({
+    serviceMode: SERVICE_MODES.COUNTER_SERVICE,
+    fulfillmentType: FULFILLMENT_TYPES.DINE_IN,
+    orderSource: ORDER_SOURCES.COUNTER
+  });
+}
+
 export function validateOrderServiceContext(order = {}) {
   const context = normalizeOrderServiceContext(order);
   const errors = [];

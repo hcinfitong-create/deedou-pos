@@ -6,6 +6,7 @@ import {
   applyOrderStatusTransition,
   applyStationStatusUpdate,
   billableTotal,
+  buildCounterOrderServiceContext,
   chargedQty,
   clampBillQty,
   countPrepItems,
@@ -1081,13 +1082,7 @@ function submitCounterOrder() {
   if (!items.length) return;
   const total = billableTotal(items);
   const now = new Date().toISOString();
-  const serviceContext = normalizeOrderServiceContext({
-    serviceMode: isTakeaway ? SERVICE_MODES.COUNTER_SERVICE : SERVICE_MODES.TABLE_SERVICE,
-    fulfillmentType: isTakeaway ? FULFILLMENT_TYPES.TAKEAWAY : FULFILLMENT_TYPES.DINE_IN,
-    orderSource: ORDER_SOURCES.COUNTER,
-    table: isTakeaway ? "" : tableCode,
-    zone: table?.zone || ""
-  });
+  const serviceContext = buildCounterOrderServiceContext({ tableCode, physicalTable: table });
   if (!validateOrderServiceContext(serviceContext).ok) return;
   state.orders.push({
     id: `D${Date.now().toString().slice(-6)}`,

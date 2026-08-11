@@ -43,6 +43,7 @@ Import from `src/features/ordering/index.js`.
 Important DD-002.1 APIs:
 
 - `normalizeOrderServiceContext`
+- `buildCounterOrderServiceContext`
 - `validateOrderServiceContext`
 - `normalizeOrderSource`
 - `normalizeOrderTimestamps`

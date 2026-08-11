@@ -5,6 +5,7 @@ import {
   applyOrderStatusTransition,
   applyStationStatusUpdate,
   billableTotal,
+  buildCounterOrderServiceContext,
   canTransitionOrderStatus,
   clampBillQty,
   deriveOrderStatusFromStations,
@@ -188,6 +189,41 @@ test("counter service can exist without a table", () => {
     zone: "",
     table: ""
   });
+});
+
+test("counter order service context matches runtime table selection rules", () => {
+  const walkIn = buildCounterOrderServiceContext({ tableCode: "", physicalTable: null });
+  assert.deepEqual(walkIn, {
+    serviceMode: "COUNTER_SERVICE",
+    fulfillmentType: "DINE_IN",
+    orderSource: "COUNTER",
+    zone: "",
+    table: ""
+  });
+  assert.equal(validateOrderServiceContext(walkIn).ok, true);
+
+  const tableOrder = buildCounterOrderServiceContext({
+    tableCode: "A01",
+    physicalTable: { code: "A01", zone: "Beach" }
+  });
+  assert.deepEqual(tableOrder, {
+    serviceMode: "TABLE_SERVICE",
+    fulfillmentType: "DINE_IN",
+    orderSource: "COUNTER",
+    zone: "Beach",
+    table: "A01"
+  });
+  assert.equal(validateOrderServiceContext(tableOrder).ok, true);
+
+  const takeaway = buildCounterOrderServiceContext({ tableCode: "TAKEAWAY", physicalTable: null });
+  assert.deepEqual(takeaway, {
+    serviceMode: "COUNTER_SERVICE",
+    fulfillmentType: "TAKEAWAY",
+    orderSource: "COUNTER",
+    zone: "",
+    table: ""
+  });
+  assert.equal(validateOrderServiceContext(takeaway).ok, true);
 });
 
 test("takeaway is not counted as an open physical table", () => {
