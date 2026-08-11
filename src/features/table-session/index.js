@@ -118,17 +118,22 @@ export function deriveTableFloorModels({ tables = [], tableSessions = [], orders
   const repaired = repairDuplicateOpenSessionReferences({
     sessions: normalizeTableSessionList(tableSessions, { tables }),
     orders,
+    events,
     now: new Date().toISOString()
   });
-  const sessions = repaired.ok ? repaired.tableSessions : normalizeTableSessions(tableSessions, { tables });
+  const sessions = repaired.ok ? repaired.tableSessions : normalizeTableSessionList(tableSessions, { tables });
   const scopedOrders = repaired.ok ? repaired.orders : orders;
+  const scopedEvents = repaired.ok ? repaired.events : events;
   return (tables || []).map((table) => {
-    const session = getActiveTableSession(sessions, table.code);
-    const sessionOrders = session ? selectOrdersForTableSession(scopedOrders, session) : [];
+    const openTableSessions = selectOpenSessionsForTable(sessions, table.code);
+    const session = openTableSessions[0] || null;
+    const sessionOrders = session
+      ? selectOrdersForFloorTable(scopedOrders, session, openTableSessions, !repaired.ok)
+      : [];
     const activeSessionOrders = sessionOrders.filter((order) => isOpenOrderStatus(order.status));
     const unresolvedRequests = session
-      ? selectUnresolvedSessionRequests(events, session)
-      : selectLegacyTableRequests(events, table.code);
+      ? selectUnresolvedRequestsForFloorTable(scopedEvents, session, openTableSessions, !repaired.ok)
+      : selectLegacyTableRequests(scopedEvents, table.code);
     const serviceProgress = aggregateServiceProgress(sessionOrders);
     const outstandingBalance = sessionOrders.reduce((sum, order) => sum + orderBalance(order), 0);
     const prepMetrics = countRemainingPrepWork(activeSessionOrders);
@@ -249,14 +254,15 @@ export function transferTableSession({ tableSessions = [], orders = [], events =
   };
 }
 
-export function backfillLegacyTableSessions({ tableSessions = [], orders = [], tables = [], now } = {}) {
+export function backfillLegacyTableSessions({ tableSessions = [], orders = [], events = [], tables = [], now } = {}) {
   const repair = repairDuplicateOpenSessionReferences({
     sessions: normalizeTableSessionList(tableSessions, { tables }),
     orders,
+    events,
     now
   });
   if (!repair.ok) {
-    return { ok: false, reason: repair.reason, tableSessions: repair.tableSessions, orders: repair.orders, createdSessions: [] };
+    return { ok: false, reason: repair.reason, tableSessions: repair.tableSessions, orders: repair.orders, events: repair.events, createdSessions: [] };
   }
   const sessions = repair.tableSessions;
   const nextSessions = [...sessions];
@@ -278,7 +284,7 @@ export function backfillLegacyTableSessions({ tableSessions = [], orders = [], t
     };
   });
 
-  return { ok: true, tableSessions: nextSessions, orders: nextOrders, createdSessions, repairedSessions: repair.repairedSessions };
+  return { ok: true, tableSessions: nextSessions, orders: nextOrders, events: repair.events, createdSessions, repairedSessions: repair.repairedSessions };
 }
 
 function normalizeTableSessionList(tableSessions = [], options = {}) {
@@ -300,7 +306,7 @@ function createLegacySession(context, sessions, tables, now) {
   };
 }
 
-function repairDuplicateOpenSessionReferences({ sessions = [], orders = [], now } = {}) {
+function repairDuplicateOpenSessionReferences({ sessions = [], orders = [], events = [], now } = {}) {
   const canonicalByDuplicateId = new Map();
   const openEntriesByTable = new Map();
   sessions.forEach((session, index) => {
@@ -318,7 +324,7 @@ function repairDuplicateOpenSessionReferences({ sessions = [], orders = [], now 
     });
   });
 
-  if (!canonicalByDuplicateId.size) return { ok: true, tableSessions: sessions, orders, repairedSessions: [] };
+  if (!canonicalByDuplicateId.size) return { ok: true, tableSessions: sessions, orders, events, repairedSessions: [] };
 
   const sessionsById = new Map(sessions.map((session) => [session.id, session]));
   let unsafeOrder = null;
@@ -344,9 +350,21 @@ function repairDuplicateOpenSessionReferences({ sessions = [], orders = [], now 
       reason: "UNSAFE_DUPLICATE_OPEN_SESSION_REPAIR",
       tableSessions: sessions,
       orders,
+      events,
       unsafeOrder
     };
   }
+
+  const nextEvents = (events || []).map((event) => {
+    const canonical = canonicalByDuplicateId.get(event.tableSessionId);
+    if (!canonical || event.done) return event;
+    return {
+      ...event,
+      tableSessionId: canonical.id,
+      table: canonical.tableCode,
+      zone: canonical.zone || event.zone || ""
+    };
+  });
 
   const repairedSessions = [];
   const nextSessions = sessions.map((session) => {
@@ -361,7 +379,7 @@ function repairDuplicateOpenSessionReferences({ sessions = [], orders = [], now 
     return repaired;
   });
 
-  return { ok: true, tableSessions: nextSessions, orders: nextOrders, repairedSessions };
+  return { ok: true, tableSessions: nextSessions, orders: nextOrders, events: nextEvents, repairedSessions };
 }
 
 function canReconcileOrderToSession(order, duplicate, canonical) {
@@ -401,6 +419,14 @@ function enforceOneOpenSessionPerTable(sessions = [], options = {}) {
   });
 }
 
+function selectOpenSessionsForTable(sessions = [], tableCode) {
+  const code = normalizePhysicalTableCode(tableCode);
+  if (!code) return [];
+  return (sessions || [])
+    .filter((session) => session.status === TABLE_SESSION_STATUSES.OPEN && session.tableCode === code)
+    .sort(compareSessionNewestFirst);
+}
+
 function duplicateSessionClosedAt(session, keeper, options = {}) {
   return normalizeIsoTimestamp(session.closedAt)
     || normalizeIsoTimestamp(options.now)
@@ -419,6 +445,22 @@ function selectUnresolvedSessionRequests(events = [], session) {
 
 function selectLegacyTableRequests(events = [], tableCode) {
   return (events || []).filter((event) => !event.done && !event.tableSessionId && event.table === tableCode);
+}
+
+function selectOrdersForFloorTable(orders = [], session, openTableSessions = [], includeDuplicateSessions = false) {
+  if (!includeDuplicateSessions) return selectOrdersForTableSession(orders, session);
+  const openSessionIds = new Set((openTableSessions || []).map((item) => item.id));
+  return (orders || []).filter((order) => openSessionIds.has(order.tableSessionId));
+}
+
+function selectUnresolvedRequestsForFloorTable(events = [], session, openTableSessions = [], includeDuplicateSessions = false) {
+  if (!includeDuplicateSessions) return selectUnresolvedSessionRequests(events, session);
+  const openSessionIds = new Set((openTableSessions || []).map((item) => item.id));
+  return (events || []).filter((event) => {
+    if (event.done) return false;
+    if (event.tableSessionId) return openSessionIds.has(event.tableSessionId);
+    return event.table === session.tableCode;
+  });
 }
 
 function shouldMoveEventWithTransferredSession(event = {}, session = {}) {

@@ -219,6 +219,60 @@ test("duplicate open session repair preserves active order references in the can
   assert.deepEqual(result.orders[1].items, newItems);
 });
 
+test("duplicate open session repair reattaches unresolved modern service requests to the canonical visit", () => {
+  const sessions = [
+    { id: "TS-old", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: "2026-08-11T08:00:00.000Z", openedSource: "STAFF" },
+    { id: "TS-new", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: "2026-08-11T09:00:00.000Z", openedSource: "STAFF" }
+  ];
+  const events = [
+    { id: "modern-old", type: "CALL_STAFF", table: "A01", zone: "Beach", tableSessionId: "TS-old", done: false },
+    { id: "modern-done", type: "REQUEST_BILL", table: "A01", zone: "Beach", tableSessionId: "TS-old", done: true },
+    { id: "modern-other", type: "CALL_STAFF", table: "A01", zone: "Beach", tableSessionId: "TS-other", done: false }
+  ];
+
+  const result = backfillLegacyTableSessions({ tableSessions: sessions, orders: [], events, tables, now: "2026-08-11T10:00:00.000Z" });
+  const request = result.events.find((event) => event.id === "modern-old");
+  const model = deriveTableFloorModels({ tables, tableSessions: result.tableSessions, orders: result.orders, events: result.events })
+    .find((item) => item.tableCode === "A01");
+  const directModel = deriveTableFloorModels({ tables, tableSessions: sessions, orders: [], events })
+    .find((item) => item.tableCode === "A01");
+
+  assert.equal(result.ok, true);
+  assert.equal(request.tableSessionId, "TS-new");
+  assert.equal(request.table, "A01");
+  assert.equal(request.zone, "Beach");
+  assert.equal(result.events.find((event) => event.id === "modern-done").tableSessionId, "TS-old");
+  assert.equal(result.events.find((event) => event.id === "modern-other").tableSessionId, "TS-other");
+  assert.deepEqual(model.unresolvedRequests.map((event) => event.id), ["modern-old"]);
+  assert.deepEqual(directModel.unresolvedRequests.map((event) => event.id), ["modern-old"]);
+});
+
+test("unsafe duplicate open session repair fails without blind closing or reference mutation", () => {
+  const sessions = [
+    { id: "TS-old", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: "2026-08-11T08:00:00.000Z", openedSource: "STAFF" },
+    { id: "TS-new", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: "2026-08-11T09:00:00.000Z", openedSource: "STAFF" }
+  ];
+  const orders = [
+    tableOrder({ id: "unsafe", orderNo: "D01-0001", table: "C01", zone: "Camping", tableSessionId: "TS-old" }),
+    tableOrder({ id: "safe", orderNo: "D01-0002", tableSessionId: "TS-new" })
+  ];
+  const events = [
+    { id: "request-old", type: "CALL_STAFF", table: "A01", zone: "Beach", tableSessionId: "TS-old", done: false }
+  ];
+
+  const result = backfillLegacyTableSessions({ tableSessions: sessions, orders, events, tables, now: "2026-08-11T10:00:00.000Z" });
+  const model = deriveTableFloorModels({ tables, tableSessions: result.tableSessions, orders: result.orders, events: result.events })
+    .find((item) => item.tableCode === "A01");
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "UNSAFE_DUPLICATE_OPEN_SESSION_REPAIR");
+  assert.deepEqual(result.tableSessions.filter((session) => session.tableCode === "A01" && session.status === "OPEN").map((session) => session.id), ["TS-old", "TS-new"]);
+  assert.deepEqual(result.orders, orders);
+  assert.deepEqual(result.events, events);
+  assert.deepEqual(model.orders.map((order) => order.id), ["unsafe", "safe"]);
+  assert.deepEqual(model.unresolvedRequests.map((event) => event.id), ["request-old"]);
+});
+
 test("floor-plan selector marks a table vacant when no open session exists", () => {
   const models = deriveTableFloorModels({ tables, tableSessions: [], orders: [], events: [] });
 

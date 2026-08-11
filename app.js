@@ -101,15 +101,18 @@ function saveCounterDraft() {
 
 function normalizeState(value) {
   const orders = (value.orders || []).map(normalizeOrder);
+  const events = value.events || [];
   const backfilled = backfillLegacyTableSessions({
     tableSessions: value.tableSessions || [],
     orders,
+    events,
     tables
   });
+  const repairFailed = backfilled.ok === false;
   return {
     cart: value.cart || [],
-    orders: backfilled.orders,
-    events: value.events || [],
+    orders: repairFailed ? orders : backfilled.orders,
+    events: repairFailed ? events : backfilled.events,
     audit: value.audit || [],
     sequence: value.sequence || Math.max(1, (value.orders || []).length + 1),
     tableSessions: backfilled.tableSessions
