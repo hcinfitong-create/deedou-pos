@@ -36,6 +36,18 @@ The current router is hash-based:
 - `#/dessert` dessert queue.
 - `#/admin` admin control center.
 
+## Hybrid Service Context
+
+Orders now carry explicit service context so DeeDou can support both cafe/counter service and restaurant/table service without fake table records.
+
+- `serviceMode` describes how the order is operated: `COUNTER_SERVICE` or `TABLE_SERVICE`.
+- `fulfillmentType` describes how the guest receives the order: `DINE_IN` or `TAKEAWAY`.
+- `orderSource` describes who captured it: `CUSTOMER_QR`, `STAFF`, or `COUNTER`.
+- `zone` and `table` describe the physical service area only when a physical table is involved.
+- Aggregate `order.status` is separate from station/item status. Staff can accept, reject, send to prep, serve, and close compatible paid orders. Overall `READY` is derived from required station/item readiness.
+
+Counter/takeaway orders may have no table. Takeaway is a fulfillment type, not a physical service area.
+
 ## Feature Module Rule
 
 Each meaningful business capability should have an owner module under `src/features/`.
@@ -98,4 +110,4 @@ Larger UI decomposition should come later, after each phase validates.
 
 ## Current Known Coupling
 
-`app.js` still owns broad page composition, event binding, localStorage orchestration, admin actions, cashier actions, payments, reports, and station workflow. Cart rules/UI, customer order status presentation, customer service request event creation, and staff board presentation/selectors now live behind feature public APIs.
+`app.js` still owns broad page composition, event binding, localStorage orchestration, admin actions, cashier actions, payments, reports, and station page orchestration. Cart rules/UI, customer order status presentation, customer service request event creation, ordering contracts, and staff board presentation/selectors now live behind feature public APIs.

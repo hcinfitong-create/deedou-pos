@@ -99,15 +99,23 @@ Owns:
 - Bill quantity calculation.
 - Combo expansion rules.
 - Order totals.
+- Service context normalization and validation:
+  - `serviceMode`: `COUNTER_SERVICE` or `TABLE_SERVICE`.
+  - `fulfillmentType`: `DINE_IN` or `TAKEAWAY`.
+  - `orderSource`: `CUSTOMER_QR`, `STAFF`, or `COUNTER`.
+  - Physical `zone`/`table` context when table service requires it.
+- Machine-readable order timestamps used by operations views.
 - Order status normalization.
 - Direct order status transition guards.
-- Station status derivation.
+- Station-derived aggregate order readiness.
+- Optional future hooks for course/hold/seat/prep-time metadata.
 
 Does not own:
 
 - Customer product card UI.
 - Cashier payment capture.
 - Admin product editing.
+- Kitchen/bar/dessert presentation.
 
 Current files:
 
@@ -129,9 +137,10 @@ Current location:
 Owns:
 
 - Staff board.
-- Staff-facing order metrics and selectors.
+- Staff-facing order metrics and selectors for new orders, table-service open orders, counter/cafe open orders, ready-to-serve orders, unresolved service/payment requests, and open physical tables by zone.
 - Staff action presentation for order acceptance/rejection and served confirmation.
 - Staff service request completion presentation.
+- Staff presentation of service mode, fulfillment type, source, zone/table context, and order age when machine-readable timestamps exist.
 
 Current location:
 
@@ -142,6 +151,7 @@ Does not own:
 - Persistence or localStorage.
 - Payment capture.
 - Kitchen/bar/dessert station queue internals.
+- Table definitions.
 
 ### kitchen
 
@@ -251,6 +261,7 @@ Review:
 - Table definitions are business-domain data. Recommended future owner: `admin-tables` for table setup and `table-session` for active dining visit semantics.
 - Station definitions are business-domain/operations data. Recommended future owner: station/operations modules such as `kitchen`, `bar`, `dessert`, or a narrow operations config module.
 - Station aliases support legacy normalization. Recommended future owner: `ordering` or a station-normalization module once station extraction begins.
+- Service mode, fulfillment type, and order source are not shared config; they are order-domain contracts owned by `ordering`.
 - These definitions were not moved in the cart/customer-orders/service-requests phase because none of those modules should own table or station definitions.
 
 ### shared/i18n
@@ -310,6 +321,7 @@ After Phase B:
 - `src/features/cart/index.js`
 - `src/features/customer-orders/index.js`
 - `src/features/service-requests/index.js`
+- `src/features/staff-orders/index.js`
 
 ## Protected Modules By Common Task
 
