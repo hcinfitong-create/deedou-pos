@@ -15,6 +15,7 @@ import {
   closeTableSession,
   deriveTableFloorModels,
   getActiveTableSession,
+  normalizeTableSessions,
   openOrReuseTableSession,
   reconcileTableSessions,
   selectOrdersForTableSession,
@@ -171,6 +172,19 @@ test("only one open session may exist per physical table through open/reuse", ()
   assert.equal(reused.tableSessions.filter((session) => session.status === "OPEN" && session.tableCode === "A01").length, 1);
 });
 
+test("normalization closes duplicate open sessions for one physical table", () => {
+  const sessions = normalizeTableSessions([
+    { id: "TS-old", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: "2026-08-11T08:00:00.000Z", openedSource: "STAFF" },
+    { id: "TS-new", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: "2026-08-11T09:00:00.000Z", openedSource: "STAFF" },
+    { id: "TS-B01", tableCode: "B01", zone: "Indoor", status: "OPEN", openedAt: "2026-08-11T08:30:00.000Z", openedSource: "STAFF" }
+  ], { now: "2026-08-11T10:00:00.000Z" });
+
+  assert.deepEqual(sessions.filter((session) => session.tableCode === "A01" && session.status === "OPEN").map((session) => session.id), ["TS-new"]);
+  assert.equal(sessions.find((session) => session.id === "TS-old").status, "CLOSED");
+  assert.equal(sessions.find((session) => session.id === "TS-old").closedAt, "2026-08-11T10:00:00.000Z");
+  assert.deepEqual(sessions.filter((session) => session.status === "OPEN").map((session) => session.id), ["TS-new", "TS-B01"]);
+});
+
 test("floor-plan selector marks a table vacant when no open session exists", () => {
   const models = deriveTableFloorModels({ tables, tableSessions: [], orders: [], events: [] });
 
@@ -202,6 +216,47 @@ test("floor-plan metrics derive only from the current session's orders", () => {
   assert.deepEqual(model.orders.map((order) => order.id), ["new"]);
   assert.equal(model.outstandingBalance, 100000);
   assert.equal(model.pendingQrCount, 1);
+});
+
+test("floor-plan prep metrics ignore fully served quantities and closed batches", () => {
+  const sessions = [
+    { id: "TS-current", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: now, closedAt: "", openedSource: "CUSTOMER_QR" }
+  ];
+  const orders = [
+    tableOrder({
+      id: "served-open",
+      tableSessionId: "TS-current",
+      status: "SERVED",
+      items: [{ lineId: "served", station: "BAR_TEA", qty: 2, prepStatus: "READY", status: "SERVED", servedQty: 2, billQty: 2, isBillable: true }]
+    }),
+    tableOrder({
+      id: "paid-queued",
+      tableSessionId: "TS-current",
+      status: "PAID",
+      items: [{ lineId: "paid", station: "KITCHEN_HOT", qty: 3, prepStatus: "QUEUED", status: "QUEUED", servedQty: 0, billQty: 3, isBillable: true }]
+    }),
+    tableOrder({
+      id: "voided-ready",
+      tableSessionId: "TS-current",
+      status: "VOIDED",
+      items: [{ lineId: "voided", station: "DESSERT", qty: 1, prepStatus: "READY", status: "READY", servedQty: 0, billQty: 1, isBillable: true }]
+    }),
+    tableOrder({
+      id: "active-mixed",
+      tableSessionId: "TS-current",
+      status: "IN_PREPARATION",
+      items: [
+        { lineId: "ready-remaining", station: "BAR_COFFEE", qty: 2, prepStatus: "READY", status: "READY", servedQty: 1, billQty: 2, isBillable: true },
+        { lineId: "preparing-remaining", station: "KITCHEN_HOT", qty: 2, prepStatus: "PREPARING", status: "PREPARING", servedQty: 1, billQty: 2, isBillable: true },
+        { lineId: "queued", station: "DESSERT", qty: 1, prepStatus: "QUEUED", status: "QUEUED", servedQty: 0, billQty: 1, isBillable: true }
+      ]
+    })
+  ];
+
+  const model = deriveTableFloorModels({ tables, tableSessions: sessions, orders, events: [] }).find((item) => item.tableCode === "A01");
+
+  assert.equal(model.readyCount, 1);
+  assert.equal(model.preparingCount, 2);
 });
 
 test("manual close fails when session still has open orders", () => {

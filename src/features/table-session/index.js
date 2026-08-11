@@ -1,13 +1,13 @@
 import {
-  countPrepItems,
-  countServedItems,
-  countStatusItems,
   FULFILLMENT_TYPES,
   getServiceProgress,
   isClosedOrderStatus,
   isOpenOrderStatus,
+  isRequiredStationLine,
   normalizeOrderServiceContext,
   normalizePhysicalTableCode,
+  normalizePrepStatus,
+  normalizeServiceProgress,
   SERVICE_MODES
 } from "../ordering/index.js";
 
@@ -22,6 +22,8 @@ export const TABLE_SESSION_SOURCES = Object.freeze({
   COUNTER: "COUNTER",
   LEGACY: "LEGACY"
 });
+
+const PREPARING_WORK_STATUSES = Object.freeze(["QUEUED", "ACKNOWLEDGED", "PREPARING"]);
 
 export function normalizeTableSession(session = {}, options = {}) {
   const table = resolvePhysicalTable(session.tableCode || session.table, options.tables || []);
@@ -39,9 +41,10 @@ export function normalizeTableSession(session = {}, options = {}) {
 }
 
 export function normalizeTableSessions(tableSessions = [], options = {}) {
-  return (tableSessions || [])
+  const sessions = (tableSessions || [])
     .map((session) => normalizeTableSession(session, options))
     .filter((session) => session.id && session.tableCode);
+  return enforceOneOpenSessionPerTable(sessions, options);
 }
 
 export function getActiveTableSession(tableSessions = [], tableCode) {
@@ -118,11 +121,13 @@ export function deriveTableFloorModels({ tables = [], tableSessions = [], orders
   return (tables || []).map((table) => {
     const session = getActiveTableSession(sessions, table.code);
     const sessionOrders = session ? selectOrdersForTableSession(orders, session) : [];
+    const activeSessionOrders = sessionOrders.filter((order) => isOpenOrderStatus(order.status));
     const unresolvedRequests = session
       ? selectUnresolvedSessionRequests(events, session)
       : selectLegacyTableRequests(events, table.code);
     const serviceProgress = aggregateServiceProgress(sessionOrders);
     const outstandingBalance = sessionOrders.reduce((sum, order) => sum + orderBalance(order), 0);
+    const prepMetrics = countRemainingPrepWork(activeSessionOrders);
     return {
       table,
       tableCode: table.code,
@@ -136,8 +141,8 @@ export function deriveTableFloorModels({ tables = [], tableSessions = [], orders
       openOrderBatchCount: sessionOrders.filter((order) => isOpenOrderStatus(order.status)).length,
       servedQty: serviceProgress.servedQty,
       serviceableQty: serviceProgress.serviceableQty,
-      readyCount: countStatusItems(sessionOrders, "READY"),
-      preparingCount: countPrepItems(sessionOrders) - countStatusItems(sessionOrders, "READY"),
+      readyCount: prepMetrics.readyCount,
+      preparingCount: prepMetrics.preparingCount,
       outstandingBalance,
       pendingQrCount: sessionOrders.filter((order) => order.status === "PENDING_ACCEPTANCE").length,
       unresolvedRequests,
@@ -277,6 +282,43 @@ function createLegacySession(context, sessions, tables, now) {
   };
 }
 
+function enforceOneOpenSessionPerTable(sessions = [], options = {}) {
+  const openEntriesByTable = new Map();
+  sessions.forEach((session, index) => {
+    if (session.status !== TABLE_SESSION_STATUSES.OPEN || !session.tableCode) return;
+    const entries = openEntriesByTable.get(session.tableCode) || [];
+    entries.push({ session, index });
+    openEntriesByTable.set(session.tableCode, entries);
+  });
+
+  const duplicateClosedAtByIndex = new Map();
+  openEntriesByTable.forEach((entries) => {
+    if (entries.length <= 1) return;
+    const [keeper, ...duplicates] = entries.sort((left, right) => compareSessionNewestFirst(left.session, right.session));
+    duplicates.forEach((entry) => {
+      duplicateClosedAtByIndex.set(entry.index, duplicateSessionClosedAt(entry.session, keeper.session, options));
+    });
+  });
+
+  if (!duplicateClosedAtByIndex.size) return sessions;
+  return sessions.map((session, index) => {
+    if (!duplicateClosedAtByIndex.has(index)) return session;
+    return {
+      ...session,
+      status: TABLE_SESSION_STATUSES.CLOSED,
+      closedAt: duplicateClosedAtByIndex.get(index)
+    };
+  });
+}
+
+function duplicateSessionClosedAt(session, keeper, options = {}) {
+  return normalizeIsoTimestamp(session.closedAt)
+    || normalizeIsoTimestamp(options.now)
+    || normalizeIsoTimestamp(session.openedAt)
+    || normalizeIsoTimestamp(keeper.openedAt)
+    || new Date().toISOString();
+}
+
 function selectUnresolvedSessionRequests(events = [], session) {
   return (events || []).filter((event) => {
     if (event.done) return false;
@@ -296,6 +338,20 @@ function aggregateServiceProgress(orders = []) {
     total.servedQty += progress.servedQty;
     return total;
   }, { serviceableQty: 0, servedQty: 0 });
+}
+
+function countRemainingPrepWork(orders = []) {
+  return (orders || []).reduce((metrics, order) => {
+    (order.items || []).forEach((line) => {
+      if (!isRequiredStationLine(line)) return;
+      const remainingQty = normalizeServiceProgress(line).remainingQty;
+      if (remainingQty <= 0) return;
+      const prepStatus = normalizePrepStatus(line.prepStatus || line.status);
+      if (prepStatus === "READY") metrics.readyCount += remainingQty;
+      else if (PREPARING_WORK_STATUSES.includes(prepStatus)) metrics.preparingCount += remainingQty;
+    });
+    return metrics;
+  }, { readyCount: 0, preparingCount: 0 });
 }
 
 function orderBalance(order = {}) {
@@ -366,7 +422,9 @@ function safeIdPart(value) {
 }
 
 function compareSessionNewestFirst(left, right) {
-  return String(right.openedAt || "").localeCompare(String(left.openedAt || ""));
+  const byOpenedAt = String(right.openedAt || "").localeCompare(String(left.openedAt || ""));
+  if (byOpenedAt) return byOpenedAt;
+  return String(right.id || "").localeCompare(String(left.id || ""));
 }
 
 function normalizeIsoTimestamp(value) {
