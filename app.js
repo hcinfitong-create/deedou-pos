@@ -2,7 +2,31 @@ import { COUNTER_DRAFT_KEY, COUNTER_SEARCH_KEY, PRODUCT_KEY, STATE_KEY, stationA
 import { copy } from "./src/shared/i18n/index.js";
 import { escapeAttr, escapeHtml, formatMoney, normalizeSearch, slugify } from "./src/shared/utils/index.js";
 import { categories, categoryAliases, compareMenuItems, defaultProducts, filterMenuItems, menuKinds } from "./src/features/customer-menu/index.js";
-import { applyOrderStatusTransition, billableTotal, chargedQty, clampBillQty, countPrepItems, countServedItems, countStatusItems, expandOrderLines, lineSubtotal, normalizeItemStatus, normalizeOrderStatus, recalcOrderTotal, stationStatusFor } from "./src/features/ordering/index.js";
+import {
+  applyOrderStatusTransition,
+  applyStationStatusUpdate,
+  billableTotal,
+  chargedQty,
+  clampBillQty,
+  countPrepItems,
+  countServedItems,
+  countStatusItems,
+  expandOrderLines,
+  FULFILLMENT_TYPES,
+  isOpenOrderStatus,
+  lineSubtotal,
+  normalizeItemStatus,
+  normalizeOrderLineOperationalFields,
+  normalizeOrderOperationalFields,
+  normalizeOrderServiceContext,
+  normalizeOrderStatus,
+  normalizeOrderTimestamps,
+  ORDER_SOURCES,
+  recalcOrderTotal,
+  SERVICE_MODES,
+  stationStatusFor,
+  validateOrderServiceContext
+} from "./src/features/ordering/index.js";
 import { addCartItem, canSubmitCart, clearCart, decrementCartItem, removeCartItem, renderCartPanel } from "./src/features/cart/index.js";
 import { renderCustomerOrderStatusStrip } from "./src/features/customer-orders/index.js";
 import { createServiceRequestEvent, renderCustomerServiceActions } from "./src/features/service-requests/index.js";
@@ -84,13 +108,25 @@ function normalizeOrder(order) {
       status: normalizeItemStatus(line.status || order.status),
       isComponent,
       isBillable,
-      parentComboId: line.parentComboId || ""
+      parentComboId: line.parentComboId || "",
+      ...normalizeOrderLineOperationalFields({ ...line, station })
     };
   });
   const payments = order.payments || [];
   const paidVnd = payments.length ? payments.filter((payment) => payment.status === "SUCCEEDED").reduce((sum, payment) => sum + payment.amountVnd, 0) : order.paidVnd || 0;
+  const serviceContext = normalizeOrderServiceContext({
+    ...order,
+    zone: order.zone || tableZoneFor(order.table)
+  });
+  const stationStatus = Object.fromEntries(Object.entries(order.stationStatus || stationStatusFor(items, "QUEUED")).map(([station, status]) => [
+    stationAliases[station] || station,
+    normalizeItemStatus(status)
+  ]));
   return {
     ...order,
+    ...serviceContext,
+    ...normalizeOrderOperationalFields(order),
+    ...normalizeOrderTimestamps(order),
     orderNo: order.orderNo || order.id || "D01-0000",
     channel: order.channel || "QR",
     status: normalizeOrderStatus(order.status || "PENDING_ACCEPTANCE"),
@@ -98,8 +134,19 @@ function normalizeOrder(order) {
     total: billableTotal(items),
     payments,
     paidVnd,
-    stationStatus: order.stationStatus || stationStatusFor(items, order.status || "PENDING_ACCEPTANCE")
+    stationStatus
   };
+}
+
+function tableZoneFor(tableCode) {
+  return tables.find((table) => table.code === tableCode)?.zone || "";
+}
+
+function orderLocationLabel(order) {
+  const context = normalizeOrderServiceContext(order);
+  if (context.serviceMode === SERVICE_MODES.TABLE_SERVICE) return `Table ${context.table || "unassigned"}`;
+  if (context.fulfillmentType === FULFILLMENT_TYPES.TAKEAWAY) return "Takeaway";
+  return "Counter";
 }
 
 function loadProducts() {
@@ -339,7 +386,7 @@ function cashierPage() {
       <section class="panel section-pad">
         <h2>Order đã đóng gần đây</h2>
         <div class="cashier-orders compact-list">
-          ${paidOrders.map((order) => `<div class="status-pill"><span>${order.orderNo} - Table ${order.table} - ${order.status}</span><strong>${formatMoney(order.total)}</strong></div>`).join("") || `<div class="empty">Chưa có lịch sử đóng order.</div>`}
+          ${paidOrders.map((order) => `<div class="status-pill"><span>${order.orderNo} - ${orderLocationLabel(order)} - ${order.status}</span><strong>${formatMoney(order.total)}</strong></div>`).join("") || `<div class="empty">Chưa có lịch sử đóng order.</div>`}
         </div>
       </section>
       <section class="panel section-pad">
@@ -575,7 +622,7 @@ function stationPage(stationGroup) {
     return groupStations.some((station) => {
       const stationState = order.stationStatus?.[station];
       return stationState && stationState !== "READY";
-    }) && !["READY", "SERVED", "PAID", "REJECTED", "VOIDED"].includes(order.status);
+    }) && ["ACCEPTED", "IN_PREPARATION"].includes(order.status);
   });
   return `
     <section class="page">
@@ -600,7 +647,7 @@ function stationTicket(order, stationGroup, groupStations) {
   const status = activeStatuses.includes("PREPARING") ? "PREPARING" : activeStatuses.includes("ACKNOWLEDGED") ? "ACKNOWLEDGED" : "QUEUED";
   return `
     <article class="order-card ticket">
-      <div class="order-head"><strong>${order.orderNo} - Table ${order.table}</strong><span class="station">${status}</span></div>
+      <div class="order-head"><strong>${order.orderNo} - ${orderLocationLabel(order)}</strong><span class="station">${status}</span></div>
       <ul class="item-list">
         ${stationItems.map((line) => `<li><strong>${line.qty} x ${escapeHtml(line.nameVi)}</strong> <span class="station">${line.station}</span><br><span class="muted">${escapeHtml(line.nameEn)} - ${line.status}</span></li>`).join("")}
       </ul>
@@ -944,10 +991,19 @@ function submitOrder(token) {
   if (!items.length) return;
   const total = billableTotal(items);
   const orderNo = nextOrderNo();
+  const now = new Date().toISOString();
+  const serviceContext = normalizeOrderServiceContext({
+    serviceMode: SERVICE_MODES.TABLE_SERVICE,
+    fulfillmentType: FULFILLMENT_TYPES.DINE_IN,
+    orderSource: ORDER_SOURCES.CUSTOMER_QR,
+    table: table.code,
+    zone: table.zone
+  });
+  if (!validateOrderServiceContext(serviceContext).ok) return;
   state.orders.push({
     id: `D${Date.now().toString().slice(-6)}`,
     orderNo,
-    table: table.code,
+    ...serviceContext,
     token,
     items,
     note,
@@ -957,7 +1013,12 @@ function submitOrder(token) {
     channel: "QR",
     status: "PENDING_ACCEPTANCE",
     stationStatus: stationStatusFor(items, "PENDING_ACCEPTANCE"),
-    time: new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
+    createdAt: now,
+    acceptedAt: "",
+    prepStartedAt: "",
+    readyAt: "",
+    servedAt: "",
+    time: new Date(now).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
   });
   state.cart = clearCart();
   audit("ORDER_SUBMIT", `${orderNo} Table ${table.code} submitted ${formatMoney(total)}`);
@@ -1013,24 +1074,40 @@ function cancelCounterOrder() {
 function submitCounterOrder() {
   if (!counterDraft.active || !counterDraft.items.length) return;
   const tableCode = counterDraft.table;
+  const table = tables.find((item) => item.code === tableCode);
+  const isTakeaway = tableCode === "TAKEAWAY";
   const orderNo = nextOrderNo();
   const items = expandOrderLines(counterDraft.items, productById);
   if (!items.length) return;
   const total = billableTotal(items);
+  const now = new Date().toISOString();
+  const serviceContext = normalizeOrderServiceContext({
+    serviceMode: isTakeaway ? SERVICE_MODES.COUNTER_SERVICE : SERVICE_MODES.TABLE_SERVICE,
+    fulfillmentType: isTakeaway ? FULFILLMENT_TYPES.TAKEAWAY : FULFILLMENT_TYPES.DINE_IN,
+    orderSource: ORDER_SOURCES.COUNTER,
+    table: isTakeaway ? "" : tableCode,
+    zone: table?.zone || ""
+  });
+  if (!validateOrderServiceContext(serviceContext).ok) return;
   state.orders.push({
     id: `D${Date.now().toString().slice(-6)}`,
     orderNo,
-    table: tableCode,
+    ...serviceContext,
     token: "",
     items,
-    note: counterDraft.note || (tableCode === "TAKEAWAY" ? "Counter takeaway order" : "Counter order"),
+    note: counterDraft.note || (isTakeaway ? "Counter takeaway order" : "Counter order"),
     total,
     paidVnd: 0,
     payments: [],
-    channel: tableCode === "TAKEAWAY" ? "TAKEAWAY" : "CASHIER",
+    channel: isTakeaway ? "TAKEAWAY" : "CASHIER",
     status: "ACCEPTED",
     stationStatus: stationStatusFor(items, "QUEUED"),
-    time: new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
+    createdAt: now,
+    acceptedAt: now,
+    prepStartedAt: "",
+    readyAt: "",
+    servedAt: "",
+    time: new Date(now).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })
   });
   audit("COUNTER_ORDER_SUBMIT", `${orderNo} ${tableCode} ${formatMoney(total)}`);
   counterDraft = emptyCounterDraft();
@@ -1217,7 +1294,7 @@ function splitOrderInTwo(orderId) {
 function preBill(orderId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
-  audit("PRE_BILL", `${order.orderNo} table ${order.table} ${formatMoney(order.total)}`);
+  audit("PRE_BILL", `${order.orderNo} ${orderLocationLabel(order)} ${formatMoney(order.total)}`);
   saveState();
   render();
 }
@@ -1287,15 +1364,9 @@ function updateStationStatus(orderId, stationGroup, status) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   const groupStations = stations.filter((station) => station.group === stationGroup).map((station) => station.code);
-  groupStations.forEach((station) => {
-    if (order.stationStatus[station]) order.stationStatus[station] = status;
-  });
-  order.items.filter((item) => groupStations.includes(item.station)).forEach((item) => {
-    item.status = status;
-  });
-  if (["ACKNOWLEDGED", "PREPARING"].some((value) => Object.values(order.stationStatus).includes(value))) order.status = "IN_PREPARATION";
-  if (Object.values(order.stationStatus).every((value) => value === "READY")) order.status = "READY";
-  audit("STATION_STATUS", `${stationGroup} ${order.orderNo} -> ${status}`);
+  const update = applyStationStatusUpdate(order, groupStations, status);
+  if (!update.ok) return;
+  audit("STATION_STATUS", `${stationGroup} ${order.orderNo} -> ${status} / order ${update.to}`);
   saveState();
   render();
 }
@@ -1321,7 +1392,14 @@ function audit(type, detail) {
 }
 
 function tableOrders(tableCode) {
-  return state.orders.filter((order) => order.table === tableCode && !["PAID", "REJECTED", "VOIDED", "REFUNDED"].includes(order.status));
+  return state.orders.filter((order) => {
+    const context = normalizeOrderServiceContext(order);
+    if (!isOpenOrderStatus(order.status)) return false;
+    if (tableCode === "TAKEAWAY") {
+      return context.serviceMode === SERVICE_MODES.COUNTER_SERVICE && context.fulfillmentType === FULFILLMENT_TYPES.TAKEAWAY;
+    }
+    return context.serviceMode === SERVICE_MODES.TABLE_SERVICE && context.table === tableCode;
+  });
 }
 
 function zoneNames() {

@@ -2,8 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  formatOrderAge,
   ordersByStaffColumn,
   renderStaffOrderCard,
+  selectCounterServiceOpenOrders,
+  selectOpenTablesByPhysicalZone,
+  selectReadyToServeOrders,
+  selectTableServiceOpenOrders,
   STAFF_ORDER_COLUMNS,
   staffOrderActions,
   staffOrderMetrics
@@ -15,19 +20,48 @@ test("staff order columns preserve the current operational board order", () => {
 
 test("staff metrics preserve current board calculations", () => {
   const orders = [
-    { status: "PENDING_ACCEPTANCE", table: "A01", total: 52000 },
-    { status: "ACCEPTED", table: "A01", total: 120000 },
-    { status: "PAID", table: "B01", total: 90000 },
-    { status: "REJECTED", table: "C01", total: 10000 }
+    { status: "PENDING_ACCEPTANCE", serviceMode: "TABLE_SERVICE", fulfillmentType: "DINE_IN", orderSource: "CUSTOMER_QR", table: "A01", zone: "Beach", total: 52000 },
+    { status: "ACCEPTED", serviceMode: "TABLE_SERVICE", fulfillmentType: "DINE_IN", orderSource: "COUNTER", table: "A01", zone: "Beach", total: 120000 },
+    { status: "ACCEPTED", serviceMode: "COUNTER_SERVICE", fulfillmentType: "TAKEAWAY", orderSource: "COUNTER", table: "", total: 90000 },
+    { status: "READY", serviceMode: "COUNTER_SERVICE", fulfillmentType: "DINE_IN", orderSource: "COUNTER", table: "", total: 45000 },
+    { status: "PAID", serviceMode: "TABLE_SERVICE", fulfillmentType: "DINE_IN", orderSource: "STAFF", table: "B01", zone: "Indoor", total: 90000 },
+    { status: "REJECTED", serviceMode: "TABLE_SERVICE", fulfillmentType: "DINE_IN", orderSource: "STAFF", table: "C01", zone: "Camping", total: 10000 }
   ];
   const events = [{ done: false }, { done: true }];
 
   assert.deepEqual(staffOrderMetrics({ orders, events }), {
     newOrders: 1,
+    tableServiceOpenOrders: 2,
+    counterServiceOpenOrders: 2,
+    readyToServeOrders: 1,
     openTables: 1,
+    openTablesByZone: { Beach: ["A01"] },
     serviceRequests: 1,
-    todayTotal: 262000
+    todayTotal: 397000
   });
+});
+
+test("staff selectors separate table-service and counter/cafe orders", () => {
+  const orders = [
+    { id: "table", status: "ACCEPTED", serviceMode: "TABLE_SERVICE", fulfillmentType: "DINE_IN", table: "A01", zone: "Beach" },
+    { id: "counter", status: "ACCEPTED", serviceMode: "COUNTER_SERVICE", fulfillmentType: "DINE_IN", table: "" },
+    { id: "takeaway", status: "ACCEPTED", serviceMode: "COUNTER_SERVICE", fulfillmentType: "TAKEAWAY", table: "" },
+    { id: "paid", status: "PAID", serviceMode: "TABLE_SERVICE", fulfillmentType: "DINE_IN", table: "B01", zone: "Indoor" }
+  ];
+
+  assert.deepEqual(selectTableServiceOpenOrders(orders).map((order) => order.id), ["table"]);
+  assert.deepEqual(selectCounterServiceOpenOrders(orders).map((order) => order.id), ["counter", "takeaway"]);
+  assert.deepEqual(selectOpenTablesByPhysicalZone(orders), { Beach: ["A01"] });
+});
+
+test("staff selector finds ready-to-serve orders", () => {
+  const orders = [
+    { id: "prep", status: "IN_PREPARATION" },
+    { id: "ready", status: "READY" },
+    { id: "served", status: "SERVED" }
+  ];
+
+  assert.deepEqual(selectReadyToServeOrders(orders).map((order) => order.id), ["ready"]);
 });
 
 test("staff selectors group orders by operational column", () => {
@@ -53,9 +87,7 @@ test("staff action presentation follows ordering transition rules", () => {
     { status: "IN_PREPARATION", label: "Send to prep", tone: "primary" },
     { status: "REJECTED", label: "Reject", tone: "danger" }
   ]);
-  assert.deepEqual(staffOrderActions({ status: "IN_PREPARATION" }), [
-    { status: "READY", label: "Ready", tone: "primary" }
-  ]);
+  assert.deepEqual(staffOrderActions({ status: "IN_PREPARATION" }), []);
   assert.deepEqual(staffOrderActions({ status: "READY" }), [
     { status: "SERVED", label: "Served", tone: "primary" }
   ]);
@@ -66,7 +98,11 @@ test("staff order card renders escaped item content and valid action buttons", (
   const html = renderStaffOrderCard({
     id: "order-1",
     orderNo: "D01-0001",
+    serviceMode: "TABLE_SERVICE",
+    fulfillmentType: "DINE_IN",
+    orderSource: "CUSTOMER_QR",
     table: "A01",
+    zone: "Beach",
     time: "09:00",
     status: "PENDING_ACCEPTANCE",
     total: 52000,
@@ -75,10 +111,18 @@ test("staff order card renders escaped item content and valid action buttons", (
     items: [{ qty: 1, nameEn: "<Tea>", station: "BAR_TEA", status: "QUEUED", isComponent: false }]
   });
 
-  assert.match(html, /D01-0001 - Table A01/);
+  assert.match(html, /D01-0001 - Beach Table A01/);
+  assert.match(html, /Table service/);
+  assert.match(html, /Dine-in/);
+  assert.match(html, /QR/);
   assert.match(html, /&lt;Tea&gt;/);
   assert.match(html, /Note: &lt;script&gt;/);
   assert.match(html, /data-status="ACCEPTED"/);
   assert.match(html, /data-status="REJECTED"/);
   assert.doesNotMatch(html, /data-status="SERVED"/);
+});
+
+test("staff order age formats only when machine-readable timestamp exists", () => {
+  assert.equal(formatOrderAge({ createdAt: "2026-08-11T00:00:00.000Z" }, "2026-08-11T00:07:00.000Z"), "7m waiting");
+  assert.equal(formatOrderAge({ time: "09:00" }, "2026-08-11T00:07:00.000Z"), "");
 });
