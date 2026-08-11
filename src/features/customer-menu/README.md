@@ -11,6 +11,7 @@ Owns customer-facing menu structure and demo catalog seeds for the local-first a
 - Category aliases for legacy data.
 - Demo products and combo component seeds.
 - Menu sort order.
+- Demo products may include variant/modifier configuration data, but option rules belong to `product-options`.
 
 ## Does Not Own
 
@@ -43,4 +44,3 @@ Do not add privileged product mutation here. Admin mutations belong to `admin-me
 ## Tests
 
 No module tests yet.
-

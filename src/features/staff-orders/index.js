@@ -11,6 +11,7 @@ import {
   ORDER_SOURCES,
   SERVICE_MODES
 } from "../ordering/index.js";
+import { optionSummaryLines } from "../product-options/index.js";
 import { selectOpenTableSessions } from "../table-session/index.js";
 import { escapeAttr, escapeHtml, formatMoney } from "../../shared/utils/index.js";
 
@@ -179,7 +180,8 @@ export function renderStaffOrderCard(order) {
 function renderStaffLine(line) {
   const progress = normalizeServiceProgress(line);
   const prepStatus = normalizePrepStatus(line.prepStatus || line.status);
-  return `<li class="${line.isComponent ? "component-line" : ""}">${line.isComponent ? "-> " : ""}${line.qty} x ${escapeHtml(line.nameEn)} <span class="station">${escapeHtml(line.station)}</span> <span class="station">${prepStatus}</span> <span class="station">served ${progress.servedQty}/${progress.serviceableQty || line.qty}</span></li>`;
+  const summaries = optionSummaryLines(line, "en");
+  return `<li class="${line.isComponent ? "component-line" : ""}">${line.isComponent ? "-> " : ""}${line.qty} x ${escapeHtml(line.nameEn)} <span class="station">${escapeHtml(line.station)}</span> <span class="station">${prepStatus}</span> <span class="station">served ${progress.servedQty}/${progress.serviceableQty || line.qty}</span>${summaries.map((summary) => `<br><span class="muted">${escapeHtml(summary)}</span>`).join("")}</li>`;
 }
 
 function renderReadyServiceActions(order, context, readyLines) {
@@ -191,6 +193,7 @@ function renderReadyServiceActions(order, context, readyLines) {
         ${readyLines.map((line) => `
           <li>
             <span>${line.remainingQty} x ${escapeHtml(line.nameEn)} <span class="station">${escapeHtml(line.station)}</span></span>
+            ${optionSummaryLines(line, "en").map((summary) => `<span class="muted">${escapeHtml(summary)}</span>`).join("")}
             <span class="split-actions compact-actions">
               <button class="primary compact" data-serve-order="${escapeAttr(order.id)}" data-serve-line="${escapeAttr(line.lineId)}" data-serve-qty="1">Serve 1</button>
               ${line.remainingQty > 1 ? `<button class="ghost compact" data-serve-order="${escapeAttr(order.id)}" data-serve-line="${escapeAttr(line.lineId)}" data-serve-qty="${line.remainingQty}">Serve all line</button>` : ""}

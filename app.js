@@ -30,9 +30,17 @@ import {
   stationStatusFor,
   validateOrderServiceContext
 } from "./src/features/ordering/index.js";
-import { addCartItem, canSubmitCart, clearCart, decrementCartItem, removeCartItem, renderCartPanel } from "./src/features/cart/index.js";
+import { addCartItem, canSubmitCart, cartSubtotal, clearCart, decrementCartItem, removeCartItem, renderCartPanel } from "./src/features/cart/index.js";
 import { renderCustomerOrderStatusStrip } from "./src/features/customer-orders/index.js";
 import { createServiceRequestEvent, renderCustomerServiceActions } from "./src/features/service-requests/index.js";
+import {
+  defaultConfiguredSelection,
+  hasProductOptions,
+  normalizeProductOptions,
+  optionSummaryLines,
+  validateConfiguredSelection,
+  validateProductOptionConfig
+} from "./src/features/product-options/index.js";
 import { renderStaffPage } from "./src/features/staff-orders/index.js";
 import { applyPrepStatusTransition, renderStationPage } from "./src/features/station-workflow/index.js";
 import {
@@ -144,11 +152,15 @@ function normalizeOrder(order) {
       station,
       nameVi: line.nameVi || source.vi || line.id,
       nameEn: line.nameEn || source.en || line.id,
-      price: line.price || source.price || 0,
+      basePrice: line.basePrice ?? source.price ?? line.price ?? 0,
+      price: line.price ?? source.price ?? 0,
       status: normalizeItemStatus(serviceDisplayStatus),
       isComponent,
       isBillable,
       parentComboId: line.parentComboId || "",
+      configuredKey: line.configuredKey || "",
+      configuredOptions: line.configuredOptions || line.selection || null,
+      optionSnapshot: line.optionSnapshot || null,
       ...operationalFields
     };
   });
@@ -205,12 +217,18 @@ function normalizeProduct(item) {
   const oldBroadStation = ["BAR", "KITCHEN"].includes(item.station);
   const station = oldBroadStation && base?.station ? base.station : stationAliases[item.station] || item.station || base?.station || (kind === "DRINK" ? "BAR" : "KITCHEN_HOT");
   const components = item.components?.length ? item.components : base?.components || [];
+  const optionConfig = normalizeProductOptions({
+    variants: item.variants ?? base?.variants ?? [],
+    modifierGroups: item.modifierGroups ?? item.modifiers ?? base?.modifierGroups ?? []
+  });
   return {
     ...item,
     category,
     kind,
     station,
     components,
+    variants: optionConfig.variants,
+    modifierGroups: optionConfig.modifierGroups,
     periods: item.periods?.length ? item.periods : categoryInfo?.periods || ["morning", "afternoon", "evening"]
   };
 }
@@ -349,6 +367,7 @@ function menuContent(items, visibleCategories) {
 
 function itemCard(item) {
   const c = copy[lang];
+  const configurable = hasProductOptions(item);
   return `
     <article class="item-card ${item.available ? "" : "sold-out"}">
       ${productVisual(item)}
@@ -361,9 +380,10 @@ function itemCard(item) {
           <span class="station">${item.kind === "DRINK" ? "DRINK" : "FOOD"}</span>
           <span class="station">${item.station}</span>
         </div>
+        ${configurable ? productOptionPicker(item, `customer-${item.id}`, lang) : ""}
         <div class="price-row">
-          <span class="price">${formatMoney(item.price)}</span>
-          <button class="add-btn" data-add="${item.id}" ${item.available ? "" : "disabled"}>${item.available ? c.add : c.soldOut}</button>
+          <span class="price" ${configurable ? `data-option-price="${escapeAttr(item.id)}"` : ""}>${formatMoney(optionPriceValue(item))}</span>
+          <button class="add-btn" ${configurable ? `data-add-config="${escapeAttr(item.id)}"` : `data-add="${escapeAttr(item.id)}"`} ${item.available ? "" : "disabled"}>${item.available ? c.add : c.soldOut}</button>
         </div>
       </div>
     </article>
@@ -373,6 +393,54 @@ function itemCard(item) {
 function productVisual(item) {
   if (item.image) return `<img class="food-image" src="${item.image}" alt="${escapeHtml(item.en)}" />`;
   return `<div class="food-art" style="--art:${item.color || "#dcefe5"}">${artSvg(item.art || "plate")}</div>`;
+}
+
+function productOptionPicker(item, scope, uiLang = lang) {
+  const config = normalizeProductOptions(item);
+  if (!config.variants.length && !config.modifierGroups.length) return "";
+  const selected = defaultConfiguredSelection(item);
+  return `
+    <div class="option-picker" data-option-product="${escapeAttr(item.id)}">
+      ${config.variants.length ? `
+        <fieldset class="option-group">
+          <legend>${uiLang === "en" ? "Variant" : "Phiên bản"}</legend>
+          ${config.variants.map((variant) => `
+            <label class="check option-choice ${variant.available ? "" : "unavailable"}">
+              <input class="option-input" type="radio" name="${escapeAttr(scope)}-variant" value="${escapeAttr(variant.id)}" ${selected.variantId === variant.id ? "checked" : ""} ${variant.available ? "" : "disabled"} />
+              <span>${escapeHtml(variant[uiLang] || variant.id)}${variant.priceDelta ? ` (${formatSignedDelta(variant.priceDelta)})` : ""}</span>
+            </label>
+          `).join("")}
+        </fieldset>
+      ` : ""}
+      ${config.modifierGroups.map((group) => {
+        const selectedIds = selected.modifierSelections[group.id] || [];
+        const type = group.multiple || group.maxSelect > 1 ? "checkbox" : "radio";
+        return `
+          <fieldset class="option-group" data-option-group="${escapeAttr(group.id)}">
+            <legend>${escapeHtml(group[uiLang] || group.id)}${group.required ? " *" : ""}</legend>
+            ${group.options.map((option) => `
+              <label class="check option-choice ${option.available ? "" : "unavailable"}">
+                <input class="option-input" type="${type}" name="${escapeAttr(scope)}-${escapeAttr(group.id)}" value="${escapeAttr(option.id)}" ${selectedIds.includes(option.id) ? "checked" : ""} ${option.available ? "" : "disabled"} />
+                <span>${escapeHtml(option[uiLang] || option.id)}${option.priceDelta ? ` (${formatSignedDelta(option.priceDelta)})` : ""}</span>
+              </label>
+            `).join("")}
+          </fieldset>
+        `;
+      }).join("")}
+      <small class="option-feedback" data-option-feedback></small>
+    </div>
+  `;
+}
+
+function optionPriceValue(item, selection = defaultConfiguredSelection(item)) {
+  const validation = validateConfiguredSelection(item, selection);
+  return validation.ok ? validation.unitPrice : Number(item.price) || 0;
+}
+
+function formatSignedDelta(value) {
+  const number = Number(value) || 0;
+  if (!number) return formatMoney(0);
+  return `${number > 0 ? "+" : "-"}${formatMoney(Math.abs(number))}`;
 }
 
 function staffPage() {
@@ -554,10 +622,7 @@ function renderTableSessionRepairWarning(repair) {
 function counterOrderPanel(table) {
   const draftLines = counterDraft.items || [];
   const validDraftLines = draftLines.filter((line) => productById(line.id));
-  const total = validDraftLines.reduce((sum, line) => {
-    const item = productById(line.id);
-    return sum + line.qty * (Number(item.price) || 0);
-  }, 0);
+  const total = cartSubtotal(validDraftLines, productById);
   const query = normalizeSearch(counterSearch);
   const availableProducts = products.filter((item) => item.available && matchesCounterSearch(item, query)).sort(compareMenuItems);
   return `
@@ -610,25 +675,39 @@ function counterOrderPanel(table) {
 }
 
 function counterProductButton(item) {
+  const configurable = hasProductOptions(item);
   return `
-    <button class="counter-product" data-counter-add="${item.id}">
+    <article class="counter-product ${configurable ? "with-options" : ""}">
       <strong>${escapeHtml(item.vi)}</strong>
-      <span>${formatMoney(item.price)}</span>
+      <span ${configurable ? `data-option-price="${escapeAttr(item.id)}"` : ""}>${formatMoney(optionPriceValue(item))}</span>
       <small>${item.station}</small>
-    </button>
+      ${configurable ? productOptionPicker(item, `counter-${item.id}`, "vi") : ""}
+      <button class="${configurable ? "primary compact" : "ghost compact"}" ${configurable ? `data-counter-add-config="${escapeAttr(item.id)}"` : `data-counter-add="${escapeAttr(item.id)}"`}>Thêm</button>
+    </article>
   `;
 }
 
 function counterDraftLine(line) {
   const item = productById(line.id);
   if (!item) return "";
+  const configured = validateConfiguredSelection(item, line.selection || defaultConfiguredSelection(item));
+  const price = configured.ok ? configured.unitPrice : Number(item.price) || 0;
+  const identity = line.key || line.id;
+  const summaries = configured.ok ? optionSummaryLines({ optionSnapshot: {
+    variant: configured.variant,
+    modifierGroups: configured.modifierGroups
+  } }, "vi") : [];
   return `
     <div class="cart-line">
-      <div><strong>${escapeHtml(item.vi)}</strong><br><span class="muted">${formatMoney(item.price)}</span></div>
+      <div>
+        <strong>${escapeHtml(item.vi)}</strong>
+        ${summaries.map((summary) => `<br><small class="muted">${escapeHtml(summary)}</small>`).join("")}
+        <br><span class="muted">${formatMoney(price)}</span>
+      </div>
       <div class="qty">
-        <button data-counter-dec="${item.id}">-</button>
+        <button data-counter-dec="${escapeAttr(identity)}">-</button>
         <strong>${line.qty}</strong>
-        <button data-counter-inc="${item.id}">+</button>
+        <button data-counter-inc="${escapeAttr(identity)}">+</button>
       </div>
     </div>
   `;
@@ -676,10 +755,12 @@ function cashierBillLine(order, line, index) {
   const billQty = chargedQty(line);
   const returnedQty = Math.max(0, line.qty - billQty);
   const servedQty = Math.min(line.qty, Math.max(0, Number(line.servedQty) || 0));
+  const summaries = optionSummaryLines(line, "vi");
   return `
     <li class="bill-adjust-line">
       <div class="bill-item-main">
         <span>${line.qty} x ${escapeHtml(line.nameVi)}</span>
+        ${summaries.map((summary) => `<small class="muted">${escapeHtml(summary)}</small>`).join("")}
         <small class="muted">${returnedQty ? `Tính tiền ${billQty}/${line.qty} - trả ${returnedQty}` : `Tính tiền đủ ${billQty}/${line.qty}`} · phục vụ ${servedQty}/${line.qty}</small>
       </div>
       <span class="station">${line.prepStatus || line.status}</span>
@@ -787,6 +868,13 @@ function productForm(item = {}) {
         <legend>Khung giờ bán</legend>
         ${["morning", "afternoon", "evening"].map((period) => `<label class="check"><input type="checkbox" name="periods" value="${period}" ${selectedPeriods.includes(period) ? "checked" : ""} /> ${period}</label>`).join("")}
       </fieldset>
+      <label>Biến thể món (JSON)
+        <textarea name="variantsJson" spellcheck="false" placeholder='[{"id":"regular","vi":"Ly vừa","en":"Regular","priceDelta":0,"available":true}]'>${escapeHtml(optionJsonValue(item.variants || []))}</textarea>
+      </label>
+      <label>Nhóm tùy chọn / topping (JSON)
+        <textarea name="modifierGroupsJson" spellcheck="false" placeholder='[{"id":"sugar","vi":"Đường","en":"Sugar","required":true,"multiple":false,"minSelect":1,"maxSelect":1,"options":[{"id":"sugar-50","vi":"50% đường","en":"50% sugar","priceDelta":0,"available":true}]}]'>${escapeHtml(optionJsonValue(item.modifierGroups || []))}</textarea>
+      </label>
+      <p class="muted option-admin-help">Dùng JSON hợp lệ để cấu hình size, topping, min/max và tình trạng còn bán. Nhãn cần có vi/en.</p>
       <label class="check"><input type="checkbox" name="available" ${item.available ?? true ? "checked" : ""} /> Đang bán</label>
       <div class="split-actions">
         <button class="primary" type="submit">Lưu món</button>
@@ -795,6 +883,28 @@ function productForm(item = {}) {
       <div id="image-preview">${item.image ? `<img class="preview-image" src="${item.image}" alt="Preview" />` : ""}</div>
     </form>
   `;
+}
+
+function optionJsonValue(value = []) {
+  return value?.length ? JSON.stringify(value, null, 2) : "";
+}
+
+function parseAdminOptionConfig(formData) {
+  try {
+    const variants = parseJsonArrayField(formData.get("variantsJson"), "variants");
+    const modifierGroups = parseJsonArrayField(formData.get("modifierGroupsJson"), "modifierGroups");
+    return validateProductOptionConfig({ variants, modifierGroups });
+  } catch (error) {
+    return { ok: false, errors: [error.message], config: { variants: [], modifierGroups: [] } };
+  }
+}
+
+function parseJsonArrayField(value, label) {
+  const text = String(value || "").trim();
+  if (!text) return [];
+  const parsed = JSON.parse(text);
+  if (!Array.isArray(parsed)) throw new Error(`${label} phải là một mảng JSON`);
+  return parsed;
 }
 
 function adminProductRow(item) {
@@ -808,6 +918,7 @@ function adminProductRow(item) {
           <span class="station">${item.kind}</span>
           <span class="station">${categoryLabel(item.category)}</span>
           <span class="station">${item.station}</span>
+          ${hasProductOptions(item) ? `<span class="station">OPTIONS</span>` : ""}
           <button class="pill ${item.available ? "active" : ""}" data-toggle="${item.id}">${item.available ? "AVAILABLE" : "SOLD OUT"}</button>
         </div>
       </div>
@@ -821,6 +932,7 @@ function adminProductRow(item) {
 
 function bindCustomer(token) {
   bindGlobal();
+  bindOptionPickers();
   document.querySelectorAll("[data-kind]").forEach((button) => button.addEventListener("click", () => {
     activeKind = button.dataset.kind;
     activeCategory = "all";
@@ -836,13 +948,30 @@ function bindCustomer(token) {
     saveState();
     render();
   }));
+  document.querySelectorAll("[data-add-config]").forEach((button) => button.addEventListener("click", () => {
+    const selection = selectionFromOptionPicker(button.closest(".item-card")?.querySelector("[data-option-product]"));
+    const item = productById(button.dataset.addConfig);
+    const validation = validateConfiguredSelection(item, selection);
+    if (!validation.ok) {
+      showOptionFeedback(button.closest(".item-card")?.querySelector("[data-option-product]"), validation.errors);
+      return;
+    }
+    state.cart = addCartItem(state.cart, button.dataset.addConfig, productById, 10, selection);
+    saveState();
+    render();
+  }));
   document.querySelectorAll("[data-inc]").forEach((button) => button.addEventListener("click", () => {
     state.cart = addCartItem(state.cart, button.dataset.inc, productById);
     saveState();
     render();
   }));
   document.querySelectorAll("[data-dec]").forEach((button) => button.addEventListener("click", () => {
-    state.cart = decrementCartItem(state.cart, button.dataset.dec);
+    state.cart = decrementCartItem(state.cart, button.dataset.dec, productById);
+    saveState();
+    render();
+  }));
+  document.querySelectorAll("[data-remove-cart]").forEach((button) => button.addEventListener("click", () => {
+    state.cart = removeCartItem(state.cart, button.dataset.removeCart, productById);
     saveState();
     render();
   }));
@@ -866,6 +995,7 @@ function bindStaff() {
 
 function bindCashier() {
   bindGlobal();
+  bindOptionPickers();
   document.querySelectorAll("[data-order]").forEach((button) => button.addEventListener("click", () => updateOrderStatus(button.dataset.order, button.dataset.status)));
   document.querySelectorAll("[data-pay]").forEach((button) => button.addEventListener("click", () => payOrder(button.dataset.pay, button.dataset.method)));
   document.querySelectorAll("[data-split]").forEach((button) => button.addEventListener("click", () => splitOrderInTwo(button.dataset.split)));
@@ -887,6 +1017,17 @@ function bindCashier() {
   document.querySelectorAll("[data-transfer-session]").forEach((button) => button.addEventListener("click", () => transferActiveTableSession(button.dataset.transferSession, button.dataset.transferTo)));
   document.querySelectorAll("[data-counter-open]").forEach((button) => button.addEventListener("click", () => openCounterOrder(button.dataset.counterOpen)));
   document.querySelectorAll("[data-counter-add]").forEach((button) => button.addEventListener("click", () => addCounterItem(button.dataset.counterAdd)));
+  document.querySelectorAll("[data-counter-add-config]").forEach((button) => button.addEventListener("click", () => {
+    const picker = button.closest(".counter-product")?.querySelector("[data-option-product]");
+    const selection = selectionFromOptionPicker(picker);
+    const item = productById(button.dataset.counterAddConfig);
+    const validation = validateConfiguredSelection(item, selection);
+    if (!validation.ok) {
+      showOptionFeedback(picker, validation.errors);
+      return;
+    }
+    addCounterItem(button.dataset.counterAddConfig, selection);
+  }));
   document.querySelectorAll("[data-counter-inc]").forEach((button) => button.addEventListener("click", () => addCounterItem(button.dataset.counterInc)));
   document.querySelectorAll("[data-counter-dec]").forEach((button) => button.addEventListener("click", () => decCounterItem(button.dataset.counterDec)));
   document.querySelector("[data-counter-cancel]")?.addEventListener("click", cancelCounterOrder);
@@ -943,6 +1084,11 @@ function bindAdminForm() {
     const selectedCategory = formData.get("category");
     const categoryInfo = categories.find((cat) => cat.id === selectedCategory);
     const existingIndex = products.findIndex((item) => item.id === id);
+    const optionConfig = parseAdminOptionConfig(formData);
+    if (!optionConfig.ok) {
+      alert(`Cấu hình tùy chọn chưa hợp lệ: ${optionConfig.errors.join(", ")}`);
+      return;
+    }
     const next = {
       id,
       kind: categoryInfo?.kind || formData.get("kind"),
@@ -958,7 +1104,9 @@ function bindAdminForm() {
       art: formData.get("art") || "plate",
       periods: formData.getAll("periods"),
       image: imageUrl || imageFileValue,
-      components: existingIndex >= 0 ? products[existingIndex].components || [] : []
+      components: existingIndex >= 0 ? products[existingIndex].components || [] : [],
+      variants: optionConfig.config.variants,
+      modifierGroups: optionConfig.config.modifierGroups
     };
     if (existingIndex >= 0) products[existingIndex] = next;
     else products.unshift(next);
@@ -996,6 +1144,53 @@ function bindGlobal() {
     localStorage.setItem("deedou_lang", lang);
     render();
   }));
+}
+
+function bindOptionPickers() {
+  document.querySelectorAll("[data-option-product]").forEach((picker) => {
+    refreshOptionPicker(picker);
+    picker.querySelectorAll(".option-input").forEach((input) => {
+      input.addEventListener("change", () => refreshOptionPicker(picker));
+    });
+  });
+}
+
+function selectionFromOptionPicker(picker) {
+  if (!picker) return {};
+  const variantInput = picker.querySelector('fieldset:not([data-option-group]) .option-input:checked');
+  const modifierSelections = {};
+  picker.querySelectorAll("[data-option-group]").forEach((groupEl) => {
+    const groupId = groupEl.dataset.optionGroup;
+    const optionIds = [...groupEl.querySelectorAll(".option-input:checked")].map((input) => input.value);
+    if (optionIds.length) modifierSelections[groupId] = optionIds;
+  });
+  return {
+    variantId: variantInput?.value || "",
+    modifierSelections
+  };
+}
+
+function refreshOptionPicker(picker) {
+  if (!picker) return;
+  const item = productById(picker.dataset.optionProduct);
+  if (!item) return;
+  const selection = selectionFromOptionPicker(picker);
+  const validation = validateConfiguredSelection(item, selection);
+  const scope = picker.closest(".item-card, .counter-product") || picker.parentElement;
+  const priceTarget = [...(scope?.querySelectorAll("[data-option-price]") || [])].find((node) => node.dataset.optionPrice === item.id);
+  priceTarget?.replaceChildren(document.createTextNode(formatMoney(validation.ok ? validation.unitPrice : Number(item.price) || 0)));
+  showOptionFeedback(picker, validation.ok ? [] : validation.errors);
+}
+
+function showOptionFeedback(picker, errors = []) {
+  const feedback = picker?.querySelector("[data-option-feedback]");
+  if (!feedback) return;
+  feedback.textContent = errors.length ? optionErrorMessage(errors) : "";
+}
+
+function optionErrorMessage(errors = []) {
+  if (!errors.length) return "";
+  return lang === "en" ? "Please complete required options." : "Vui lòng chọn đủ tùy chọn bắt buộc.";
 }
 
 function loadProductIntoForm(id) {
@@ -1164,21 +1359,14 @@ function openCounterOrder(tableCode) {
   render();
 }
 
-function addCounterItem(id) {
-  const item = productById(id);
-  if (!item?.available) return;
-  const line = counterDraft.items.find((draftLine) => draftLine.id === id);
-  if (line) line.qty = Math.min(20, line.qty + 1);
-  else counterDraft.items.push({ id, qty: 1 });
+function addCounterItem(idOrKey, selection = null) {
+  counterDraft.items = addCartItem(counterDraft.items, idOrKey, productById, 20, selection);
   saveCounterDraft();
   render();
 }
 
-function decCounterItem(id) {
-  const line = counterDraft.items.find((draftLine) => draftLine.id === id);
-  if (!line) return;
-  line.qty -= 1;
-  counterDraft.items = counterDraft.items.filter((draftLine) => draftLine.qty > 0);
+function decCounterItem(idOrKey) {
+  counterDraft.items = decrementCartItem(counterDraft.items, idOrKey, productById);
   saveCounterDraft();
   render();
 }
@@ -1192,7 +1380,7 @@ function cancelCounterOrder() {
 }
 
 function submitCounterOrder() {
-  if (!counterDraft.active || !counterDraft.items.length) return;
+  if (!counterDraft.active || !counterDraft.items.length || !canSubmitCart(counterDraft.items, productById)) return;
   const tableCode = counterDraft.table;
   const table = tables.find((item) => item.code === tableCode);
   const isTakeaway = tableCode === "TAKEAWAY";
@@ -1632,6 +1820,15 @@ function zoneLabel(zone) {
 function matchesCounterSearch(item, query) {
   if (!query) return true;
   const category = categories.find((cat) => cat.id === item.category);
+  const optionConfig = normalizeProductOptions(item);
+  const optionLabels = [
+    ...optionConfig.variants.flatMap((variant) => [variant.vi, variant.en]),
+    ...optionConfig.modifierGroups.flatMap((group) => [
+      group.vi,
+      group.en,
+      ...group.options.flatMap((option) => [option.vi, option.en])
+    ])
+  ];
   const haystack = normalizeSearch([
     item.vi,
     item.en,
@@ -1639,7 +1836,8 @@ function matchesCounterSearch(item, query) {
     item.descEn,
     item.station,
     category?.vi,
-    category?.en
+    category?.en,
+    ...optionLabels
   ].join(" "));
   return haystack.includes(query);
 }

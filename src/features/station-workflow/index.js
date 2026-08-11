@@ -8,6 +8,7 @@ import {
   normalizePrepStatus,
   SERVICE_MODES
 } from "../ordering/index.js";
+import { optionSummaryLines } from "../product-options/index.js";
 import { escapeAttr, escapeHtml } from "../../shared/utils/index.js";
 
 export { applyPrepStatusTransition, canTransitionPrepStatus };
@@ -117,13 +118,24 @@ export function renderStationTicket(ticket) {
         <span class="status-pill"><span>Age</span><strong>${formatAge(ticket.ageMinutes)}</strong></span>
       </div>
       <ul class="item-list">
-        ${ticket.lines.map((line) => `<li><strong>${line.qty} x ${escapeHtml(line.nameVi)}</strong> <span class="station">${escapeHtml(line.station)}</span><br><span class="muted">${escapeHtml(line.nameEn)} - ${escapeHtml(normalizePrepStatus(line.prepStatus || line.status))}</span></li>`).join("")}
+        ${ticket.lines.map((line) => renderStationLine(line)).join("")}
       </ul>
       ${ticket.order?.note ? `<p class="muted">Note: ${escapeHtml(ticket.order.note)}</p>` : ""}
       <div class="split-actions">
         ${actions.map((action) => `<button class="primary" data-station-order="${escapeAttr(ticket.orderId)}" data-station-code="${escapeAttr(ticket.stationCode)}" data-station-status="${escapeAttr(action.status)}">${escapeHtml(action.label)}</button>`).join("")}
       </div>
     </article>
+  `;
+}
+
+function renderStationLine(line) {
+  const summaries = optionSummaryLines(line, "vi");
+  return `
+    <li>
+      <strong>${line.qty} x ${escapeHtml(line.nameVi)}</strong> <span class="station">${escapeHtml(line.station)}</span>
+      ${summaries.map((summary) => `<br><span class="muted">${escapeHtml(summary)}</span>`).join("")}
+      <br><span class="muted">${escapeHtml(line.nameEn)} - ${escapeHtml(normalizePrepStatus(line.prepStatus || line.status))}</span>
+    </li>
   `;
 }
 

@@ -9,6 +9,7 @@ Owns DeeDou station/KDS preparation workflow.
 - KDS ticket derivation.
 - Ticket age/wait age.
 - Thin reusable Kitchen, Bar, and Dessert rendering.
+- Variant/modifier summary display for configured lines.
 
 ## Does Not Own
 

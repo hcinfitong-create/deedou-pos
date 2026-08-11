@@ -67,6 +67,12 @@ Current location:
 
 - `src/features/cart/index.js`
 
+Notes:
+
+- DD-005 lets cart line identity include product ID, selected variant, and canonical modifier selections.
+- Legacy `{ id, qty }` cart lines remain readable.
+- Cart estimates configured subtotal from the current catalog, while submitted order-line snapshot pricing is created by `ordering` through `product-options`.
+
 ### customer-orders
 
 Owns:
@@ -112,6 +118,7 @@ Owns:
 - Direct order status transition guards.
 - Station-derived aggregate order readiness and service completion.
 - Optional future hooks for course/hold/seat/prep-time metadata.
+- Configured order-line price snapshot creation through the public `product-options` API.
 
 Does not own:
 
@@ -120,6 +127,34 @@ Does not own:
 - Admin product editing.
 - Kitchen/bar/dessert presentation.
 - Kitchen/bar/dessert ticket selection/rendering.
+
+### product-options
+
+Owns:
+
+- Product variant normalization and validation.
+- Modifier group/option normalization and validation.
+- Configured selection canonicalization.
+- Configured cart identity keys.
+- Catalog-derived configured unit-price calculation.
+- Immutable option snapshots for submitted order lines.
+- Option summary helpers for customer, cashier, staff, and KDS displays.
+
+Does not own:
+
+- Menu filtering or category definitions.
+- Cart quantity state.
+- Order status or station preparation.
+- Payment, split, refund, or void behavior.
+- Admin product form DOM or localStorage persistence.
+
+Current location:
+
+- `src/features/product-options/index.js`
+
+Admin note:
+
+- DD-005 keeps the admin option editor as validated JSON inside the existing `admin-menu` area in `app.js`. A richer structured editor should be extracted later with `admin-menu`.
 
 Current files:
 
@@ -359,12 +394,13 @@ Future candidates:
 
 ## Current Public APIs
 
-After Phase B:
+Current:
 
 - `src/shared/config/index.js`
 - `src/shared/i18n/index.js`
 - `src/shared/utils/index.js`
 - `src/features/customer-menu/index.js`
+- `src/features/product-options/index.js`
 - `src/features/ordering/index.js`
 - `src/features/cart/index.js`
 - `src/features/customer-orders/index.js`

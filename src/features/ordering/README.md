@@ -36,6 +36,7 @@ Owns framework-independent order and bill calculation rules.
 - Order item count helpers.
 - Deterministic direct order status transition guards.
 - Optional contract hooks for course, hold/fire state, seat, target station, prep time, and ticket-age alerts.
+- Configured order-line snapshots through the public `product-options` API.
 
 ## Does Not Own
 
@@ -87,7 +88,7 @@ Table-service serving must use line/quantity service APIs. Counter/takeaway can 
 
 ## Dependencies
 
-No feature dependencies.
+Uses the public `product-options` API for configured line pricing/snapshots. Otherwise keep this module framework-independent and avoid UI/persistence dependencies.
 
 ## Database Tables Used
 
@@ -103,4 +104,4 @@ Keep this module pure and framework-independent. Do not add browser storage or D
 
 ## Tests
 
-Module tests cover totals, bill quantity adjustment, status normalization, combo routing, service context validation, source normalization, machine-readable timestamp normalization, station-derived readiness, prep transition guards, item-level serving, partial service, combo/meta readiness exclusion, and direct order transition guards.
+Module tests cover totals, configured snapshots, bill quantity adjustment, status normalization, combo routing, service context validation, source normalization, machine-readable timestamp normalization, station-derived readiness, prep transition guards, item-level serving, partial service, combo/meta readiness exclusion, and direct order transition guards.

@@ -1,23 +1,42 @@
-import { escapeHtml, formatMoney } from "../../shared/utils/index.js";
+import {
+  configuredCartLineKey,
+  defaultConfiguredSelection,
+  hasProductOptions,
+  optionSummaryLines,
+  validateConfiguredSelection
+} from "../product-options/index.js";
+import { escapeAttr, escapeHtml, formatMoney } from "../../shared/utils/index.js";
 
-export function addCartItem(cart, id, productById, maxQty = 10) {
-  const item = productById(id);
-  if (!item?.available) return cart;
-  const existing = cart.find((line) => line.id === id);
-  if (existing) {
-    return cart.map((line) => line.id === id ? { ...line, qty: Math.min(maxQty, line.qty + 1) } : line);
+export function addCartItem(cart, idOrKey, productById, maxQty = 10, selection = null) {
+  const existingLine = findCartLine(cart, idOrKey, productById);
+  if (existingLine && !productById(idOrKey)) {
+    return incrementCartLine(cart, existingLine, productById, maxQty);
   }
-  return [...cart, { id, qty: 1 }];
+
+  const item = productById(idOrKey);
+  if (!item?.available) return cart;
+  const selectedOptions = selection || defaultConfiguredSelection(item);
+  const configured = validateConfiguredSelection(item, selectedOptions);
+  if (!configured.ok) return cart;
+  const key = configured.configuredKey;
+  const existing = findCartLine(cart, key, productById);
+  if (existing) {
+    return incrementCartLine(cart, existing, productById, maxQty);
+  }
+  const configuredLine = hasProductOptions(item)
+    ? { id: item.id, key, selection: configured.selection, qty: 1 }
+    : { id: item.id, qty: 1 };
+  return [...cart, configuredLine];
 }
 
-export function decrementCartItem(cart, id) {
+export function decrementCartItem(cart, idOrKey, productById = null) {
   return cart
-    .map((line) => line.id === id ? { ...line, qty: line.qty - 1 } : line)
+    .map((line) => cartLineMatches(line, idOrKey, productById) ? { ...line, qty: line.qty - 1 } : line)
     .filter((line) => line.qty > 0);
 }
 
-export function removeCartItem(cart, id) {
-  return cart.filter((line) => line.id !== id);
+export function removeCartItem(cart, idOrKey, productById = null) {
+  return cart.filter((line) => !cartLineMatches(line, idOrKey, productById));
 }
 
 export function clearCart() {
@@ -28,14 +47,19 @@ export function cartSubtotal(cart, productById) {
   return (cart || []).reduce((sum, line) => {
     const item = productById(line.id);
     if (!item) return sum;
-    return sum + line.qty * (Number(item.price) || 0);
+    const configured = validateConfiguredSelection(item, selectionForCartLine(line, item));
+    if (!configured.ok) return sum;
+    return sum + line.qty * configured.unitPrice;
   }, 0);
 }
 
 export function canSubmitCart(cart, productById = null) {
   if (!(cart || []).length) return false;
   if (!productById) return true;
-  return cart.every((line) => !!productById(line.id));
+  return cart.every((line) => {
+    const item = productById(line.id);
+    return !!item?.available && validateConfiguredSelection(item, selectionForCartLine(line, item)).ok;
+  });
 }
 
 export function renderCartPanel({ table, cart, lang, copy, productById, orderStatusHtml = "" }) {
@@ -64,14 +88,53 @@ export function renderCartPanel({ table, cart, lang, copy, productById, orderSta
 function renderCartLine(line, { lang, productById }) {
   const item = productById(line.id);
   if (!item) return "";
+  const configured = validateConfiguredSelection(item, selectionForCartLine(line, item));
+  const price = configured.ok ? configured.unitPrice : Number(item.price) || 0;
+  const identity = cartLineIdentity(line, productById);
+  const summaries = configured.ok ? optionSummaryLines({ optionSnapshot: {
+    variant: configured.variant,
+    modifierGroups: configured.modifierGroups
+  } }, lang) : [];
   return `
     <div class="cart-line">
-      <div><strong>${escapeHtml(item[lang])}</strong><br><span class="muted">${formatMoney(item.price)}</span></div>
+      <div>
+        <strong>${escapeHtml(item[lang])}</strong>
+        ${summaries.map((summary) => `<br><small class="muted">${escapeHtml(summary)}</small>`).join("")}
+        <br><span class="muted">${formatMoney(price)}</span>
+      </div>
       <div class="qty">
-        <button data-dec="${item.id}">-</button>
+        <button data-dec="${escapeAttr(identity)}">-</button>
         <strong>${line.qty}</strong>
-        <button data-inc="${item.id}">+</button>
+        <button data-inc="${escapeAttr(identity)}">+</button>
+        <button data-remove-cart="${escapeAttr(identity)}">Remove</button>
       </div>
     </div>
   `;
+}
+
+export function cartLineIdentity(line, productById = null) {
+  if (line.key) return line.key;
+  const item = typeof productById === "function" ? productById(line.id) : null;
+  return item ? configuredCartLineKey(item, selectionForCartLine(line, item)) : line.id;
+}
+
+export function selectionForCartLine(line = {}, product = {}) {
+  if (line.selection) return line.selection;
+  return defaultConfiguredSelection(product);
+}
+
+function incrementCartLine(cart, target, productById, maxQty) {
+  const identity = cartLineIdentity(target, productById);
+  return cart.map((line) => {
+    if (cartLineIdentity(line, productById) !== identity) return line;
+    return { ...line, qty: Math.min(maxQty, line.qty + 1) };
+  });
+}
+
+function findCartLine(cart = [], idOrKey, productById = null) {
+  return (cart || []).find((line) => cartLineMatches(line, idOrKey, productById)) || null;
+}
+
+function cartLineMatches(line, idOrKey, productById = null) {
+  return line.id === idOrKey || cartLineIdentity(line, productById) === idOrKey;
 }

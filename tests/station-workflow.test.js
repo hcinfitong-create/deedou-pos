@@ -94,13 +94,33 @@ test("station ticket age is deterministic and render targets station code", () =
     table: "",
     serviceMode: "COUNTER_SERVICE",
     fulfillmentType: "TAKEAWAY",
-    items: [{ lineId: "coffee", station: "BAR_COFFEE", qty: 1, nameVi: "Cà phê", nameEn: "Coffee", prepStatus: "QUEUED", status: "QUEUED", queuedAt: "2026-08-11T05:00:00.000Z" }]
+    items: [{
+      lineId: "coffee",
+      station: "BAR_COFFEE",
+      qty: 1,
+      nameVi: "Cà phê",
+      nameEn: "Coffee",
+      prepStatus: "QUEUED",
+      status: "QUEUED",
+      queuedAt: "2026-08-11T05:00:00.000Z",
+      optionSnapshot: {
+        variant: { id: "large", vi: "<Ly lớn>", en: "Large", priceDelta: 10000 },
+        modifierGroups: [{
+          id: "milk",
+          vi: "Sữa",
+          en: "Milk",
+          options: [{ id: "oat", vi: "<Sữa yến mạch>", en: "Oat milk", priceDelta: 8000 }]
+        }]
+      }
+    }]
   };
   const tickets = selectStationTickets([order], "BAR", stations, { now: "2026-08-11T05:07:00.000Z" });
 
   assert.equal(getStationTicketAge(tickets[0], "2026-08-11T05:07:00.000Z"), 7);
   const html = renderStationPage({ orders: [order], stationGroup: "BAR", stations, now: "2026-08-11T05:07:00.000Z" });
   assert.match(html, /data-station-code="BAR_COFFEE"/);
+  assert.match(html, /Phiên bản: &lt;Ly lớn&gt;/);
+  assert.match(html, /Sữa: &lt;Sữa yến mạch&gt;/);
   assert.doesNotMatch(html, /data-station-group=/);
   assert.doesNotMatch(html, /SERVED/);
 });

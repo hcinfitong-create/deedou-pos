@@ -10,4 +10,4 @@ Keep preparation, serving, and billing concerns separate:
 
 Do not add localStorage, DOM event binding, payment behavior, admin CRUD, table management, or broad station taxonomy redesign here.
 
-Import order-domain invariants only through `src/features/ordering/index.js`.
+Import order-domain invariants through `src/features/ordering/index.js`. Use the public `product-options` summary helper only for displaying configured line options.
