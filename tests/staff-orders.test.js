@@ -55,6 +55,19 @@ test("staff selectors separate table-service and counter/cafe orders", () => {
   assert.deepEqual(selectOpenTablesByPhysicalZone(orders), { Beach: ["A01"] });
 });
 
+test("staff open-table metrics use active table sessions when provided", () => {
+  const orders = [
+    { id: "legacy-open", status: "ACCEPTED", serviceMode: "TABLE_SERVICE", fulfillmentType: "DINE_IN", table: "C01", zone: "Camping", total: 90000 }
+  ];
+  const tableSessions = [
+    { id: "TS-A01", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: "2026-08-11T08:00:00.000Z", openedSource: "STAFF" },
+    { id: "TS-B01", tableCode: "B01", zone: "Indoor", status: "CLOSED", openedAt: "2026-08-11T07:00:00.000Z", closedAt: "2026-08-11T07:30:00.000Z", openedSource: "STAFF" }
+  ];
+
+  assert.deepEqual(selectOpenTablesByPhysicalZone(orders, tableSessions), { Beach: ["A01"] });
+  assert.equal(staffOrderMetrics({ orders, events: [], tableSessions }).openTables, 1);
+});
+
 test("staff selector finds ready-to-serve orders", () => {
   const orders = [
     { id: "prep", status: "IN_PREPARATION" },

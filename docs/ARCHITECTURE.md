@@ -25,6 +25,7 @@ index.html
       -> features/service-requests
       -> features/staff-orders
       -> features/station-workflow
+      -> features/table-session
 ```
 
 The current router is hash-based:
@@ -51,6 +52,16 @@ Orders now carry explicit service context so DeeDou can support both cafe/counte
 - Overall `READY` is derived when all remaining unserved required lines are prep-ready. Overall `SERVED` is derived only when all serviceable quantities are fully served.
 
 Counter/takeaway orders may have no table. Takeaway is a fulfillment type, not a physical service area.
+
+## Table Sessions
+
+DD-004 separates physical tables, table sessions, and order batches:
+
+```text
+Physical Table != Table Session != Order Batch
+```
+
+A table session represents one active dining visit at one physical table. Table-service orders carry `tableSessionId`; counter service and takeaway orders do not create or require a table session. `app.js` owns localStorage persistence, DOM binding, and audit logging, while `features/table-session` owns session normalization, open/reuse/close/transfer rules, floor-plan selectors, and legacy runtime backfill.
 
 ## Feature Module Rule
 
@@ -110,9 +121,10 @@ Phase B has extracted the first stable, low-risk modules:
 - `features/service-requests`
 - `features/staff-orders`
 - `features/station-workflow`
+- `features/table-session`
 
 Larger UI decomposition should come later, after each phase validates.
 
 ## Current Known Coupling
 
-`app.js` still owns broad page composition, event binding, localStorage orchestration, admin actions, cashier actions, payments, reports, and station persistence orchestration. Cart rules/UI, customer order status presentation, customer service request event creation, ordering contracts, staff board presentation/selectors, and station/KDS rendering/selectors now live behind feature public APIs.
+`app.js` still owns broad page composition, event binding, localStorage orchestration, admin actions, cashier actions, payments, reports, and station/session persistence orchestration. Cart rules/UI, customer order status presentation, customer service request event creation, ordering contracts, staff board presentation/selectors, station/KDS rendering/selectors, and table-session domain rules now live behind feature public APIs.

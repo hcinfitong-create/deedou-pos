@@ -14,13 +14,17 @@ export function renderCustomerOrderStatusPill(order, { lang, copy }) {
   return `<div class="status-pill"><span>${order.orderNo} ${labels[order.status] || order.status}</span><strong>${formatMoney(order.total)}</strong></div>`;
 }
 
-export function renderCustomerOrderStatusStrip({ orders, tableCode, lang, copy }) {
-  const html = orders
-    .filter((order) => order.table === tableCode)
+export function selectCustomerSessionOrders({ orders = [], tableSessionId = "" } = {}) {
+  const sessionId = String(tableSessionId || "").trim();
+  if (!sessionId) return [];
+  return (orders || []).filter((order) => order.tableSessionId === sessionId);
+}
+
+export function renderCustomerOrderStatusStrip({ orders, tableSessionId, lang, copy }) {
+  const html = selectCustomerSessionOrders({ orders, tableSessionId })
     .slice(-4)
     .reverse()
     .map((order) => renderCustomerOrderStatusPill(order, { lang, copy }))
     .join("");
   return `<div class="status-strip">${html}</div>`;
 }
-
