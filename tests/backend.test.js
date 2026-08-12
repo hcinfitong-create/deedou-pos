@@ -18,6 +18,7 @@ const migrationSql = readFileSync(new URL("../supabase/migrations/20260812000000
 const authMigrationSql = readFileSync(new URL("../supabase/migrations/20260812010000_dd008b_auth_rbac.sql", import.meta.url), "utf8");
 const authContractSql = readFileSync(new URL("../supabase/tests/dd008b_auth_rbac_contract.sql", import.meta.url), "utf8");
 const seedSql = readFileSync(new URL("../supabase/seed.sql", import.meta.url), "utf8");
+const packageJson = readFileSync(new URL("../package.json", import.meta.url), "utf8");
 const gitignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
 const ciWorkflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const supabaseConfig = readFileSync(new URL("../supabase/config.toml", import.meta.url), "utf8");
@@ -513,6 +514,24 @@ test("CI executes real DD-008B Supabase database and Auth integration contracts 
   assert.match(ciWorkflow, /npm run dd008b:auth-integration/i);
   assert.match(ciWorkflow, /Run DD-008B real Supabase Auth integration/i);
   assert.match(ciWorkflow, /"feat\/\*\*"/i);
+  assert.doesNotMatch(ciWorkflow, /SUPABASE_SERVICE_ROLE|PRODUCTION/i);
+});
+
+test("DD-008B merge gates run on Node 22 and include exact-head browser smoke", () => {
+  assert.match(packageJson, /"node":\s*">=22"/i);
+
+  ["test", "backend-db", "auth-integration", "browser-smoke"].forEach((jobName) => {
+    const jobMatch = ciWorkflow.match(new RegExp(`${jobName}:([\\s\\S]*?)(?:\\n  [a-zA-Z0-9_-]+:|\\n?$)`, "i"));
+    assert.ok(jobMatch, `Missing CI job ${jobName}`);
+    assert.match(jobMatch[1], /node-version:\s*22/i, `${jobName} should use Node 22`);
+    assert.match(jobMatch[1], /node --version/i, `${jobName} should print exact Node version`);
+  });
+
+  assert.match(ciWorkflow, /browser-smoke:/i);
+  assert.match(ciWorkflow, /npx playwright install --with-deps chromium/i);
+  assert.match(ciWorkflow, /npx supabase start/i);
+  assert.match(ciWorkflow, /npx supabase db reset/i);
+  assert.match(ciWorkflow, /npm run dd008b:browser-smoke/i);
   assert.doesNotMatch(ciWorkflow, /SUPABASE_SERVICE_ROLE|PRODUCTION/i);
 });
 

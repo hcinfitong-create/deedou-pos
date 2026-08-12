@@ -16,8 +16,11 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
+
+      - name: Confirm Node
+        run: node --version
 
       - name: Install dependencies
         run: npm ci
@@ -38,8 +41,11 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
+
+      - name: Confirm Node
+        run: node --version
 
       - name: Install dependencies
         run: npm ci
@@ -85,6 +91,9 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Confirm Node
+        run: node --version
+
       - name: Install dependencies
         run: npm ci
 
@@ -106,6 +115,51 @@ jobs:
         env:
           DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
         run: npm run dd008b:auth-integration
+
+      - name: Stop Supabase local stack
+        if: always()
+        run: npx supabase stop
+
+  browser-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Confirm Node
+        run: node --version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Confirm pinned Supabase CLI
+        run: npx supabase --version
+
+      - name: Start Supabase local stack
+        run: npx supabase start
+
+      - name: Reset database from migrations and seed
+        run: npx supabase db reset
+
+      - name: Run DD-008B exact-head browser smoke
+        env:
+          DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+        run: npm run dd008b:browser-smoke
 
       - name: Stop Supabase local stack
         if: always()
