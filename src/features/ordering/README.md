@@ -35,7 +35,7 @@ Owns framework-independent order and bill calculation rules.
 - Order and item status normalization.
 - Order item count helpers.
 - Deterministic direct order status transition guards.
-- Optional contract hooks for course, hold/fire state, seat, target station, prep time, and ticket-age alerts.
+- Persisted course/hold/fire line fields supplied by `course-workflow`.
 - Configured order-line snapshots through the public `product-options` API.
 
 ## Does Not Own
@@ -86,9 +86,19 @@ KDS preparation uses `QUEUED -> ACKNOWLEDGED -> PREPARING -> READY`. `SERVED` is
 
 Table-service serving must use line/quantity service APIs. Counter/takeaway can use `serveAllReady(...)` as a deliberate handoff fast path. Direct `SERVED -> PAID` compatibility remains outside station workflow.
 
+## DD-006 Course Contract
+
+Course assignment and hold/fire release are separate from preparation:
+
+```text
+course != holdState != prepStatus
+```
+
+Missing legacy `holdState` defaults to `FIRED`; missing legacy `course` defaults to immediate service. `ordering` persists those fields and uses `holdState` to decide whether a line is KDS-eligible, but `course-workflow` owns assignment, hold, and fire rules.
+
 ## Dependencies
 
-Uses the public `product-options` API for configured line pricing/snapshots. Otherwise keep this module framework-independent and avoid UI/persistence dependencies.
+Uses the public `product-options` API for configured line pricing/snapshots and the public `course-workflow` API for course/hold defaults. Otherwise keep this module framework-independent and avoid UI/persistence dependencies.
 
 ## Database Tables Used
 

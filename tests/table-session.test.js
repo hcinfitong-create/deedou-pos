@@ -365,7 +365,8 @@ test("floor-plan prep metrics ignore fully served quantities and closed batches"
       items: [
         { lineId: "ready-remaining", station: "BAR_COFFEE", qty: 2, prepStatus: "READY", status: "READY", servedQty: 1, billQty: 2, isBillable: true },
         { lineId: "preparing-remaining", station: "KITCHEN_HOT", qty: 2, prepStatus: "PREPARING", status: "PREPARING", servedQty: 1, billQty: 2, isBillable: true },
-        { lineId: "queued", station: "DESSERT", qty: 1, prepStatus: "QUEUED", status: "QUEUED", servedQty: 0, billQty: 1, isBillable: true }
+        { lineId: "queued", station: "DESSERT", qty: 1, prepStatus: "QUEUED", status: "QUEUED", servedQty: 0, billQty: 1, isBillable: true },
+        { lineId: "held-course", station: "KITCHEN_HOT", qty: 3, prepStatus: "QUEUED", status: "QUEUED", holdState: "HELD", servedQty: 0, billQty: 3, isBillable: true }
       ]
     })
   ];

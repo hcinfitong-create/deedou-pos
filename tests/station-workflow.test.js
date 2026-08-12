@@ -16,6 +16,9 @@ import {
   getServiceProgress,
   stationStatusFor
 } from "../src/features/ordering/index.js";
+import {
+  fireServiceFamily
+} from "../src/features/course-workflow/index.js";
 
 const stations = [
   { code: "BAR_COFFEE", group: "BAR", en: "Coffee Bar" },
@@ -49,6 +52,32 @@ test("station tickets exclude pending QR orders until staff accepts them", () =>
   assert.deepEqual(selectStationTickets([acceptedOrder], "BAR", stations).map((ticket) => ticket.orderId), ["pending-qr"]);
 });
 
+test("held lines are excluded from KDS until fired and age starts at fire time", () => {
+  const order = {
+    id: "held-order",
+    orderNo: "D01-0020",
+    status: "ACCEPTED",
+    table: "A01",
+    serviceMode: "TABLE_SERVICE",
+    fulfillmentType: "DINE_IN",
+    items: [
+      { lineId: "course-2", station: "KITCHEN_HOT", qty: 1, nameVi: "Mì xào", nameEn: "Noodles", course: "2", holdState: "HELD", prepStatus: "QUEUED", status: "QUEUED", servedQty: 0 }
+    ]
+  };
+
+  assert.deepEqual(selectStationTickets([order], "KITCHEN", stations, { now: "2026-08-11T05:00:00.000Z" }), []);
+  assert.equal(fireServiceFamily(order, "course-2", { now: "2026-08-11T05:03:00.000Z" }).ok, true);
+
+  const tickets = selectStationTickets([order], "KITCHEN", stations, { now: "2026-08-11T05:08:00.000Z" });
+
+  assert.equal(tickets.length, 1);
+  assert.equal(tickets[0].course, "2");
+  assert.equal(tickets[0].courseLabel, "Course 2");
+  assert.deepEqual(tickets[0].lineIds, ["course-2"]);
+  assert.equal(getStationTicketAge(tickets[0], "2026-08-11T05:08:00.000Z"), 5);
+  assert.equal(order.items[0].prepStatus, "QUEUED");
+});
+
 test("station tickets keep BAR_COFFEE and BAR_TEA independently accountable", () => {
   const orders = [{
     id: "order-1",
@@ -69,6 +98,33 @@ test("station tickets keep BAR_COFFEE and BAR_TEA independently accountable", ()
   assert.deepEqual(tickets.map((ticket) => ticket.status), ["QUEUED", "ACKNOWLEDGED"]);
   assert.deepEqual(tickets[0].actions.map((action) => action.status), ["ACKNOWLEDGED"]);
   assert.deepEqual(tickets[1].actions.map((action) => action.status), ["PREPARING"]);
+});
+
+test("same station tickets are isolated by course line IDs", () => {
+  const order = {
+    id: "course-order",
+    orderNo: "D01-0021",
+    status: "ACCEPTED",
+    table: "A01",
+    serviceMode: "TABLE_SERVICE",
+    fulfillmentType: "DINE_IN",
+    items: [
+      { lineId: "course-1-hot", station: "KITCHEN_HOT", qty: 1, nameVi: "Bò lúc lắc", nameEn: "Beef", course: "1", holdState: "FIRED", prepStatus: "QUEUED", status: "QUEUED" },
+      { lineId: "course-2-hot", station: "KITCHEN_HOT", qty: 1, nameVi: "Cơm chiên", nameEn: "Fried rice", course: "2", holdState: "FIRED", prepStatus: "QUEUED", status: "QUEUED" }
+    ]
+  };
+  const tickets = selectStationTickets([order], "KITCHEN", stations, { now: "2026-08-11T05:00:00.000Z" });
+
+  assert.equal(tickets.length, 2);
+  assert.deepEqual(tickets.map((ticket) => ticket.course), ["1", "2"]);
+  assert.deepEqual(tickets.map((ticket) => ticket.lineIds), [["course-1-hot"], ["course-2-hot"]]);
+  assert.equal(applyPrepStatusTransition(order, {
+    stationCode: "KITCHEN_HOT",
+    lineIds: tickets[0].lineIds
+  }, "ACKNOWLEDGED").ok, true);
+
+  assert.equal(order.items[0].prepStatus, "ACKNOWLEDGED");
+  assert.equal(order.items[1].prepStatus, "QUEUED");
 });
 
 test("station ticket state and actions stop at ready", () => {
@@ -126,6 +182,8 @@ test("station ticket age is deterministic and render targets station code", () =
   assert.equal(getStationTicketAge(tickets[0], "2026-08-11T05:07:00.000Z"), 7);
   const html = renderStationPage({ orders: [order], stationGroup: "BAR", stations, now: "2026-08-11T05:07:00.000Z" });
   assert.match(html, /data-station-code="BAR_COFFEE"/);
+  assert.match(html, /data-station-line-ids="coffee"/);
+  assert.match(html, /Immediate/);
   assert.match(html, /Phiên bản: &lt;Ly lớn&gt;/);
   assert.match(html, /Sữa: &lt;Sữa yến mạch&gt;/);
   assert.doesNotMatch(html, /data-station-group=/);

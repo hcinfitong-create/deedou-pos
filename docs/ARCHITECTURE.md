@@ -20,6 +20,7 @@ index.html
       -> shared/utils
       -> features/customer-menu
       -> features/product-options
+      -> features/course-workflow
       -> features/ordering
       -> features/cart
       -> features/customer-orders
@@ -49,6 +50,7 @@ Orders now carry explicit service context so DeeDou can support both cafe/counte
 - `zone` and `table` describe the physical service area only when a physical table is involved.
 - Aggregate `order.status` is separate from station preparation, serving progress, and billing progress.
 - Line-level `prepStatus` is the canonical preparation source of truth for KDS: `QUEUED -> ACKNOWLEDGED -> PREPARING -> READY`.
+- Line-level `course` and `holdState` are scheduling/release fields owned by `course-workflow`; they do not replace preparation, serving, or billing state.
 - Line-level `servedQty` tracks FOH delivery to guests and is independent from `billQty`.
 - Overall `READY` is derived when all remaining unserved required lines are prep-ready. Overall `SERVED` is derived only when all serviceable quantities are fully served.
 
@@ -128,6 +130,8 @@ Larger UI decomposition should come later, after each phase validates.
 
 DD-005 adds `features/product-options` as the pure owner for product variants, modifier groups, canonical configured cart identity, configured pricing, and immutable order-line option snapshots. The app shell still owns DOM binding/admin persistence, while `cart`, `ordering`, `staff-orders`, and `station-workflow` consume the public product-options API.
 
+DD-006 adds `features/course-workflow` as the pure owner for restaurant course assignment and HELD/FIRED release. KDS still uses `station-workflow` and `ordering.applyPrepStatusTransition(...)`; fired lines become KDS-eligible, while held lines remain visible to FOH but out of active station workload.
+
 ## Current Known Coupling
 
-`app.js` still owns broad page composition, event binding, localStorage orchestration, admin actions, cashier actions, payments, reports, and station/session persistence orchestration. Cart rules/UI, customer order status presentation, customer service request event creation, ordering contracts, staff board presentation/selectors, station/KDS rendering/selectors, and table-session domain rules now live behind feature public APIs.
+`app.js` still owns broad page composition, event binding, localStorage orchestration, admin actions, cashier actions, payments, reports, and station/session persistence orchestration. Cart rules/UI, customer order status presentation, customer service request event creation, ordering contracts, staff board presentation/selectors, station/KDS rendering/selectors, course pacing rules, and table-session domain rules now live behind feature public APIs.

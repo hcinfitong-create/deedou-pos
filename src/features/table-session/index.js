@@ -10,6 +10,7 @@ import {
   normalizeServiceProgress,
   SERVICE_MODES
 } from "../ordering/index.js";
+import { isLineKdsReleased } from "../course-workflow/index.js";
 
 export const TABLE_SESSION_STATUSES = Object.freeze({
   OPEN: "OPEN",
@@ -522,6 +523,7 @@ function countRemainingPrepWork(orders = []) {
   return (orders || []).reduce((metrics, order) => {
     (order.items || []).forEach((line) => {
       if (!isRequiredStationLine(line)) return;
+      if (!isLineKdsReleased(line)) return;
       const remainingQty = normalizeServiceProgress(line).remainingQty;
       if (remainingQty <= 0) return;
       const prepStatus = normalizePrepStatus(line.prepStatus || line.status);

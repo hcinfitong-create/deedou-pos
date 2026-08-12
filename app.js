@@ -30,6 +30,12 @@ import {
   stationStatusFor,
   validateOrderServiceContext
 } from "./src/features/ordering/index.js";
+import {
+  assignServiceFamilyCourse,
+  fireCourse as fireOrderCourse,
+  fireServiceFamily,
+  holdServiceFamily
+} from "./src/features/course-workflow/index.js";
 import { addCartItem, canSubmitCart, cartSubtotal, clearCart, decrementCartItem, removeCartItem, renderCartPanel } from "./src/features/cart/index.js";
 import { renderCustomerOrderStatusStrip } from "./src/features/customer-orders/index.js";
 import { createServiceRequestEvent, renderCustomerServiceActions } from "./src/features/service-requests/index.js";
@@ -80,6 +86,7 @@ window.addEventListener("storage", () => {
   state = loadState();
   render();
 });
+document.addEventListener("click", handleCourseWorkflowClick);
 render();
 
 function loadState() {
@@ -1050,8 +1057,19 @@ function bindCashier() {
 function bindStation() {
   bindGlobal();
   document.querySelectorAll("[data-station-order]").forEach((button) => button.addEventListener("click", () => {
-    updateStationStatus(button.dataset.stationOrder, button.dataset.stationCode, button.dataset.stationStatus);
+    updateStationStatus(button.dataset.stationOrder, button.dataset.stationCode, button.dataset.stationStatus, lineIdsFromDataset(button.dataset.stationLineIds));
   }));
+}
+
+function handleCourseWorkflowClick(event) {
+  if (!(event.target instanceof Element)) return;
+  if (!event.target.closest(".staff-board")) return;
+  const button = event.target.closest("[data-course-assign], [data-line-hold], [data-line-fire], [data-course-fire]");
+  if (!button) return;
+  if (button.dataset.courseAssign) assignCourseToFamily(button.dataset.courseAssign, button.dataset.courseFamily);
+  if (button.dataset.lineHold) holdOrderFamily(button.dataset.lineHold, button.dataset.courseFamily);
+  if (button.dataset.lineFire) fireOrderFamily(button.dataset.lineFire, button.dataset.courseFamily);
+  if (button.dataset.courseFire) fireWholeCourse(button.dataset.courseFire, button.dataset.course);
 }
 
 function bindAdmin() {
@@ -1740,14 +1758,85 @@ function serveAllReadyLines(orderId) {
   render();
 }
 
-function updateStationStatus(orderId, stationCode, status) {
+function updateStationStatus(orderId, stationCode, status, lineIds = []) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
-  const update = applyPrepStatusTransition(order, { stationCode }, status);
+  const update = applyPrepStatusTransition(order, { stationCode, lineIds }, status);
   if (!update.ok) return;
   audit("STATION_STATUS", `${stationCode} ${order.orderNo} -> ${status} / order ${update.to}`);
   saveState();
   render();
+}
+
+function assignCourseToFamily(orderId, familyLineId) {
+  const order = state.orders.find((item) => item.id === orderId);
+  if (!order) return;
+  const input = [...document.querySelectorAll("[data-course-value]")].find((node) => {
+    return node.dataset.courseValue === orderId && node.dataset.courseFamily === familyLineId;
+  });
+  const result = assignServiceFamilyCourse(order, familyLineId, input?.value || "");
+  if (!result.ok) {
+    audit("COURSE_ASSIGN_BLOCKED", `${order.orderNo} ${familyLineId}: ${result.reason}`);
+    saveState();
+    render();
+    return;
+  }
+  order.stationStatus = stationStatusFor(order.items);
+  audit("COURSE_ASSIGN", `${order.orderNo} ${familyLineId} -> ${result.course || "immediate"}`);
+  saveState();
+  render();
+}
+
+function holdOrderFamily(orderId, familyLineId) {
+  const order = state.orders.find((item) => item.id === orderId);
+  if (!order) return;
+  const result = holdServiceFamily(order, familyLineId);
+  if (!result.ok) {
+    audit("LINE_HOLD_BLOCKED", `${order.orderNo} ${familyLineId}: ${result.reason}`);
+    saveState();
+    render();
+    return;
+  }
+  order.stationStatus = stationStatusFor(order.items);
+  audit("LINE_HOLD", `${order.orderNo} ${familyLineId}`);
+  saveState();
+  render();
+}
+
+function fireOrderFamily(orderId, familyLineId) {
+  const order = state.orders.find((item) => item.id === orderId);
+  if (!order) return;
+  const result = fireServiceFamily(order, familyLineId);
+  if (!result.ok) {
+    audit("LINE_FIRE_BLOCKED", `${order.orderNo} ${familyLineId}: ${result.reason}`);
+    saveState();
+    render();
+    return;
+  }
+  order.stationStatus = stationStatusFor(order.items);
+  audit("LINE_FIRE", `${order.orderNo} ${familyLineId}`);
+  saveState();
+  render();
+}
+
+function fireWholeCourse(orderId, course) {
+  const order = state.orders.find((item) => item.id === orderId);
+  if (!order) return;
+  const result = fireOrderCourse(order, course);
+  if (!result.ok) {
+    audit("COURSE_FIRE_BLOCKED", `${order.orderNo} course ${course}: ${result.reason}`);
+    saveState();
+    render();
+    return;
+  }
+  order.stationStatus = stationStatusFor(order.items);
+  audit("COURSE_FIRE", `${order.orderNo} course ${result.course} (${result.firedFamilies.length} families)`);
+  saveState();
+  render();
+}
+
+function lineIdsFromDataset(value = "") {
+  return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
 }
 
 function resetDemoData() {

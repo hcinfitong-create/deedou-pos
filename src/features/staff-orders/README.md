@@ -22,6 +22,8 @@ DD-002.1 makes the staff board service-aware:
 - KDS preparation remains owned by `station-workflow` and must not set `SERVED`.
 - DD-004 lets staff open-table metrics consume active table sessions when the app shell provides them. Without session state, selectors keep the legacy order-based fallback for compatibility.
 - DD-005 displays configured variant/modifier summaries for order lines using the public `product-options` summary helper.
+- DD-006 displays course assignment plus Hold/Fire controls for table-service dine-in orders using public `course-workflow` helpers. Staff can assign/change course before preparation starts, hold queued family lines, fire held family lines, and fire a whole held course.
+- Course/hold/fire controls are presentation only here; the app shell calls `course-workflow` mutations and then refreshes derived ordering/station summaries.
 
 Public API:
 

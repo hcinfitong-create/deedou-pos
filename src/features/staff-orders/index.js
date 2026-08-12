@@ -11,6 +11,17 @@ import {
   ORDER_SOURCES,
   SERVICE_MODES
 } from "../ordering/index.js";
+import {
+  canAssignCourse,
+  canFireServiceFamily,
+  canHoldServiceFamily,
+  courseLabel,
+  getHeldCourseNumbers,
+  getServiceFamilies,
+  HOLD_STATES,
+  normalizeCourse,
+  normalizeHoldState
+} from "../course-workflow/index.js";
 import { optionSummaryLines } from "../product-options/index.js";
 import { selectOpenTableSessions } from "../table-session/index.js";
 import { escapeAttr, escapeHtml, formatMoney } from "../../shared/utils/index.js";
@@ -166,6 +177,7 @@ export function renderStaffOrderCard(order) {
       <ul class="item-list">
         ${order.items.map((line) => renderStaffLine(line)).join("")}
       </ul>
+      ${renderCourseWorkflowControls(order, context)}
       ${readyLines.length ? renderReadyServiceActions(order, context, readyLines) : ""}
       ${order.note ? `<p class="muted">Note: ${escapeHtml(order.note)}</p>` : ""}
       <div class="station-grid">${Object.entries(order.stationStatus || {}).map(([station, status]) => `<span class="status-pill"><span>${station}</span><strong>${status}</strong></span>`).join("")}</div>
@@ -181,7 +193,50 @@ function renderStaffLine(line) {
   const progress = normalizeServiceProgress(line);
   const prepStatus = normalizePrepStatus(line.prepStatus || line.status);
   const summaries = optionSummaryLines(line, "en");
-  return `<li class="${line.isComponent ? "component-line" : ""}">${line.isComponent ? "-> " : ""}${line.qty} x ${escapeHtml(line.nameEn)} <span class="station">${escapeHtml(line.station)}</span> <span class="station">${prepStatus}</span> <span class="station">served ${progress.servedQty}/${progress.serviceableQty || line.qty}</span>${summaries.map((summary) => `<br><span class="muted">${escapeHtml(summary)}</span>`).join("")}</li>`;
+  return `<li class="${line.isComponent ? "component-line" : ""}">${line.isComponent ? "-> " : ""}${line.qty} x ${escapeHtml(line.nameEn)} <span class="station">${escapeHtml(line.station)}</span> <span class="station">${escapeHtml(courseLabel(line.course))}</span> <span class="station">${escapeHtml(normalizeHoldState(line.holdState))}</span> <span class="station">${prepStatus}</span> <span class="station">served ${progress.servedQty}/${progress.serviceableQty || line.qty}</span>${summaries.map((summary) => `<br><span class="muted">${escapeHtml(summary)}</span>`).join("")}</li>`;
+}
+
+function renderCourseWorkflowControls(order, context) {
+  if (context.serviceMode !== SERVICE_MODES.TABLE_SERVICE || context.fulfillmentType !== FULFILLMENT_TYPES.DINE_IN) return "";
+  const families = getServiceFamilies(order);
+  if (!families.length) return "";
+  const heldCourses = getHeldCourseNumbers(order);
+  return `
+    <div class="course-controls">
+      <strong>Course pacing</strong>
+      <div class="course-family-list">
+        ${families.map((family) => renderCourseFamilyControl(order, family)).join("")}
+      </div>
+      ${heldCourses.length ? `
+        <div class="split-actions compact-actions">
+          ${heldCourses.map((course) => `<button class="primary compact" data-course-fire="${escapeAttr(order.id)}" data-course="${escapeAttr(course)}">Fire ${escapeHtml(courseLabel(course))}</button>`).join("")}
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function renderCourseFamilyControl(order, family) {
+  const rootName = family.root?.nameEn || family.rootLineId;
+  const canEditCourse = canAssignCourse(order, family.rootLineId, family.course).ok;
+  const canHold = canHoldServiceFamily(order, family.rootLineId).ok;
+  const canFire = canFireServiceFamily(order, family.rootLineId).ok;
+  const holdState = normalizeHoldState(family.holdState);
+  return `
+    <div class="course-family">
+      <span><strong>${escapeHtml(rootName)}</strong> <span class="station">${escapeHtml(courseLabel(family.course))}</span> <span class="station">${escapeHtml(holdState)}</span></span>
+      ${canEditCourse ? `
+        <label class="inline-control">
+          <span>Course</span>
+          <input data-course-value="${escapeAttr(order.id)}" data-course-family="${escapeAttr(family.rootLineId)}" value="${escapeAttr(normalizeCourse(family.course))}" inputmode="numeric" placeholder="Immediate" />
+        </label>
+        <button class="ghost compact" data-course-assign="${escapeAttr(order.id)}" data-course-family="${escapeAttr(family.rootLineId)}">Assign</button>
+      ` : `<span class="muted">Course locked</span>`}
+      ${holdState === HOLD_STATES.HELD
+        ? `<button class="primary compact" data-line-fire="${escapeAttr(order.id)}" data-course-family="${escapeAttr(family.rootLineId)}" ${canFire ? "" : "disabled"}>Fire</button>`
+        : `<button class="ghost compact" data-line-hold="${escapeAttr(order.id)}" data-course-family="${escapeAttr(family.rootLineId)}" ${canHold ? "" : "disabled"}>Hold</button>`}
+    </div>
+  `;
 }
 
 function renderReadyServiceActions(order, context, readyLines) {

@@ -1,4 +1,8 @@
 import { createOrderLineOptionSnapshot, defaultConfiguredSelection, optionSummaryLines } from "../product-options/index.js";
+import {
+  isLineKdsReleased,
+  normalizeLineCourseScheduling
+} from "../course-workflow/index.js";
 
 export function clampBillQty(value, maxQty) {
   const max = Math.max(0, Number(maxQty) || 0);
@@ -123,10 +127,10 @@ export function normalizeOrderTimestamps(order = {}) {
 export function normalizeOrderLineOperationalFields(line = {}, options = {}) {
   const qty = normalizeLineQty(line.qty);
   const prepStatus = normalizePrepStatus(line.prepStatus || line.status);
+  const scheduling = normalizeLineCourseScheduling(line);
   return {
     lineId: normalizeLineId(line.lineId || options.fallbackLineId || ""),
-    course: line.course || "",
-    holdState: line.holdState || "",
+    ...scheduling,
     seat: line.seat || "",
     targetPrepStation: line.targetPrepStation || line.station || "",
     targetPrepMinutes: normalizeOptionalPositiveNumber(line.targetPrepMinutes),
@@ -239,6 +243,7 @@ export function expandOrderLines(cartLines, productById) {
       isBillable: true,
       isComponent: false,
       parentComboId: "",
+      parentLineId: "",
       configuredKey: configured.configuredKey,
       configuredOptions: configured.selection,
       optionSnapshot: configured.optionSnapshot,
@@ -247,6 +252,10 @@ export function expandOrderLines(cartLines, productById) {
         lineId: parentLineId,
         qty,
         station: item.station,
+        course: line.course,
+        holdState: line.holdState,
+        heldAt: line.heldAt,
+        firedAt: line.firedAt,
         status: "QUEUED",
         prepStatus: "QUEUED",
         servedQty: 0
@@ -268,6 +277,7 @@ export function expandOrderLines(cartLines, productById) {
       isBillable: false,
       isComponent: true,
       parentComboId: item.id,
+      parentLineId: parentLineId,
       parentComboNameVi: item.vi,
       parentComboNameEn: item.en,
       parentComboOptionSummaryVi,
@@ -275,8 +285,13 @@ export function expandOrderLines(cartLines, productById) {
       ...normalizeOrderLineOperationalFields({
         ...part,
         lineId: `${parentLineId}:component-${index}`,
+        parentLineId,
         qty: qty * (Number(part.qty) || 1),
         station: part.station,
+        course: parent.course,
+        holdState: parent.holdState,
+        heldAt: parent.heldAt,
+        firedAt: parent.firedAt,
         status: "QUEUED",
         prepStatus: "QUEUED",
         servedQty: 0
@@ -289,7 +304,7 @@ export function expandOrderLines(cartLines, productById) {
 
 export function stationStatusFor(items, status) {
   const initial = normalizePrepStatus(status === "PENDING_ACCEPTANCE" ? "QUEUED" : status);
-  const requiredItems = (items || []).filter(isRequiredStationLine);
+  const requiredItems = (items || []).filter((item) => isRequiredStationLine(item) && isLineKdsReleased(item));
   if (arguments.length > 1) {
     return Object.fromEntries([...new Set(requiredItems.map((item) => item.station))].map((station) => [station, initial]));
   }
@@ -349,7 +364,7 @@ export function applyOrderStatusTransition(order, nextStatus, options = {}) {
     nonComboItems(order).forEach((item) => {
       item.status = "QUEUED";
       item.prepStatus = "QUEUED";
-      if (!item.queuedAt) item.queuedAt = normalizeIsoTimestamp(now) || now;
+      if (isLineKdsReleased(item) && !item.queuedAt) item.queuedAt = normalizeIsoTimestamp(now) || now;
     });
   }
   if (to === "IN_PREPARATION") {
@@ -388,8 +403,14 @@ export function applyPrepStatusTransition(order, target = {}, nextStatus, option
   const status = normalizePrepStatus(nextStatus);
   const now = options.now || new Date().toISOString();
   const targetLineId = normalizeLineId(target.lineId || "");
+  const targetLineIds = new Set([
+    targetLineId,
+    ...(target.lineIds || [])
+  ].map(normalizeLineId).filter(Boolean));
   const candidates = requiredStationItems(order).filter((item) => {
-    return stations.has(item.station) && (!targetLineId || item.lineId === targetLineId);
+    return stations.has(item.station)
+      && isLineKdsReleased(item)
+      && (!targetLineIds.size || targetLineIds.has(item.lineId));
   });
   if (!candidates.length) return { ok: false, order, reason: "NO_LINES" };
 
@@ -468,7 +489,7 @@ export function countStatusItems(orders, status) {
   const normalizedStatus = normalizeItemStatus(status);
   if (normalizedStatus === "SERVED") return countServedItems(orders);
   const prepStatus = normalizePrepStatus(status);
-  return orderLines(orders).filter((item) => isRequiredStationLine(item) && normalizePrepStatus(item.prepStatus || item.status) === prepStatus).reduce((sum, item) => {
+  return orderLines(orders).filter((item) => isRequiredStationLine(item) && isLineKdsReleased(item) && normalizePrepStatus(item.prepStatus || item.status) === prepStatus).reduce((sum, item) => {
     const qty = normalizeLineQty(item.qty);
     if (prepStatus === "READY") return sum + Math.max(0, qty - normalizeServiceProgress(item).servedQty);
     return sum + qty;
