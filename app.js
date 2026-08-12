@@ -60,6 +60,21 @@ import {
   repairTableSessionGraph,
   transferTableSession
 } from "./src/features/table-session/index.js";
+import {
+  allocateTableTender,
+  canEditBill,
+  canVoidOrder,
+  createEqualSplitPlan,
+  normalizePaymentLedger,
+  paymentHistoryView,
+  paymentSummaryForOrder,
+  paymentSummaryForOrders,
+  recordPayment,
+  recordPaymentVoid,
+  recordRefund,
+  remainingRefundableForPayment,
+  syncPaidProjection
+} from "./src/features/payments/index.js";
 
 let products = loadProducts();
 let state = loadState();
@@ -70,6 +85,8 @@ let activeCashierTable = localStorage.getItem("deedou_cashier_table") || tables[
 let counterDraft = loadCounterDraft();
 let counterSearch = localStorage.getItem(COUNTER_SEARCH_KEY) || "";
 let pendingVoidOrderId = "";
+let pendingSplitPlan = null;
+let cashierNotice = "";
 
 const bus = "BroadcastChannel" in window ? new BroadcastChannel("deedou-pos") : null;
 if (bus) {
@@ -175,14 +192,12 @@ function normalizeOrder(order) {
       ...operationalFields
     };
   });
-  const payments = order.payments || [];
-  const paidVnd = payments.length ? payments.filter((payment) => payment.status === "SUCCEEDED").reduce((sum, payment) => sum + payment.amountVnd, 0) : order.paidVnd || 0;
   const serviceContext = normalizeOrderServiceContext({
     ...order,
     zone: order.zone || tableZoneFor(order.table)
   });
   const stationStatus = stationStatusFor(items);
-  return {
+  const normalizedOrder = {
     ...order,
     ...serviceContext,
     ...normalizeOrderOperationalFields(order),
@@ -192,10 +207,13 @@ function normalizeOrder(order) {
     status: normalizeOrderStatus(order.status || "PENDING_ACCEPTANCE"),
     items,
     total: billableTotal(items),
-    payments,
-    paidVnd,
+    payments: normalizePaymentLedger(order),
+    paidVnd: 0,
+    paymentStatus: order.paymentStatus || "",
     stationStatus
   };
+  syncPaidProjection(normalizedOrder, { serviceComplete: isOrderServiceComplete(normalizedOrder), now: order.createdAt });
+  return normalizedOrder;
 }
 
 function tableZoneFor(tableCode) {
@@ -250,6 +268,7 @@ function saveProducts() {
 }
 
 function saveState() {
+  refreshAllPaymentProjections();
   localStorage.setItem(STATE_KEY, JSON.stringify(state));
   broadcast();
 }
@@ -466,7 +485,7 @@ function cashierPage() {
     orders: state.orders,
     events: state.events
   });
-  const openOrders = state.orders.filter((order) => !["PAID", "REJECTED", "VOIDED"].includes(order.status));
+  const openOrders = state.orders.filter((order) => isOpenOrderStatus(order.status));
   const openTables = floorModels.filter((model) => model.occupied);
   if (!tables.some((table) => table.code === activeCashierTable) && activeCashierTable !== "TAKEAWAY") activeCashierTable = tables[0].code;
   const selectedModel = floorModels.find((model) => model.tableCode === activeCashierTable) || {
@@ -479,8 +498,8 @@ function cashierPage() {
     orders: []
   };
   const selectedOrders = tableOrders(activeCashierTable);
-  const paidOrders = state.orders.filter((order) => ["PAID", "VOIDED"].includes(order.status)).slice(-6).reverse();
-  const total = state.orders.filter((order) => order.status !== "REJECTED").reduce((sum, order) => sum + order.total, 0);
+  const paymentReport = paymentSummaryForOrders(state.orders);
+  const paidOrders = state.orders.filter((order) => ["PAID", "VOIDED", "REFUNDED"].includes(order.status) || (order.paymentStatus && order.paymentStatus !== "UNPAID")).slice(-6).reverse();
   return `
     <section class="page admin-page">
       <div class="ops-head">
@@ -495,10 +514,11 @@ function cashierPage() {
         <div class="metric"><span class="muted">QR pending</span><strong>${state.orders.filter((o) => o.status === "PENDING_ACCEPTANCE").length}</strong></div>
         <div class="metric"><span class="muted">Open tables</span><strong>${openTables.length}</strong></div>
         <div class="metric"><span class="muted">Order batches</span><strong>${openOrders.length}</strong></div>
-        <div class="metric"><span class="muted">Paid today</span><strong>${state.orders.filter((o) => o.status === "PAID").length}</strong></div>
-        <div class="metric"><span class="muted">Gross</span><strong>${formatMoney(total)}</strong></div>
+        <div class="metric"><span class="muted">Đã thu</span><strong>${formatMoney(paymentReport.effectivePaidVnd)}</strong></div>
+        <div class="metric"><span class="muted">Net collected</span><strong>${formatMoney(paymentReport.netCollectedVnd)}</strong></div>
       </div>
       ${renderTableSessionRepairWarning(repair)}
+      ${renderCashierNotice()}
       <div class="cashier-layout">
         <section class="panel section-pad">
           <h2>Sơ đồ bàn</h2>
@@ -552,7 +572,7 @@ function tableTile(model) {
 
 function cashierTableDetail(model, orders) {
   const table = model.table;
-  const balance = model.outstandingBalance ?? orders.reduce((sum, order) => sum + order.total - (order.paidVnd || 0), 0);
+  const balance = paymentSummaryForOrders(orders).outstandingVnd;
   const served = model.servedQty ?? countServedItems(orders);
   const totalItems = model.serviceableQty ?? countPrepItems(orders);
   const ready = model.readyCount ?? countStatusItems(orders, "READY");
@@ -579,7 +599,7 @@ function cashierTableDetail(model, orders) {
     <div class="cashier-orders">
       ${orders.map(cashierOrderCard).join("") || `<div class="empty">Bàn này chưa có order. Bấm “Gọi món tại quầy” nếu khách gọi trực tiếp, hoặc chờ khách QR order.</div>`}
     </div>
-    ${orders.length ? tablePaymentPanel(table, orders, balance) : ""}
+    ${orders.length ? tablePaymentPanel(table, orders) : ""}
   `;
 }
 
@@ -593,41 +613,99 @@ function renderTableSessionControls(model) {
   `;
 }
 
-function tablePaymentPanel(table, orders, balance) {
-  const total = orders.reduce((sum, order) => sum + order.total, 0);
-  const paid = orders.reduce((sum, order) => sum + (order.paidVnd || 0), 0);
+function tablePaymentPanel(table, orders) {
+  const summary = paymentSummaryForOrders(orders);
+  const splitPlan = pendingSplitPlan?.scope === "TABLE" && pendingSplitPlan.tableCode === table.code ? pendingSplitPlan : null;
+  const disabled = summary.outstandingVnd <= 0 ? "disabled" : "";
   return `
     <section class="table-payment-panel">
       <div class="order-head">
         <div>
           <h2>Thanh toán bàn ${table.code}</h2>
-          <p class="muted">${orders.length} lượt gọi món - Tổng bill ${formatMoney(total)}</p>
+          <p class="muted">${orders.length} lượt gọi món - ${summary.paymentStatus}</p>
         </div>
-        <strong>${formatMoney(balance)}</strong>
+        <strong>${formatMoney(summary.outstandingVnd)}</strong>
       </div>
       <div class="reconcile-grid payment-summary">
-        <div class="metric"><span class="muted">Tổng bill</span><strong>${formatMoney(total)}</strong></div>
-        <div class="metric"><span class="muted">Đã thu</span><strong>${formatMoney(paid)}</strong></div>
-        <div class="metric"><span class="muted">Còn phải thu</span><strong>${formatMoney(balance)}</strong></div>
+        <div class="metric"><span class="muted">Tổng bill</span><strong>${formatMoney(summary.billTotalVnd)}</strong></div>
+        <div class="metric"><span class="muted">Đã ghi nhận</span><strong>${formatMoney(summary.effectivePaidVnd)}</strong></div>
+        <div class="metric"><span class="muted">Refund</span><strong>${formatMoney(summary.refundedVnd)}</strong></div>
+        <div class="metric"><span class="muted">Net collected</span><strong>${formatMoney(summary.netCollectedVnd)}</strong></div>
+        <div class="metric"><span class="muted">Còn phải thu</span><strong>${formatMoney(summary.outstandingVnd)}</strong></div>
       </div>
+      <label class="payment-entry-row">
+        <span class="muted">Số tiền thu / hoàn</span>
+        <input data-payment-amount="${escapeAttr(table.code)}" value="${summary.outstandingVnd || summary.refundableVnd || 0}" inputmode="numeric" />
+      </label>
+      ${splitPlan ? renderSplitPlan(splitPlan) : ""}
       <div class="split-actions table-payment-actions">
         <button class="ghost" data-table-prebill="${table.code}">Pre-bill</button>
-        <button class="primary" data-table-pay="${table.code}" data-method="CASH">Cash</button>
-        <button class="primary" data-table-pay="${table.code}" data-method="CARD_EXTERNAL_TERMINAL">Card</button>
-        <button class="ghost" data-table-pay="${table.code}" data-method="VNPAY">VNPAY</button>
-        <button class="ghost" data-table-pay="${table.code}" data-method="MOMO">MoMo</button>
-        <button class="ghost" data-table-pay="${table.code}" data-method="ZALOPAY">ZaloPay</button>
-        <button class="ghost" data-table-split="${table.code}">Split 2</button>
+        <button class="primary" data-table-pay="${table.code}" data-method="CASH" ${disabled}>Cash</button>
+        <button class="primary" data-table-pay="${table.code}" data-method="CARD_EXTERNAL_TERMINAL" ${disabled}>Card</button>
+        <button class="ghost" data-table-pay="${table.code}" data-method="BANK_TRANSFER" ${disabled}>Bank</button>
+        <button class="ghost" data-table-pay="${table.code}" data-method="VNPAY" ${disabled}>VNPAY</button>
+        <button class="ghost" data-table-pay="${table.code}" data-method="MOMO" ${disabled}>MoMo</button>
+        <button class="ghost" data-table-pay="${table.code}" data-method="ZALOPAY" ${disabled}>ZaloPay</button>
+        <button class="ghost" data-table-split="${table.code}" ${disabled}>Split 2</button>
         <button class="danger" data-table-void="${table.code}">Void bill</button>
-        ${paid > 0 ? `<button class="danger" data-table-refund="${table.code}">Refund</button>` : ""}
+        ${summary.refundableVnd > 0 ? `<button class="danger" data-table-refund="${table.code}">Refund</button>` : ""}
       </div>
+      ${orders.map(renderPaymentHistory).join("")}
     </section>
+  `;
+}
+
+function renderSplitPlan(plan) {
+  return `
+    <div class="payment-history split-plan">
+      <strong>Split ${plan.shares.length} - ${plan.scope === "TABLE" ? `bàn ${plan.tableCode}` : plan.orderNo}</strong>
+      ${plan.shares.map((share) => `
+        <div class="status-pill">
+          <span>Phần ${share.shareNo}: ${formatMoney(share.amountVnd)} ${share.paid ? `- đã thu ${share.method}` : ""}</span>
+          ${share.paid ? `<strong>${share.paidAt}</strong>` : `
+            <span class="split-actions compact-actions">
+              <button class="primary compact" data-split-share-pay="${share.shareNo}" data-method="CASH">Cash</button>
+              <button class="ghost compact" data-split-share-pay="${share.shareNo}" data-method="CARD_EXTERNAL_TERMINAL">Card</button>
+              <button class="ghost compact" data-split-share-pay="${share.shareNo}" data-method="BANK_TRANSFER">Bank</button>
+            </span>
+          `}
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderPaymentHistory(order) {
+  const history = paymentHistoryView(order);
+  if (!history.length) return "";
+  return `
+    <div class="payment-history">
+      <strong>Lịch sử thanh toán ${order.orderNo}</strong>
+      ${history.map((transaction) => {
+        const canVoidPayment = transaction.type === "PAYMENT" && !transaction.voided && transaction.refundedVnd === 0;
+        const canRefundPayment = transaction.type === "PAYMENT" && !transaction.voided && transaction.refundableVnd > 0;
+        return `
+          <div class="status-pill">
+            <span>${transaction.type} ${transaction.method} ${formatMoney(transaction.amountVnd)}${transaction.voided ? " - voided" : ""}${transaction.refundedVnd ? ` - refunded ${formatMoney(transaction.refundedVnd)}` : ""}</span>
+            <span class="split-actions compact-actions">
+              ${canVoidPayment ? `<button class="ghost compact" data-payment-void="${escapeAttr(order.id)}" data-payment-id="${escapeAttr(transaction.id)}">Void payment</button>` : ""}
+              ${canRefundPayment ? `<button class="danger compact" data-payment-refund="${escapeAttr(order.id)}" data-payment-id="${escapeAttr(transaction.id)}">Refund</button>` : ""}
+            </span>
+          </div>
+        `;
+      }).join("")}
+    </div>
   `;
 }
 
 function renderTableSessionRepairWarning(repair) {
   if (repair.ok !== false) return "";
   return `<div class="empty repair-warning">Dữ liệu phiên bàn đang xung đột (${escapeHtml(repair.reason)}). Tạm khóa thao tác theo bàn để không ẩn order/yêu cầu đang mở.</div>`;
+}
+
+function renderCashierNotice() {
+  if (!cashierNotice) return "";
+  return `<div class="empty cashier-notice">${escapeHtml(cashierNotice)}</div>`;
 }
 
 function counterOrderPanel(table) {
@@ -726,6 +804,7 @@ function counterDraftLine(line) {
 
 function cashierOrderCard(order) {
   const progress = getServiceProgress(order);
+  const payment = paymentSummaryForOrder(order);
   const billableItems = order.items.map((line, index) => ({ line, index })).filter((item) => item.line.isBillable);
   return `
     <article class="order-card cashier-card compact-batch">
@@ -737,6 +816,11 @@ function cashierOrderCard(order) {
         <span>Đối soát phục vụ</span>
         <strong>${progress.servedQty}/${progress.serviceableQty} món</strong>
         <strong>${formatMoney(order.total)}</strong>
+      </div>
+      <div class="batch-meta">
+        <span>Thanh toán ${payment.paymentStatus}</span>
+        <strong>Đã ghi nhận ${formatMoney(payment.effectivePaidVnd)}</strong>
+        <strong>Còn ${formatMoney(payment.outstandingVnd)}</strong>
       </div>
       <ul class="item-list compact-items">
         ${billableItems.map(({ line, index }) => cashierBillLine(order, line, index)).join("") || `<li class="muted">Chưa có món trong batch này.</li>`}
@@ -767,6 +851,7 @@ function cashierBillLine(order, line, index) {
   const returnedQty = Math.max(0, line.qty - billQty);
   const servedQty = Math.min(line.qty, Math.max(0, Number(line.servedQty) || 0));
   const summaries = optionSummaryLines(line, "vi");
+  const billEditable = canEditBill(order).ok && !["PAID", "REJECTED", "VOIDED", "REFUNDED", "PARTIALLY_REFUNDED"].includes(order.status);
   return `
     <li class="bill-adjust-line">
       <div class="bill-item-main">
@@ -776,9 +861,9 @@ function cashierBillLine(order, line, index) {
       </div>
       <span class="station">${line.prepStatus || line.status}</span>
       <div class="bill-qty-control" aria-label="Điều chỉnh số lượng tính tiền">
-        <button class="ghost compact" data-bill-dec="${order.id}" data-line-index="${index}" ${billQty <= 0 ? "disabled" : ""}>-</button>
+        <button class="ghost compact" data-bill-dec="${order.id}" data-line-index="${index}" ${!billEditable || billQty <= 0 ? "disabled" : ""}>-</button>
         <strong>${billQty}</strong>
-        <button class="ghost compact" data-bill-inc="${order.id}" data-line-index="${index}" ${billQty >= line.qty ? "disabled" : ""}>+</button>
+        <button class="ghost compact" data-bill-inc="${order.id}" data-line-index="${index}" ${!billEditable || billQty >= line.qty ? "disabled" : ""}>+</button>
       </div>
       <strong>${formatMoney(lineSubtotal(line))}</strong>
     </li>
@@ -1022,6 +1107,9 @@ function bindCashier() {
   document.querySelectorAll("[data-table-prebill]").forEach((button) => button.addEventListener("click", () => preBillTable(button.dataset.tablePrebill)));
   document.querySelectorAll("[data-table-void]").forEach((button) => button.addEventListener("click", () => voidTable(button.dataset.tableVoid)));
   document.querySelectorAll("[data-table-refund]").forEach((button) => button.addEventListener("click", () => refundTable(button.dataset.tableRefund)));
+  document.querySelectorAll("[data-split-share-pay]").forEach((button) => button.addEventListener("click", () => paySplitShare(button.dataset.splitSharePay, button.dataset.method)));
+  document.querySelectorAll("[data-payment-void]").forEach((button) => button.addEventListener("click", () => voidPayment(button.dataset.paymentVoid, button.dataset.paymentId)));
+  document.querySelectorAll("[data-payment-refund]").forEach((button) => button.addEventListener("click", () => refundPayment(button.dataset.paymentRefund, button.dataset.paymentId)));
   document.querySelectorAll("[data-select-table]").forEach((button) => button.addEventListener("click", () => selectCashierTable(button.dataset.selectTable)));
   document.querySelectorAll("[data-open-session]").forEach((button) => button.addEventListener("click", () => openTableSession(button.dataset.openSession)));
   document.querySelectorAll("[data-close-session]").forEach((button) => button.addEventListener("click", () => closeActiveTableSession(button.dataset.closeSession)));
@@ -1471,34 +1559,94 @@ function selectCashierTable(tableCode) {
 function adjustBillQty(orderId, lineIndex, delta) {
   const order = state.orders.find((item) => item.id === orderId);
   const line = order?.items?.[Number(lineIndex)];
-  if (!order || !line?.isBillable || ["PAID", "REJECTED", "VOIDED", "REFUNDED"].includes(order.status)) return;
+  if (!order || !line?.isBillable || ["PAID", "REJECTED", "VOIDED", "REFUNDED", "PARTIALLY_REFUNDED"].includes(order.status)) return;
+  const editable = canEditBill(order);
+  if (!editable.ok) {
+    cashierNotice = "Bill đã có thanh toán, không thể đổi số lượng tính tiền.";
+    audit("BILL_QTY_ADJUST_BLOCKED", `${order.orderNo}: ${editable.reason}`);
+    saveState();
+    render();
+    return;
+  }
   const oldQty = chargedQty(line);
   const nextQty = clampBillQty(oldQty + delta, line.qty);
   if (nextQty === oldQty) return;
   line.billQty = nextQty;
   recalcOrderTotal(order);
+  refreshOrderPaymentProjection(order);
   audit("BILL_QTY_ADJUST", `${order.orderNo} ${line.nameVi}: ${oldQty}/${line.qty} -> ${nextQty}/${line.qty}`);
   saveState();
   render();
 }
 
 function orderBalance(order) {
-  return Math.max(0, order.total - (order.paidVnd || 0));
+  return paymentSummaryForOrder(order).outstandingVnd;
 }
 
-function appendPayment(order, method, amount, idPrefix = "PAY") {
-  order.payments = order.payments || [];
-  order.payments.push({
-    id: `${idPrefix}${Date.now().toString().slice(-6)}${order.id.slice(-3)}${order.payments.length}`,
+function refreshAllPaymentProjections() {
+  (state.orders || []).forEach((order) => refreshOrderPaymentProjection(order));
+}
+
+function refreshOrderPaymentProjection(order) {
+  if (!order) return null;
+  return syncPaidProjection(order, { serviceComplete: isOrderServiceComplete(order) });
+}
+
+function isOrderServiceComplete(order = {}) {
+  const current = normalizeOrderStatus(order.status || "PENDING_ACCEPTANCE");
+  if (["SERVED", "PAID", "REFUNDED", "PARTIALLY_REFUNDED"].includes(current)) return true;
+  const progress = getServiceProgress(order);
+  return progress.serviceableQty > 0 && progress.servedQty >= progress.serviceableQty;
+}
+
+function parseMoneyInput(value) {
+  const normalized = String(value || "").replace(/[^\d]/g, "");
+  const amount = Number(normalized || 0);
+  return Number.isFinite(amount) ? Math.max(0, Math.round(amount)) : 0;
+}
+
+function readPaymentAmount(tableCode, maxAmount) {
+  const max = Math.max(0, Math.round(Number(maxAmount) || 0));
+  if (!max) return null;
+  const input = [...document.querySelectorAll("[data-payment-amount]")]
+    .find((node) => node.dataset.paymentAmount === tableCode);
+  const rawAmount = input?.value || String(max);
+  const amount = parseMoneyInput(rawAmount);
+  if (!amount || amount > max) {
+    cashierNotice = "Số tiền không hợp lệ hoặc vượt quá giới hạn.";
+    return null;
+  }
+  return amount;
+}
+
+function nextTenderGroupId(scope) {
+  return `TG-${String(scope || "ORDER").replace(/[^A-Za-z0-9]/g, "")}-${Date.now().toString(36).toUpperCase()}`;
+}
+
+function nextPaymentId(prefix, order, suffix = "") {
+  return `${prefix}-${Date.now().toString(36).toUpperCase()}-${String(order.id || "ORDER").slice(-6)}-${(order.payments || []).length}${suffix}`;
+}
+
+function applyOrderPayment(order, method, amountVnd, options = {}) {
+  return recordPayment(order, {
+    id: nextPaymentId("PAY", order, options.suffix || ""),
     method,
-    provider: ["VNPAY", "MOMO", "ZALOPAY"].includes(method) ? method : "MANUAL",
-    amountVnd: amount,
-    status: "SUCCEEDED",
-    paidAt: new Date().toLocaleString("vi-VN")
+    amountVnd,
+    tenderGroupId: options.tenderGroupId || nextTenderGroupId(order.id),
+    now: new Date().toISOString(),
+    note: options.note || "",
+    serviceComplete: isOrderServiceComplete(order)
   });
 }
 
+function reportPaymentFailure(type, target, result) {
+  const reason = result?.reason || "UNKNOWN_PAYMENT_ERROR";
+  cashierNotice = `Không thể thực hiện thanh toán: ${reason}`;
+  audit(type, `${target}: ${reason}`);
+}
+
 function reconcileOpenTableSessions(reason = "") {
+  refreshAllPaymentProjections();
   const result = reconcileTableSessions(state.tableSessions, state.orders, {
     events: state.events,
     tables,
@@ -1523,65 +1671,119 @@ function payableTableOrders(tableCode) {
 }
 
 function payTable(tableCode, method) {
-  if (blockUnsafeTableSessionMutation("TABLE_PAYMENT_BLOCKED", tableCode)) return;
   const orders = payableTableOrders(tableCode);
-  const balance = orders.reduce((sum, order) => sum + orderBalance(order), 0);
+  const balance = paymentSummaryForOrders(orders).outstandingVnd;
   if (!balance) return;
-  orders.forEach((order) => {
-    const amount = orderBalance(order);
-    appendPayment(order, method, amount);
-    order.paidVnd = (order.paidVnd || 0) + amount;
-    order.status = "PAID";
-  });
-  reconcileOpenTableSessions("table payment");
-  audit("TABLE_PAYMENT_SUCCEEDED", `${tableCode} ${method} ${formatMoney(balance)}`);
+  const amount = readPaymentAmount(tableCode, balance);
+  if (!amount) return;
+  const result = applyTablePayment(tableCode, method, amount, { tenderGroupId: nextTenderGroupId(`TABLE-${tableCode}`) });
+  if (!result.ok) reportPaymentFailure("TABLE_PAYMENT_FAILED", tableCode, result);
+  else pendingSplitPlan = null;
   saveState();
   render();
+}
+
+function applyTablePayment(tableCode, method, amountVnd, options = {}) {
+  if (tableCode !== "TAKEAWAY") {
+    const repair = currentTableSessionRepair();
+    if (repair.ok === false) return { ok: false, reason: repair.reason || "UNSAFE_TABLE_SESSION_GRAPH" };
+  }
+  const orders = payableTableOrders(tableCode);
+  const tenderGroupId = options.tenderGroupId || nextTenderGroupId(`TABLE-${tableCode}`);
+  const allocation = allocateTableTender(orders, { amountVnd, tenderGroupId });
+  if (!allocation.ok) return allocation;
+
+  for (const entry of allocation.allocations) {
+    const order = orders.find((item) => item.id === entry.orderId);
+    if (!order) return { ok: false, reason: "ORDER_NOT_FOUND" };
+    const paid = applyOrderPayment(order, method, entry.amountVnd, {
+      tenderGroupId,
+      suffix: `-${entry.orderId}`,
+      note: options.note || `Table ${tableCode} payment`
+    });
+    if (!paid.ok) return paid;
+  }
+
+  reconcileOpenTableSessions("table payment");
+  cashierNotice = `Đã ghi nhận ${formatMoney(amountVnd)} bằng ${method}.`;
+  audit("TABLE_PAYMENT_SUCCEEDED", `${tableCode} ${method} ${formatMoney(amountVnd)}`);
+  return { ok: true, tenderGroupId, allocation };
 }
 
 function splitTableInTwo(tableCode) {
-  if (blockUnsafeTableSessionMutation("TABLE_SPLIT_BLOCKED", tableCode)) return;
+  if (tableCode !== "TAKEAWAY" && blockUnsafeTableSessionMutation("TABLE_SPLIT_BLOCKED", tableCode)) return;
   const orders = payableTableOrders(tableCode);
-  const balance = orders.reduce((sum, order) => sum + orderBalance(order), 0);
+  const balance = paymentSummaryForOrders(orders).outstandingVnd;
   if (!balance) return;
-  const first = Math.floor(balance / 2);
-  const second = balance - first;
-  let firstRemaining = first;
-  orders.forEach((order) => {
-    const amount = orderBalance(order);
-    const firstAmount = Math.min(amount, firstRemaining);
-    const secondAmount = amount - firstAmount;
-    if (firstAmount > 0) {
-      appendPayment(order, "SPLIT_CASH", firstAmount);
-      order.paidVnd = (order.paidVnd || 0) + firstAmount;
-      firstRemaining -= firstAmount;
-    }
-    if (secondAmount > 0) {
-      appendPayment(order, "SPLIT_CASH", secondAmount);
-      order.paidVnd = (order.paidVnd || 0) + secondAmount;
-    }
-    order.status = "PAID";
-  });
-  reconcileOpenTableSessions("table split");
-  audit("TABLE_SPLIT_BILL", `${tableCode} split 2 payments: ${formatMoney(first)} + ${formatMoney(second)}`);
+  const split = createEqualSplitPlan(balance, 2);
+  if (!split.ok) return;
+  pendingSplitPlan = {
+    scope: "TABLE",
+    tableCode,
+    tenderGroupId: nextTenderGroupId(`SPLIT-${tableCode}`),
+    shares: split.shares.map((share) => ({ ...share, paid: false, method: "", paidAt: "" }))
+  };
+  audit("TABLE_SPLIT_PLAN", `${tableCode} split 2: ${split.shares.map((share) => formatMoney(share.amountVnd)).join(" + ")}`);
   saveState();
   render();
 }
 
+function paySplitShare(shareNo, method) {
+  if (!pendingSplitPlan) return;
+  const share = pendingSplitPlan.shares.find((item) => item.shareNo === Number(shareNo));
+  if (!share || share.paid) return;
+  const note = `Split share ${share.shareNo}`;
+  const result = pendingSplitPlan.scope === "ORDER"
+    ? applySingleOrderSplitShare(pendingSplitPlan.orderId, method, share.amountVnd, pendingSplitPlan.tenderGroupId, note)
+    : applyTablePayment(pendingSplitPlan.tableCode, method, share.amountVnd, { tenderGroupId: pendingSplitPlan.tenderGroupId, note });
+  if (!result.ok) {
+    reportPaymentFailure("SPLIT_PAYMENT_FAILED", pendingSplitPlan.scope === "ORDER" ? pendingSplitPlan.orderNo : pendingSplitPlan.tableCode, result);
+    saveState();
+    render();
+    return;
+  }
+  share.paid = true;
+  share.method = method;
+  share.paidAt = new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+  cashierNotice = `Đã thu phần ${share.shareNo}: ${formatMoney(share.amountVnd)}.`;
+  audit("SPLIT_PAYMENT_SUCCEEDED", `${pendingSplitPlan.scope} share ${share.shareNo} ${method} ${formatMoney(share.amountVnd)}`);
+  if (pendingSplitPlan.shares.every((item) => item.paid)) pendingSplitPlan = null;
+  saveState();
+  render();
+}
+
+function applySingleOrderSplitShare(orderId, method, amountVnd, tenderGroupId, note) {
+  const order = state.orders.find((item) => item.id === orderId);
+  if (!order) return { ok: false, reason: "ORDER_NOT_FOUND" };
+  const result = applyOrderPayment(order, method, amountVnd, { tenderGroupId, note });
+  if (!result.ok) return result;
+  reconcileOpenTableSessions("order split payment");
+  return result;
+}
+
 function preBillTable(tableCode) {
-  if (blockUnsafeTableSessionMutation("TABLE_PRE_BILL_BLOCKED", tableCode)) return;
+  if (tableCode !== "TAKEAWAY" && blockUnsafeTableSessionMutation("TABLE_PRE_BILL_BLOCKED", tableCode)) return;
   const orders = tableOrders(tableCode);
   if (!orders.length) return;
-  const balance = orders.reduce((sum, order) => sum + orderBalance(order), 0);
+  const balance = paymentSummaryForOrders(orders).outstandingVnd;
   audit("TABLE_PRE_BILL", `${tableCode} ${formatMoney(balance)}`);
   saveState();
   render();
 }
 
 function voidTable(tableCode) {
-  if (blockUnsafeTableSessionMutation("TABLE_VOID_BLOCKED", tableCode)) return;
+  if (tableCode !== "TAKEAWAY" && blockUnsafeTableSessionMutation("TABLE_VOID_BLOCKED", tableCode)) return;
   const orders = tableOrders(tableCode);
   if (!orders.length) return;
+  const blocked = orders.find((order) => !canVoidOrder(order).ok);
+  if (blocked) {
+    const result = canVoidOrder(blocked);
+    cashierNotice = "Bill đã có thanh toán. Hãy void payment hoặc refund trước khi void lượt gọi.";
+    audit("TABLE_VOID_BLOCKED_PAYMENT", `${tableCode} ${blocked.orderNo}: ${result.reason}`);
+    saveState();
+    render();
+    return;
+  }
   const reason = prompt(`Lý do void toàn bộ bill bàn ${tableCode}?`);
   if (!reason) return;
   orders.forEach((order) => {
@@ -1589,6 +1791,7 @@ function voidTable(tableCode) {
     order.voidReason = reason;
     order.items.forEach((item) => item.status = "CANCELLED");
   });
+  pendingSplitPlan = null;
   reconcileOpenTableSessions("table void");
   audit("TABLE_VOID", `${tableCode}: ${reason}`);
   saveState();
@@ -1596,23 +1799,28 @@ function voidTable(tableCode) {
 }
 
 function refundTable(tableCode) {
-  if (blockUnsafeTableSessionMutation("TABLE_REFUND_BLOCKED", tableCode)) return;
-  const orders = tableOrders(tableCode).filter((order) => (order.paidVnd || 0) > 0);
-  const paid = orders.reduce((sum, order) => sum + (order.paidVnd || 0), 0);
-  if (!paid) return;
-  const rawAmount = prompt(`Số tiền refund tối đa ${formatMoney(paid)}`, String(paid));
-  const amount = Number(rawAmount || 0);
-  if (!amount || amount > paid) return;
+  if (tableCode !== "TAKEAWAY" && blockUnsafeTableSessionMutation("TABLE_REFUND_BLOCKED", tableCode)) return;
+  const entries = refundableEntries(tableOrders(tableCode));
+  const refundable = entries.reduce((sum, entry) => sum + entry.transaction.refundableVnd, 0);
+  if (!refundable) return;
+  const amount = readPaymentAmount(tableCode, refundable);
+  if (!amount) return;
   let remaining = amount;
-  orders.forEach((order) => {
+  entries.forEach(({ order, transaction }) => {
     if (remaining <= 0) return;
-    const refund = Math.min(order.paidVnd || 0, remaining);
-    appendPayment(order, "REFUND", -refund, "REF");
-    order.paidVnd = (order.paidVnd || 0) - refund;
-    order.status = order.paidVnd > 0 ? "PARTIALLY_REFUNDED" : "REFUNDED";
-    remaining -= refund;
+    const refund = Math.min(transaction.refundableVnd, remaining);
+    const result = recordRefund(order, {
+      id: nextPaymentId("REF", order, `-${transaction.id}`),
+      paymentId: transaction.id,
+      amountVnd: refund,
+      now: new Date().toISOString(),
+      note: `Table ${tableCode} refund`,
+      serviceComplete: isOrderServiceComplete(order)
+    });
+    if (result.ok) remaining -= refund;
   });
   reconcileOpenTableSessions("table refund");
+  cashierNotice = `Đã ghi nhận refund ${formatMoney(amount)}.`;
   audit("TABLE_REFUND", `${tableCode} ${formatMoney(amount)}`);
   saveState();
   render();
@@ -1621,21 +1829,18 @@ function refundTable(tableCode) {
 function payOrder(orderId, method) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
-  const balance = Math.max(0, order.total - (order.paidVnd || 0));
+  const balance = orderBalance(order);
   if (!balance) return;
-  order.payments = order.payments || [];
-  order.payments.push({
-    id: `PAY${Date.now().toString().slice(-6)}`,
-    method,
-    provider: ["VNPAY", "MOMO", "ZALOPAY"].includes(method) ? method : "MANUAL",
-    amountVnd: balance,
-    status: "SUCCEEDED",
-    paidAt: new Date().toLocaleString("vi-VN")
-  });
-  order.paidVnd = (order.paidVnd || 0) + balance;
-  order.status = "PAID";
-  reconcileOpenTableSessions("order payment");
-  audit("PAYMENT_SUCCEEDED", `${order.orderNo} ${method} ${formatMoney(balance)}`);
+  const amount = readPaymentAmount(activeCashierTable, balance);
+  if (!amount) return;
+  const result = applyOrderPayment(order, method, amount, { note: "Order payment" });
+  if (!result.ok) {
+    reportPaymentFailure("PAYMENT_FAILED", order.orderNo, result);
+  } else {
+    reconcileOpenTableSessions("order payment");
+    cashierNotice = `Đã ghi nhận ${formatMoney(amount)} cho ${order.orderNo}.`;
+    audit("PAYMENT_SUCCEEDED", `${order.orderNo} ${method} ${formatMoney(amount)}`);
+  }
   saveState();
   render();
 }
@@ -1643,25 +1848,18 @@ function payOrder(orderId, method) {
 function splitOrderInTwo(orderId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
-  const balance = Math.max(0, order.total - (order.paidVnd || 0));
+  const balance = orderBalance(order);
   if (!balance) return;
-  const first = Math.floor(balance / 2);
-  const second = balance - first;
-  order.payments = order.payments || [];
-  [first, second].forEach((amount, index) => {
-    order.payments.push({
-      id: `PAY${Date.now().toString().slice(-5)}${index}`,
-      method: "SPLIT_CASH",
-      provider: "MANUAL",
-      amountVnd: amount,
-      status: "SUCCEEDED",
-      paidAt: new Date().toLocaleString("vi-VN")
-    });
-  });
-  order.paidVnd = (order.paidVnd || 0) + balance;
-  order.status = "PAID";
-  reconcileOpenTableSessions("order split");
-  audit("SPLIT_BILL", `${order.orderNo} split 2 payments: ${formatMoney(first)} + ${formatMoney(second)}`);
+  const split = createEqualSplitPlan(balance, 2);
+  if (!split.ok) return;
+  pendingSplitPlan = {
+    scope: "ORDER",
+    orderId: order.id,
+    orderNo: order.orderNo,
+    tenderGroupId: nextTenderGroupId(`SPLIT-${order.id}`),
+    shares: split.shares.map((share) => ({ ...share, paid: false, method: "", paidAt: "" }))
+  };
+  audit("SPLIT_PLAN", `${order.orderNo} split 2: ${split.shares.map((share) => formatMoney(share.amountVnd)).join(" + ")}`);
   saveState();
   render();
 }
@@ -1669,12 +1867,20 @@ function splitOrderInTwo(orderId) {
 function preBill(orderId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
-  audit("PRE_BILL", `${order.orderNo} ${orderLocationLabel(order)} ${formatMoney(order.total)}`);
+  audit("PRE_BILL", `${order.orderNo} ${orderLocationLabel(order)} ${formatMoney(orderBalance(order))}`);
   saveState();
   render();
 }
 
 function startVoidOrder(orderId) {
+  const order = state.orders.find((item) => item.id === orderId);
+  if (order && !canVoidOrder(order).ok) {
+    cashierNotice = "Lượt gọi đã có thanh toán. Hãy void payment hoặc refund trước khi hủy lượt gọi.";
+    audit("VOID_BATCH_BLOCKED_PAYMENT", `${order.orderNo}: PAYMENT_EXISTS`);
+    saveState();
+    render();
+    return;
+  }
   pendingVoidOrderId = orderId;
   render();
 }
@@ -1692,11 +1898,21 @@ function confirmVoidOrder(orderId) {
 function voidOrder(orderId, reason = "") {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
+  const allowed = canVoidOrder(order);
+  if (!allowed.ok) {
+    pendingVoidOrderId = "";
+    cashierNotice = "Lượt gọi đã có thanh toán. Hãy void payment hoặc refund trước khi hủy lượt gọi.";
+    audit("VOID_BATCH_BLOCKED_PAYMENT", `${order.orderNo}: ${allowed.reason}`);
+    saveState();
+    render();
+    return;
+  }
   const voidReason = reason.trim() || "Thu ngân hủy lượt gọi";
   order.status = "VOIDED";
   order.voidReason = voidReason;
   order.items.forEach((item) => item.status = "CANCELLED");
   pendingVoidOrderId = "";
+  pendingSplitPlan = null;
   reconcileOpenTableSessions("order void");
   audit("VOID_BATCH", `${order.orderNo}: ${voidReason}`);
   saveState();
@@ -1706,32 +1922,101 @@ function voidOrder(orderId, reason = "") {
 function refundOrder(orderId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
-  const paid = order.paidVnd || 0;
-  const rawAmount = prompt(`Số tiền refund tối đa ${formatMoney(paid)}`, String(paid));
-  const amount = Number(rawAmount || 0);
-  if (!amount || amount > paid) return;
-  order.payments = order.payments || [];
-  order.payments.push({
-    id: `REF${Date.now().toString().slice(-6)}`,
-    method: "REFUND",
-    provider: "MANUAL",
-    amountVnd: -amount,
-    status: "SUCCEEDED",
-    paidAt: new Date().toLocaleString("vi-VN")
+  const entries = refundableEntries([order]);
+  const refundable = entries.reduce((sum, entry) => sum + entry.transaction.refundableVnd, 0);
+  if (!refundable) return;
+  const amount = readPaymentAmount(activeCashierTable, refundable);
+  if (!amount) return;
+  let remaining = amount;
+  entries.forEach((entry) => {
+    if (remaining <= 0) return;
+    const refund = Math.min(entry.transaction.refundableVnd, remaining);
+    const result = recordRefund(entry.order, {
+      id: nextPaymentId("REF", entry.order, `-${entry.transaction.id}`),
+      paymentId: entry.transaction.id,
+      amountVnd: refund,
+      now: new Date().toISOString(),
+      note: "Order refund",
+      serviceComplete: isOrderServiceComplete(entry.order)
+    });
+    if (result.ok) remaining -= refund;
   });
-  order.paidVnd = paid - amount;
-  order.status = order.paidVnd > 0 ? "PARTIALLY_REFUNDED" : "REFUNDED";
   reconcileOpenTableSessions("order refund");
+  cashierNotice = `Đã ghi nhận refund ${formatMoney(amount)} cho ${order.orderNo}.`;
   audit("REFUND", `${order.orderNo} ${formatMoney(amount)}`);
   saveState();
   render();
 }
 
+function voidPayment(orderId, paymentId) {
+  const order = state.orders.find((item) => item.id === orderId);
+  if (!order) return;
+  const result = recordPaymentVoid(order, {
+    id: nextPaymentId("VOID", order, `-${paymentId}`),
+    paymentId,
+    now: new Date().toISOString(),
+    note: "Cashier payment void",
+    serviceComplete: isOrderServiceComplete(order)
+  });
+  if (!result.ok) {
+    reportPaymentFailure("PAYMENT_VOID_FAILED", order.orderNo, result);
+  } else {
+    reconcileOpenTableSessions("payment void");
+    cashierNotice = `Đã void payment ${paymentId}.`;
+    audit("PAYMENT_VOID", `${order.orderNo} ${paymentId}`);
+  }
+  saveState();
+  render();
+}
+
+function refundPayment(orderId, paymentId) {
+  const order = state.orders.find((item) => item.id === orderId);
+  if (!order) return;
+  const max = remainingRefundableForPayment(order, paymentId);
+  const amount = readPaymentAmount(activeCashierTable, max);
+  if (!amount) return;
+  const result = recordRefund(order, {
+    id: nextPaymentId("REF", order, `-${paymentId}`),
+    paymentId,
+    amountVnd: amount,
+    now: new Date().toISOString(),
+    note: "Cashier payment refund",
+    serviceComplete: isOrderServiceComplete(order)
+  });
+  if (!result.ok) {
+    reportPaymentFailure("PAYMENT_REFUND_FAILED", order.orderNo, result);
+  } else {
+    reconcileOpenTableSessions("payment refund");
+    cashierNotice = `Đã refund ${formatMoney(amount)} từ payment ${paymentId}.`;
+    audit("PAYMENT_REFUND", `${order.orderNo} ${paymentId} ${formatMoney(amount)}`);
+  }
+  saveState();
+  render();
+}
+
+function refundableEntries(orders) {
+  return orders.flatMap((order) => {
+    const summary = paymentSummaryForOrder(order);
+    if (summary.effectivePaidVnd < summary.billTotalVnd || summary.billTotalVnd <= 0) return [];
+    return paymentHistoryView(order)
+      .filter((transaction) => transaction.type === "PAYMENT" && !transaction.voided && transaction.refundableVnd > 0)
+      .map((transaction) => ({ order, transaction }));
+  });
+}
+
 function updateOrderStatus(orderId, status) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
+  if (normalizeOrderStatus(status) === "PAID" && paymentSummaryForOrder(order).paymentStatus !== "PAID") {
+    cashierNotice = "Order chưa thanh toán đủ trên ledger nên không thể đóng PAID.";
+    audit("ORDER_PAID_BLOCKED", `${order.orderNo}: PAYMENT_NOT_SETTLED`);
+    saveState();
+    render();
+    return;
+  }
   const transition = applyOrderStatusTransition(order, status);
   if (!transition.ok) return;
+  refreshOrderPaymentProjection(order);
   reconcileOpenTableSessions(`order status ${transition.to}`);
   audit("ORDER_STATUS", `${order.orderNo} -> ${transition.to}`);
   saveState();
@@ -1743,6 +2028,8 @@ function serveReadyLine(orderId, lineId, qty) {
   if (!order) return;
   const update = serveLineQuantity(order, lineId, Number(qty || 1));
   if (!update.ok) return;
+  refreshOrderPaymentProjection(order);
+  reconcileOpenTableSessions("line served");
   audit("SERVE_LINE", `${order.orderNo} ${update.line.nameVi}: ${update.from}/${update.line.qty} -> ${update.to}/${update.line.qty}`);
   saveState();
   render();
@@ -1753,6 +2040,8 @@ function serveAllReadyLines(orderId) {
   if (!order) return;
   const update = serveAllReady(order);
   if (!update.ok) return;
+  refreshOrderPaymentProjection(order);
+  reconcileOpenTableSessions("ready lines served");
   audit("SERVE_ALL_READY", `${order.orderNo} ${update.servedLines.length} lines`);
   saveState();
   render();
@@ -1763,6 +2052,7 @@ function updateStationStatus(orderId, stationCode, status, lineIds = []) {
   if (!order) return;
   const update = applyPrepStatusTransition(order, { stationCode, lineIds }, status);
   if (!update.ok) return;
+  refreshOrderPaymentProjection(order);
   audit("STATION_STATUS", `${stationCode} ${order.orderNo} -> ${status} / order ${update.to}`);
   saveState();
   render();

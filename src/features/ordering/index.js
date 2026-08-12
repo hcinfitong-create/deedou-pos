@@ -81,7 +81,7 @@ const ORDER_SOURCE_ALIASES = Object.freeze({
 });
 
 const OPEN_ORDER_STATUSES = Object.freeze(["PENDING_ACCEPTANCE", "ACCEPTED", "IN_PREPARATION", "READY", "SERVED"]);
-const CLOSED_ORDER_STATUSES = Object.freeze(["PAID", "REJECTED", "VOIDED", "REFUNDED"]);
+const CLOSED_ORDER_STATUSES = Object.freeze(["PAID", "REJECTED", "VOIDED", "REFUNDED", "PARTIALLY_REFUNDED"]);
 export const PREP_STATUSES = Object.freeze(["QUEUED", "ACKNOWLEDGED", "PREPARING", "READY"]);
 const READY_PREP_STATUSES = Object.freeze(["READY"]);
 const ACTIVE_STATION_STATUSES = Object.freeze(["ACKNOWLEDGED", "PREPARING", "READY"]);
@@ -445,7 +445,7 @@ export function deriveOrderStatusFromStations(order) {
 export function deriveOrderOperationalStatus(order) {
   if (!order) return "PENDING_ACCEPTANCE";
   const current = normalizeOrderStatus(order.status || "PENDING_ACCEPTANCE");
-  if (["REJECTED", "PAID", "VOIDED", "REFUNDED"].includes(current)) return current;
+  if (["REJECTED", "PAID", "VOIDED", "REFUNDED", "PARTIALLY_REFUNDED"].includes(current)) return current;
 
   const requiredItems = requiredStationItems(order);
   if (!requiredItems.length) return current;
