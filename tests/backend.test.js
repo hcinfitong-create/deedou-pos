@@ -372,7 +372,8 @@ test("CI executes real DD-008A Supabase database contract on GitHub runner", () 
 
 test("DD-008B enables local Supabase Auth while disabling public signup", () => {
   assert.match(supabaseConfig, /\[auth\]\s+enabled = true/i);
-  assert.match(supabaseConfig, /\[auth\.email\][\s\S]*enable_signup = false/i);
+  assert.match(supabaseConfig, /\[auth\][\s\S]*enable_signup = false/i);
+  assert.match(supabaseConfig, /\[auth\.email\][\s\S]*enable_signup = true/i);
 });
 
 test("DD-008B creates staff profile, role, permission, assignment, and device tables with RLS", () => {
