@@ -328,6 +328,7 @@ as $$
       'menu.read',
       'menu.manage',
       'tables.read',
+      'payments.read',
       'audit.read',
       'staff.read',
       'staff.manage',
