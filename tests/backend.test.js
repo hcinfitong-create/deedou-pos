@@ -360,6 +360,7 @@ test("CI executes real DD-008A Supabase database contract on GitHub runner", () 
   assert.match(ciWorkflow, /npx supabase start/i);
   assert.match(ciWorkflow, /npx supabase db reset/i);
   assert.match(ciWorkflow, /supabase\/tests\/dd008a_contract\.sql/i);
+  assert.match(ciWorkflow, /DB_URL="postgresql:\/\/postgres:postgres@127\.0\.0\.1:54322\/postgres"/i);
   assert.match(ciWorkflow, /psql "\$DB_URL" -v ON_ERROR_STOP=1 -f supabase\/tests\/dd008a_contract\.sql/i);
   assert.match(ciWorkflow, /if: always\(\)/i);
   assert.match(ciWorkflow, /npx supabase stop/i);

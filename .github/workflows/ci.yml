@@ -60,8 +60,7 @@ jobs:
 
       - name: Run DD-008A database contract
         run: |
-          DB_URL="$(npx supabase status -o env | sed -n 's/^DB_URL=//p')"
-          test -n "$DB_URL"
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008a_contract.sql
 
       - name: Stop Supabase local stack
