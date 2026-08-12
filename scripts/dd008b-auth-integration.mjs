@@ -5,11 +5,10 @@ import { createClient } from "@supabase/supabase-js";
 const statusEnv = parseEnvOutput(execFileSync("npx", ["supabase", "status", "-o", "env"], { encoding: "utf8" }));
 const apiUrl = statusEnv.API_URL || statusEnv.SUPABASE_URL || "http://127.0.0.1:54321";
 const anonKey = statusEnv.ANON_KEY || statusEnv.SUPABASE_ANON_KEY;
-const serviceRoleKey = statusEnv.SERVICE_ROLE_KEY || statusEnv.SUPABASE_SERVICE_ROLE_KEY;
 const dbUrl = process.env.DB_URL || statusEnv.DB_URL || "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
 
-if (!anonKey || !serviceRoleKey) {
-  throw new Error("Supabase local anon/service-role keys were not available from `supabase status -o env`.");
+if (!anonKey) {
+  throw new Error("Supabase local anon key was not available from `supabase status -o env`.");
 }
 
 const runId = `dd008b_${Date.now()}_${randomUUID().slice(0, 8)}`.replace(/-/g, "_");
@@ -36,26 +35,80 @@ const deviceSecrets = {
   cashierB: secret("cashier-b-device")
 };
 
-const adminClient = createClient(apiUrl, serviceRoleKey, {
-  auth: {
-    persistSession: false,
-    autoRefreshToken: false
-  }
-});
-
 await waitForAuthReady();
 
 const users = {
-  owner: await createRuntimeUser("owner"),
-  cashier: await createRuntimeUser("cashier"),
-  kitchen: await createRuntimeUser("kitchen"),
-  managerB: await createRuntimeUser("manager-b"),
-  inactive: await createRuntimeUser("inactive"),
-  target: await createRuntimeUser("target")
+  owner: createRuntimeUser("owner"),
+  cashier: createRuntimeUser("cashier"),
+  kitchen: createRuntimeUser("kitchen"),
+  managerB: createRuntimeUser("manager-b"),
+  inactive: createRuntimeUser("inactive"),
+  target: createRuntimeUser("target")
 };
 
 runPsql(`
 begin;
+
+insert into auth.users (
+  instance_id,
+  id,
+  aud,
+  role,
+  email,
+  encrypted_password,
+  email_confirmed_at,
+  created_at,
+  updated_at,
+  raw_app_meta_data,
+  raw_user_meta_data,
+  is_super_admin
+)
+values
+  ${Object.values(users).map((user) => `(
+    '00000000-0000-0000-0000-000000000000',
+    ${lit(user.id)}::uuid,
+    'authenticated',
+    'authenticated',
+    ${lit(user.email)},
+    extensions.crypt(${lit(user.password)}, extensions.gen_salt('bf')),
+    now(),
+    now(),
+    now(),
+    '{"provider":"email","providers":["email"]}'::jsonb,
+    jsonb_build_object('dd008b_runtime', ${lit(runId)}, 'kind', ${lit(user.kind)}),
+    false
+  )`).join(",\n  ")}
+on conflict (id) do update set
+  email = excluded.email,
+  encrypted_password = excluded.encrypted_password,
+  email_confirmed_at = excluded.email_confirmed_at,
+  updated_at = excluded.updated_at,
+  raw_app_meta_data = excluded.raw_app_meta_data,
+  raw_user_meta_data = excluded.raw_user_meta_data;
+
+insert into auth.identities (
+  provider_id,
+  user_id,
+  identity_data,
+  provider,
+  last_sign_in_at,
+  created_at,
+  updated_at
+)
+values
+  ${Object.values(users).map((user) => `(
+    ${lit(user.id)},
+    ${lit(user.id)}::uuid,
+    jsonb_build_object('sub', ${lit(user.id)}, 'email', ${lit(user.email)}, 'email_verified', true, 'phone_verified', false),
+    'email',
+    now(),
+    now(),
+    now()
+  )`).join(",\n  ")}
+on conflict (provider_id, provider) do update set
+  user_id = excluded.user_id,
+  identity_data = excluded.identity_data,
+  updated_at = excluded.updated_at;
 
 insert into public.locations (id, name, timezone, currency)
 values
@@ -251,17 +304,11 @@ console.log("DD-008B real Auth integration passed");
 console.log(`runtime users: ${Object.keys(users).length}`);
 console.log("real password login/JWT, restore, refresh, local logout, server-issued device, direct RPC device enforcement, and audit anti-spoof verified");
 
-async function createRuntimeUser(kind) {
+function createRuntimeUser(kind) {
+  const id = randomUUID();
   const email = `${runId}_${kind}@example.invalid`;
   const password = secret(`${kind}-password`);
-  const { data, error } = await retryAuthCall(() => adminClient.auth.admin.createUser({
-    email,
-    password,
-    email_confirm: true,
-    user_metadata: { dd008b_runtime: runId, kind }
-  }), `create runtime auth user ${kind}`);
-  if (error || !data.user?.id) throw new Error(`Failed to create runtime auth user ${kind}: ${error?.message || "missing user"}`);
-  return { id: data.user.id, email, password, storage: memoryStorage() };
+  return { id, email, password, kind, storage: memoryStorage() };
 }
 
 async function loginRuntimeUser(kind) {
@@ -285,7 +332,12 @@ function createRuntimeClient(storage) {
 
 async function waitForAuthReady() {
   await retryAuthCall(
-    () => adminClient.auth.admin.listUsers({ page: 1, perPage: 1 }),
+    async () => {
+      const response = await fetch(`${apiUrl}/auth/v1/health`, {
+        headers: { apikey: anonKey }
+      });
+      return response.ok ? { data: true } : { error: new Error(`HTTP ${response.status}`) };
+    },
     "wait for local Supabase Auth"
   );
 }
