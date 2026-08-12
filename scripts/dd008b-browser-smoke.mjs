@@ -350,8 +350,8 @@ async function expectDeniedGate(page, label, forbiddenTexts = []) {
   await waitForNotChecking(page);
   await assertAppReady(page, label);
   assert.equal(await page.locator("[data-supabase-command]").count(), 0, `${label} should not expose fail-closed command button`);
+  assert.ok(await page.locator("form[data-auth-login]").count() > 0, `${label} should show a signed-in permission review form`);
   const text = await bodyText(page);
-  assertContains(text, "Supabase Auth", label);
   forbiddenTexts.forEach((forbidden) => assertNotContains(text, forbidden, label));
 }
 
