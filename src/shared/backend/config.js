@@ -88,7 +88,7 @@ export function validatePublicBackendConfig(input = {}) {
 
   const unsafeValue = Object.entries(raw).find(([, value]) => {
     const text = normalizeText(value);
-    return text && SECRET_VALUE_PATTERNS.some((pattern) => pattern.test(text));
+    return text && (SECRET_VALUE_PATTERNS.some((pattern) => pattern.test(text)) || isUnsafeJwtLikeKey(text));
   });
   if (unsafeValue) return { ok: false, reason: "SECRET_VALUE_IN_BROWSER_CONFIG", field: unsafeValue[0] };
 
@@ -125,6 +125,34 @@ function normalizeMode(value) {
 
 function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function isUnsafeJwtLikeKey(value) {
+  if (!looksLikeJwt(value)) return false;
+  const payload = decodeJwtPayload(value);
+  if (!payload) return true;
+  const role = normalizeText(payload.role).toLowerCase();
+  return ["service_role", "supabase_admin", "admin", "owner"].includes(role);
+}
+
+function looksLikeJwt(value) {
+  return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/.test(value);
+}
+
+function decodeJwtPayload(value) {
+  const payloadPart = value.split(".")[1] || "";
+  try {
+    return JSON.parse(base64UrlDecode(payloadPart));
+  } catch {
+    return null;
+  }
+}
+
+function base64UrlDecode(value) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(normalized.length + ((4 - normalized.length % 4) % 4), "=");
+  if (typeof atob === "function") return atob(padded);
+  return Buffer.from(padded, "base64").toString("utf8");
 }
 
 function isSafeSupabaseUrl(value) {

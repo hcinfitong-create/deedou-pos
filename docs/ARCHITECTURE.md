@@ -69,6 +69,10 @@ DD-008A adds a Supabase/PostgreSQL foundation without cutting production busines
 - `src/shared/backend` is the only infrastructure boundary allowed to create a Supabase client.
 - Feature modules must not import Supabase directly.
 - Connection state must use an actual backend probe before reporting `ONLINE`.
+- Public QR access is exact-token resolution through `resolve_table_token(token)` only; table-token enumeration is not a supported public contract.
+- Public menu access is location-scoped through narrow SQL functions and does not expose station routing or raw internal tables.
+- Raw operational, payment, audit, and idempotency tables do not grant broad anon/authenticated read or write access in DD-008A.
+- Payment transactions use restrictive order/location references so hard-deleting an order cannot cascade-delete ledger history.
 
 Committed Supabase infrastructure lives under:
 
@@ -77,6 +81,7 @@ supabase/
   config.toml
   migrations/
   seed.sql
+  tests/
 ```
 
 Identifier strategy:

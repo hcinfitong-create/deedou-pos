@@ -26,35 +26,47 @@ Equivalent runtime object keys are:
 Never put these in browser config:
 
 - Supabase service role key
+- Legacy Supabase JWT whose decoded `role` is `service_role`
 - Database password or connection string
 - JWT signing secret
 - Access token
 - Private key
 - Production credentials
 
+## Public Read Boundary
+
+Public QR/menu access is intentionally narrow:
+
+- Table QR access uses `resolve_table_token(token)` for exact-token lookup only.
+- There is no public list-all table-token view.
+- Menu access uses location-scoped public functions: `list_public_menu_products(location_id)`, `list_public_menu_product_variants(location_id)`, `list_public_menu_modifier_groups(location_id)`, and `list_public_menu_modifier_options(location_id)`.
+- Public menu functions do not expose station routing, payment data, audit data, idempotency data, or raw internal tables.
+- Raw tables revoke anon/authenticated access unless a later authoritative backend stage adds explicit command boundaries.
+
 ## Local Supabase
 
-Install the Supabase CLI separately, then run:
+DD-008A pins the Supabase CLI as a dev dependency when tooling is available. Run:
 
 ```sh
-supabase start
-supabase db reset
-supabase stop
+npx supabase start
+npx supabase db reset
+npx supabase stop
 ```
 
 The database can be recreated from zero using:
 
 ```sh
-supabase db reset
+npx supabase db reset
 ```
 
 `supabase/seed.sql` seeds one deterministic DeeDou demo location, the current QR tables, and a small catalog/options graph for schema validation.
+`supabase/tests/dd008a_contract.sql` contains the DB-level review contract checks for public access, table-session invariants, and payment-ledger retention.
 
 ## Migration Workflow
 
 1. Add a new SQL migration under `supabase/migrations/`.
 2. Keep schema changes structural in DD-008A.
-3. Run `supabase db reset` locally when the CLI is available.
+3. Run `npx supabase db reset` locally when the CLI and Docker are available.
 4. Run `npm run check`, `npm test`, and `git diff --check`.
 
 ## Rollback / Removal

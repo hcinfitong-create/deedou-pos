@@ -20,6 +20,7 @@ create table if not exists public.physical_tables (
   is_active boolean not null default true,
   display_order integer not null default 0,
   created_at timestamptz not null default now(),
+  unique (id, location_id),
   unique (location_id, code),
   constraint physical_tables_qr_token_entropy check (char_length(qr_token) >= 12)
 );
@@ -109,7 +110,7 @@ create table if not exists public.product_components (
 create table if not exists public.table_sessions (
   id text primary key,
   location_id text not null references public.locations(id) on delete cascade,
-  physical_table_id text not null references public.physical_tables(id),
+  physical_table_id text not null,
   table_code text not null,
   zone text not null,
   status text not null check (status in ('OPEN', 'CLOSED', 'VOIDED')),
@@ -120,11 +121,14 @@ create table if not exists public.table_sessions (
   constraint table_sessions_closed_at_required check (
     (status = 'OPEN' and closed_at is null)
     or (status <> 'OPEN' and closed_at is not null)
-  )
+  ),
+  constraint table_sessions_physical_table_location_fk
+    foreign key (physical_table_id, location_id)
+    references public.physical_tables(id, location_id)
 );
 
 create unique index if not exists table_sessions_one_open_per_physical_table
-on public.table_sessions(location_id, physical_table_id)
+on public.table_sessions(physical_table_id)
 where status = 'OPEN';
 
 create table if not exists public.orders (
@@ -232,8 +236,8 @@ create index if not exists service_requests_open_idx on public.service_requests(
 
 create table if not exists public.payment_transactions (
   id text primary key,
-  location_id text not null references public.locations(id) on delete cascade,
-  order_id text not null references public.orders(id) on delete cascade,
+  location_id text not null references public.locations(id) on delete restrict,
+  order_id text not null references public.orders(id) on delete restrict,
   type text not null check (type in ('PAYMENT', 'PAYMENT_VOID', 'REFUND')),
   method text not null,
   provider text not null default 'MANUAL',
@@ -308,143 +312,195 @@ alter table public.idempotency_keys enable row level security;
 alter table public.audit_events enable row level security;
 alter table public.command_deduplication enable row level security;
 
-create policy locations_public_read
-on public.locations
-for select
-to anon, authenticated
-using (true);
-
-create policy physical_tables_public_qr_read
-on public.physical_tables
-for select
-to anon, authenticated
-using (is_active = true);
-
-create policy products_public_menu_read
-on public.products
-for select
-to anon, authenticated
-using (available = true);
-
-create policy product_variants_public_menu_read
-on public.product_variants
-for select
-to anon, authenticated
-using (available = true);
-
-create policy modifier_groups_public_menu_read
-on public.modifier_groups
-for select
-to anon, authenticated
-using (true);
-
-create policy modifier_options_public_menu_read
-on public.modifier_options
-for select
-to anon, authenticated
-using (available = true);
-
-create policy product_modifier_groups_public_menu_read
-on public.product_modifier_groups
-for select
-to anon, authenticated
-using (true);
-
-create policy product_components_public_menu_read
-on public.product_components
-for select
-to anon, authenticated
-using (true);
+revoke all on public.locations from anon, authenticated;
+revoke all on public.physical_tables from anon, authenticated;
+revoke all on public.products from anon, authenticated;
+revoke all on public.product_variants from anon, authenticated;
+revoke all on public.modifier_groups from anon, authenticated;
+revoke all on public.modifier_options from anon, authenticated;
+revoke all on public.product_modifier_groups from anon, authenticated;
+revoke all on public.product_components from anon, authenticated;
+revoke all on public.table_sessions from anon, authenticated;
+revoke all on public.orders from anon, authenticated;
+revoke all on public.order_lines from anon, authenticated;
+revoke all on public.service_requests from anon, authenticated;
+revoke all on public.payment_transactions from anon, authenticated;
+revoke all on public.idempotency_keys from anon, authenticated;
+revoke all on public.audit_events from anon, authenticated;
+revoke all on public.command_deduplication from anon, authenticated;
 
 create or replace view public.public_backend_health
 with (security_invoker = true)
 as select true as ok;
 
-create or replace view public.public_table_qr
-with (security_invoker = true)
-as
-select
-  code,
-  zone,
-  qr_token
-from public.physical_tables
-where is_active = true;
+create or replace function public.resolve_table_token(p_qr_token text)
+returns table (
+  location_id text,
+  code text,
+  zone text
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    pt.location_id,
+    pt.code,
+    pt.zone
+  from public.physical_tables pt
+  where pt.is_active = true
+    and pt.qr_token = p_qr_token
+  limit 1
+$$;
 
-create or replace view public.public_menu_products
-with (security_invoker = true)
-as
-select
-  id,
-  kind,
-  category,
-  name_vi,
-  name_en,
-  desc_vi,
-  desc_en,
-  price_vnd,
-  station_code,
-  image_url,
-  color,
-  art,
-  periods
-from public.products
-where available = true;
+create or replace function public.list_public_menu_products(p_location_id text)
+returns table (
+  location_id text,
+  id text,
+  kind text,
+  category text,
+  name_vi text,
+  name_en text,
+  desc_vi text,
+  desc_en text,
+  price_vnd integer,
+  image_url text,
+  color text,
+  art text,
+  periods text[]
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    p.location_id,
+    p.id,
+    p.kind,
+    p.category,
+    p.name_vi,
+    p.name_en,
+    p.desc_vi,
+    p.desc_en,
+    p.price_vnd,
+    p.image_url,
+    p.color,
+    p.art,
+    p.periods
+  from public.products p
+  where p.available = true
+    and p.location_id = p_location_id
+$$;
 
-create or replace view public.public_menu_product_variants
-with (security_invoker = true)
-as
-select
-  product_id,
-  variant_key,
-  name_vi,
-  name_en,
-  price_delta_vnd,
-  display_order
-from public.product_variants
-where available = true;
+create or replace function public.list_public_menu_product_variants(p_location_id text)
+returns table (
+  location_id text,
+  product_id text,
+  variant_key text,
+  name_vi text,
+  name_en text,
+  price_delta_vnd integer,
+  display_order integer
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    p.location_id,
+    pv.product_id,
+    pv.variant_key,
+    pv.name_vi,
+    pv.name_en,
+    pv.price_delta_vnd,
+    pv.display_order
+  from public.product_variants pv
+  join public.products p on p.id = pv.product_id
+  where pv.available = true
+    and p.available = true
+    and p.location_id = p_location_id
+$$;
 
-create or replace view public.public_menu_modifier_groups
-with (security_invoker = true)
-as
-select
-  pmg.product_id,
-  mg.group_key,
-  mg.name_vi,
-  mg.name_en,
-  mg.required,
-  mg.multiple,
-  mg.min_select,
-  mg.max_select,
-  pmg.display_order
-from public.product_modifier_groups pmg
-join public.modifier_groups mg on mg.id = pmg.modifier_group_id;
+create or replace function public.list_public_menu_modifier_groups(p_location_id text)
+returns table (
+  location_id text,
+  product_id text,
+  modifier_group_id text,
+  group_key text,
+  name_vi text,
+  name_en text,
+  required boolean,
+  multiple boolean,
+  min_select integer,
+  max_select integer,
+  display_order integer
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    p.location_id,
+    pmg.product_id,
+    mg.id,
+    mg.group_key,
+    mg.name_vi,
+    mg.name_en,
+    mg.required,
+    mg.multiple,
+    mg.min_select,
+    mg.max_select,
+    pmg.display_order
+  from public.product_modifier_groups pmg
+  join public.products p on p.id = pmg.product_id
+  join public.modifier_groups mg on mg.id = pmg.modifier_group_id
+  where p.available = true
+    and mg.location_id = p.location_id
+    and p.location_id = p_location_id
+$$;
 
-create or replace view public.public_menu_modifier_options
-with (security_invoker = true)
-as
-select
-  mg.group_key,
-  mo.option_key,
-  mo.name_vi,
-  mo.name_en,
-  mo.price_delta_vnd,
-  mo.display_order
-from public.modifier_options mo
-join public.modifier_groups mg on mg.id = mo.modifier_group_id
-where mo.available = true;
+create or replace function public.list_public_menu_modifier_options(p_location_id text)
+returns table (
+  location_id text,
+  modifier_group_id text,
+  option_key text,
+  name_vi text,
+  name_en text,
+  price_delta_vnd integer,
+  display_order integer
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    mg.location_id,
+    mo.modifier_group_id,
+    mo.option_key,
+    mo.name_vi,
+    mo.name_en,
+    mo.price_delta_vnd,
+    mo.display_order
+  from public.modifier_options mo
+  join public.modifier_groups mg on mg.id = mo.modifier_group_id
+  where mo.available = true
+    and mg.location_id = p_location_id
+$$;
 
 grant usage on schema public to anon, authenticated;
-grant select on public.locations to anon, authenticated;
-grant select on public.physical_tables to anon, authenticated;
-grant select on public.products to anon, authenticated;
-grant select on public.product_variants to anon, authenticated;
-grant select on public.modifier_groups to anon, authenticated;
-grant select on public.modifier_options to anon, authenticated;
-grant select on public.product_modifier_groups to anon, authenticated;
-grant select on public.product_components to anon, authenticated;
+revoke all on function public.resolve_table_token(text) from public;
+revoke all on function public.list_public_menu_products(text) from public;
+revoke all on function public.list_public_menu_product_variants(text) from public;
+revoke all on function public.list_public_menu_modifier_groups(text) from public;
+revoke all on function public.list_public_menu_modifier_options(text) from public;
 grant select on public.public_backend_health to anon, authenticated;
-grant select on public.public_table_qr to anon, authenticated;
-grant select on public.public_menu_products to anon, authenticated;
-grant select on public.public_menu_product_variants to anon, authenticated;
-grant select on public.public_menu_modifier_groups to anon, authenticated;
-grant select on public.public_menu_modifier_options to anon, authenticated;
+grant execute on function public.resolve_table_token(text) to anon, authenticated;
+grant execute on function public.list_public_menu_products(text) to anon, authenticated;
+grant execute on function public.list_public_menu_product_variants(text) to anon, authenticated;
+grant execute on function public.list_public_menu_modifier_groups(text) to anon, authenticated;
+grant execute on function public.list_public_menu_modifier_options(text) to anon, authenticated;
