@@ -5,12 +5,16 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "check": "node --check app.js && node --check src/features/customer-menu/index.js && node --check src/features/product-options/index.js && node --check src/features/course-workflow/index.js && node --check src/features/ordering/index.js && node --check src/features/cart/index.js && node --check src/features/customer-orders/index.js && node --check src/features/service-requests/index.js && node --check src/features/staff-orders/index.js && node --check src/features/station-workflow/index.js && node --check src/features/table-session/index.js && node --check src/features/payments/index.js && node --check src/shared/backend/config.js && node --check src/shared/backend/connection.js && node --check src/shared/backend/index.js && node --check src/shared/auth/index.js"
+    "check": "node --check app.js && node --check scripts/dd008b-auth-integration.mjs && node --check src/features/customer-menu/index.js && node --check src/features/product-options/index.js && node --check src/features/course-workflow/index.js && node --check src/features/ordering/index.js && node --check src/features/cart/index.js && node --check src/features/customer-orders/index.js && node --check src/features/service-requests/index.js && node --check src/features/staff-orders/index.js && node --check src/features/station-workflow/index.js && node --check src/features/table-session/index.js && node --check src/features/payments/index.js && node --check src/shared/backend/config.js && node --check src/shared/backend/connection.js && node --check src/shared/backend/index.js && node --check src/shared/auth/index.js",
+    "dd008b:auth-integration": "node scripts/dd008b-auth-integration.mjs"
   },
   "engines": {
     "node": ">=20"
   },
   "devDependencies": {
     "supabase": "2.113.0"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.3"
   }
 }

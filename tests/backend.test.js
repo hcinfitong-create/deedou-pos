@@ -391,6 +391,8 @@ test("DD-008B creates staff profile, role, permission, assignment, and device ta
   });
   assert.match(authMigrationSql, /auth_user_id uuid not null unique references auth\.users\(id\) on delete restrict/i);
   assert.match(authMigrationSql, /credential_hash text not null unique/i);
+  assert.match(authMigrationSql, /digest\(convert_to\('deedou-device-v2:' \|\| p_device_credential, 'utf8'\), 'sha256'\)/i);
+  assert.doesNotMatch(authMigrationSql, /md5\(/i);
 });
 
 test("DD-008B documents and seeds the role permission vocabulary", () => {
@@ -431,6 +433,7 @@ test("DD-008B authorization helpers use auth.uid, empty search path, and fully q
     "is_active_staff",
     "has_location_access",
     "has_permission",
+    "resolve_staff_workstation_context",
     "authorize_staff_access",
     "get_my_staff_context",
     "can_grant_role_at_location",
@@ -451,6 +454,8 @@ test("DD-008B exposes only intended RPCs and no business write grants", () => {
   assert.doesNotMatch(authMigrationSql, /grant\s+(insert|update|delete|all)[\s\S]*to\s+anon/i);
   assert.doesNotMatch(authMigrationSql, /grant\s+(insert|update|delete|all)[\s\S]*to\s+authenticated/i);
   assert.match(authMigrationSql, /grant execute on function public\.authorize_staff_access\(text, text, text, text\) to anon, authenticated;/i);
+  assert.doesNotMatch(authMigrationSql, /grant execute on function public\.resolve_registered_device\(text, text\)/i);
+  assert.doesNotMatch(authMigrationSql, /grant execute on function public\.generate_device_credential/i);
   ["list_staff_orders", "list_staff_payment_transactions", "assign_staff_role_at_location", "revoke_workstation_device"].forEach((functionName) => {
     assert.match(authMigrationSql, new RegExp(`grant execute on function public\\.${functionName}`, "i"));
   });
@@ -460,14 +465,24 @@ test("DD-008B delegation ceiling and device constraints are enforced server-side
   const delegation = authFunctionSql("can_grant_role_at_location");
   const authorize = authFunctionSql("authorize_staff_access");
   const audit = authFunctionSql("prepare_audit_context");
+  const registerDevice = authFunctionSql("register_workstation_device");
+  const revokeDevice = authFunctionSql("revoke_workstation_device");
 
   assert.match(delegation, /SELF_ESCALATION_BLOCKED/i);
   assert.match(delegation, /PRIVILEGE_CEILING_EXCEEDED/i);
+  assert.match(delegation, /public\.authorize_staff_access\(p_location_id, 'staff\.manage', p_current_workstation_mode, p_current_device_credential\)/i);
   assert.match(delegation, /public\.has_permission\(p_location_id, public\.permissions\.permission_key\) = false/i);
   assert.match(authorize, /DEVICE_UNREGISTERED/i);
   assert.match(authorize, /DEVICE_MODE_DENIED/i);
   assert.match(authorize, /public\.workstation_mode_allows_permission/i);
-  assert.match(audit, /p_client_actor_id <> coalesce\(v_staff_id, ''\)/i);
+  assert.match(registerDevice, /public\.authorize_staff_access\(p_location_id, 'devices\.manage', p_current_workstation_mode, p_current_device_credential\)/i);
+  assert.match(registerDevice, /public\.generate_device_credential\(\)/i);
+  assert.match(registerDevice, /public\.generate_device_id\(\)/i);
+  assert.doesNotMatch(registerDevice, /on conflict \(credential_hash\) do update/i);
+  assert.match(revokeDevice, /public\.authorize_staff_access\(p_location_id, 'devices\.manage', p_current_workstation_mode, p_current_device_credential\)/i);
+  assert.match(audit, /public\.resolve_staff_workstation_context\(p_location_id, p_workstation_mode, p_device_credential\)/i);
+  assert.match(audit, /coalesce\(v_context\.workstation_mode, ''\)/i);
+  assert.doesNotMatch(audit, /then p_workstation_mode/i);
 });
 
 test("DD-008B database contract covers required real Supabase auth and RBAC cases", () => {
@@ -481,20 +496,23 @@ test("DD-008B database contract covers required real Supabase auth and RBAC case
     "SELF_ESCALATION_BLOCKED",
     "PRIVILEGE_CEILING_EXCEEDED",
     "expected authenticated operational write to be blocked",
-    "expected owner to register device",
+    "expected owner to register server-issued device",
     "expected staff deactivation immediate without JWT refresh",
-    "expected audit context to ignore client actor spoof",
+    "expected audit context to ignore client mode/actor spoof",
     "expected unauthenticated exact-token QR resolver to work"
   ].forEach((evidence) => {
     assert.match(authContractSql, new RegExp(escapeRegExp(evidence), "i"));
   });
 });
 
-test("CI executes real DD-008B Supabase database contract on GitHub runner", () => {
+test("CI executes real DD-008B Supabase database and Auth integration contracts on GitHub runner", () => {
   assert.match(ciWorkflow, /supabase\/tests\/dd008b_auth_rbac_contract\.sql/i);
   assert.match(ciWorkflow, /psql "\$DB_URL" -v ON_ERROR_STOP=1 -f supabase\/tests\/dd008b_auth_rbac_contract\.sql/i);
+  assert.match(ciWorkflow, /auth-integration:/i);
+  assert.match(ciWorkflow, /npm run dd008b:auth-integration/i);
+  assert.match(ciWorkflow, /Run DD-008B real Supabase Auth integration/i);
   assert.match(ciWorkflow, /"feat\/\*\*"/i);
-  assert.doesNotMatch(ciWorkflow, /SUPABASE_SERVICE_ROLE|SERVICE_ROLE|PRODUCTION/i);
+  assert.doesNotMatch(ciWorkflow, /SUPABASE_SERVICE_ROLE|PRODUCTION/i);
 });
 
 function functionSql(functionName) {

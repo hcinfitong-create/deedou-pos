@@ -438,7 +438,7 @@ Notes:
 - Default mode is `LOCAL_DEMO`.
 - `SUPABASE` mode must be explicitly configured with public URL plus publishable key.
 - Connection state must not report `ONLINE` from browser network status alone.
-- DD-008B owns staff auth/RBAC. DD-008C/D own command authorization, realtime, and reconnect workflows.
+- DD-008B owns staff auth/RBAC and fail-closed staff route presentation. DD-008C/D own authoritative business command RPCs, realtime, and reconnect workflows.
 
 ### shared/db
 
@@ -448,9 +448,10 @@ Supabase/PostgreSQL schema foundation exists under `supabase/`, but it is not ru
 
 Owns:
 
-- Browser staff login/logout/auth gate presentation for `SUPABASE` mode.
+- Browser staff login/logout/auth gate presentation for `SUPABASE` mode through the `@supabase/supabase-js` managed lifecycle.
 - Staff route-to-permission/workstation intent mapping.
 - Client-side normalization for staff context and authorization RPC results.
+- Opaque workstation identity storage after a server-issued one-time credential is registered.
 - Documentation of role-to-permission matrix.
 
 Current location:
@@ -462,7 +463,8 @@ Does not own:
 
 - Authoritative permission decisions; those live in Supabase RPC/RLS helpers.
 - Business mutations for orders, payments, KDS, service requests, or table sessions.
-- Service role keys, admin Auth API calls, password/PIN storage, or production secrets.
+- Supabase access/refresh token copying, service role keys, admin Auth API calls, password/PIN storage, or production secrets.
+- Visible normal-login device token entry or browser-generated workstation credentials.
 - Staff invitation/MFA UX beyond documented future scope.
 
 ### shared/realtime

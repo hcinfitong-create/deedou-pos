@@ -6,6 +6,7 @@ export const STAFF_LOCATION_KEY = "deedou_staff_location_id";
 export const DEVICE_CREDENTIAL_KEY = "deedou_device_credential";
 export const WORKSTATION_MODE_KEY = "deedou_workstation_mode";
 export const DEFAULT_LOCATION_ID = "deedou-demo";
+const SUPABASE_BROWSER_ESM_URL = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.112.3/+esm";
 
 export const AUTH_DENIAL_REASONS = Object.freeze({
   AUTH_LOADING: "AUTH_LOADING",
@@ -96,12 +97,10 @@ export function getStaffRoutePolicy(routeName) {
 
 export function createInitialStaffAuthState(options = {}) {
   const config = getBackendConfig(options.config);
-  const storage = options.storage || safeSessionStorage();
   const localStorageRef = options.localStorage || safeLocalStorage();
-  const session = readStoredAuthSession(storage);
   const locationId = normalizeText(localStorageRef?.getItem?.(STAFF_LOCATION_KEY)) || DEFAULT_LOCATION_ID;
   const workstationMode = normalizeWorkstationMode(localStorageRef?.getItem?.(WORKSTATION_MODE_KEY)) || "";
-  const deviceCredential = normalizeText(storage?.getItem?.(DEVICE_CREDENTIAL_KEY));
+  const hasDeviceCredential = Boolean(readStoredDeviceCredential(localStorageRef));
 
   if (config.mode !== BACKEND_MODES.SUPABASE) {
     return {
@@ -110,7 +109,8 @@ export function createInitialStaffAuthState(options = {}) {
       session: null,
       locationId,
       workstationMode,
-      deviceCredential,
+      hasDeviceCredential,
+      authVersion: 0,
       authorization: { ok: true, reason: "" },
       staffContext: [],
       error: ""
@@ -119,11 +119,12 @@ export function createInitialStaffAuthState(options = {}) {
 
   return {
     backendMode: config.mode,
-    status: session?.accessToken ? "SIGNED_IN_STALE" : "SIGNED_OUT",
-    session,
+    status: "RESTORING",
+    session: null,
     locationId,
     workstationMode,
-    deviceCredential,
+    hasDeviceCredential,
+    authVersion: 0,
     authorization: null,
     staffContext: [],
     error: ""
@@ -135,8 +136,10 @@ export function evaluateStaffRouteAccess({ config, routeName, authState } = {}) 
   const policy = getStaffRoutePolicy(routeName);
   if (!policy) return { ok: true, reason: "", policy: null };
   if (backendConfig.mode !== BACKEND_MODES.SUPABASE) return { ok: true, reason: "", policy };
-  if (!authState?.session?.accessToken) return { ok: false, reason: AUTH_DENIAL_REASONS.SIGN_IN_REQUIRED, policy };
-  if (authState.status === "CHECKING") return { ok: false, reason: AUTH_DENIAL_REASONS.AUTH_LOADING, policy };
+  if (["CHECKING", "RESTORING"].includes(authState?.status)) {
+    return { ok: false, reason: AUTH_DENIAL_REASONS.AUTH_LOADING, policy };
+  }
+  if (!authState?.session) return { ok: false, reason: AUTH_DENIAL_REASONS.SIGN_IN_REQUIRED, policy };
   if (authState.authorization?.ok === true && authState.authorization?.route === routeName) {
     return { ok: true, reason: "", policy, authorization: authState.authorization };
   }
@@ -192,10 +195,10 @@ export function renderStaffAuthGate({ routeName, authState, access, config } = {
   const policy = access?.policy || getStaffRoutePolicy(routeName);
   const backendConfig = getBackendConfig(config);
   const reason = access?.reason || authState?.authorization?.reason || AUTH_DENIAL_REASONS.SIGN_IN_REQUIRED;
-  const isSignedIn = Boolean(authState?.session?.accessToken);
+  const isSignedIn = Boolean(authState?.session);
   const locationId = normalizeText(authState?.locationId) || DEFAULT_LOCATION_ID;
   const workstationMode = getPreferredWorkstationMode(routeName, authState?.workstationMode);
-  const deviceCredential = normalizeText(authState?.deviceCredential);
+  const hasDeviceCredential = authState?.hasDeviceCredential === true;
   const message = authState?.error || DENIAL_MESSAGES[reason] || DENIAL_MESSAGES.PERMISSION_DENIED;
   const title = isSignedIn ? "Không đủ quyền truy cập" : "Đăng nhập nhân viên";
 
@@ -237,12 +240,9 @@ export function renderStaffAuthGate({ routeName, authState, access, config } = {
               `).join("")}
             </select>
           </label>
-          <label>
-            Device token
-            <input name="deviceCredential" value="${escapeAttr(deviceCredential)}" autocomplete="off" required />
-          </label>
           <button class="primary" type="submit">${isSignedIn ? "Kiểm tra lại quyền" : "Đăng nhập"}</button>
         </form>
+        <p class="muted auth-note">${hasDeviceCredential ? "Thiết bị đã có workstation identity được cấp bởi server." : "Thiết bị này chưa có workstation identity. Quản lý cần đăng ký thiết bị trước khi dùng màn hình vận hành."}</p>
         <p class="muted auth-note">External VNPAY/MoMo/ZaloPay payments are still local demo flows. Staff auth uses the public Supabase key only.</p>
       </div>
     </section>
@@ -251,135 +251,189 @@ export function renderStaffAuthGate({ routeName, authState, access, config } = {
 
 export function createSupabasePasswordAuthApi(options = {}) {
   const config = getBackendConfig(options.config);
+  const storage = options.storage || safeLocalStorage();
+  const deviceStorage = options.deviceStorage || safeLocalStorage();
   const fetchFn = options.fetch || globalThis.fetch;
-  const storage = options.storage || safeSessionStorage();
-  if (config.mode !== BACKEND_MODES.SUPABASE || typeof fetchFn !== "function") {
+  if (config.mode !== BACKEND_MODES.SUPABASE) {
     return {
       isAvailable: false,
       config,
-      readSession: () => readStoredAuthSession(storage),
+      getSessionInfo: async () => ({ ok: true, session: null }),
+      restoreSession: async () => ({ ok: true, session: null }),
       signInWithPassword: async () => ({ ok: false, reason: AUTH_DENIAL_REASONS.BACKEND_UNAVAILABLE }),
       authorize: async () => ({ ok: false, reason: AUTH_DENIAL_REASONS.BACKEND_UNAVAILABLE }),
       getStaffContext: async () => [],
-      logout: () => clearStoredAuthSession(storage)
+      registerWorkstationDevice: async () => ({ ok: false, reason: AUTH_DENIAL_REASONS.BACKEND_UNAVAILABLE }),
+      logout: async () => ({ ok: true }),
+      onAuthStateChange: () => ({ unsubscribe() {} })
     };
   }
 
-  async function request(path, { method = "POST", token = "", body = null } = {}) {
-    const response = await fetchFn(`${config.supabaseUrl}${path}`, {
-      method,
-      headers: {
-        apikey: config.supabasePublishableKey,
-        Authorization: token ? `Bearer ${token}` : `Bearer ${config.supabasePublishableKey}`,
-        "Content-Type": "application/json"
+  let client = options.client || null;
+  const getClient = async () => {
+    if (client) return client;
+    const createClient = await resolveSupabaseCreateClient(options.createClient);
+    client = createClient(config.supabaseUrl, config.supabasePublishableKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: false,
+        storageKey: AUTH_SESSION_KEY,
+        storage
       },
-      body: body ? JSON.stringify(body) : null
+      global: typeof fetchFn === "function" ? { fetch: fetchFn } : undefined
     });
-    const text = await response.text();
-    const payload = text ? JSON.parse(text) : null;
-    if (!response.ok) {
-      return {
-        ok: false,
-        status: response.status,
-        reason: payload?.msg || payload?.message || payload?.error_description || payload?.error || "REQUEST_FAILED",
-        payload
-      };
-    }
-    return { ok: true, status: response.status, payload };
+    return client;
+  };
+
+  async function currentSessionInfo() {
+    const activeClient = await getClient();
+    const { data, error } = await activeClient.auth.getSession();
+    if (error) return { ok: false, reason: error.message || AUTH_DENIAL_REASONS.BACKEND_UNAVAILABLE, session: null };
+    return { ok: true, session: normalizeAuthSession(data?.session) };
+  }
+
+  async function rpc(functionName, params) {
+    const activeClient = await getClient();
+    const { data, error } = await activeClient.rpc(functionName, params);
+    if (error) return { ok: false, reason: error.message || error.code || AUTH_DENIAL_REASONS.BACKEND_UNAVAILABLE, payload: data };
+    return { ok: true, payload: data };
   }
 
   return {
     isAvailable: true,
     config,
-    readSession: () => readStoredAuthSession(storage),
+    get client() {
+      return client;
+    },
+    getSessionInfo: currentSessionInfo,
+    restoreSession: currentSessionInfo,
     async signInWithPassword({ email, password } = {}) {
-      const result = await request("/auth/v1/token?grant_type=password", {
-        body: {
-          email: normalizeText(email),
-          password: String(password || "")
-        }
+      const activeClient = await getClient();
+      const { data, error } = await activeClient.auth.signInWithPassword({
+        email: normalizeText(email),
+        password: String(password || "")
       });
-      if (!result.ok) return result;
-      const session = normalizeAuthSession(result.payload);
-      if (!session.accessToken) return { ok: false, reason: "SESSION_MISSING" };
-      writeStoredAuthSession(storage, session);
+      if (error) return { ok: false, reason: error.message || AUTH_DENIAL_REASONS.SIGN_IN_REQUIRED };
+      const session = normalizeAuthSession(data?.session);
+      if (!session) return { ok: false, reason: "SESSION_MISSING" };
       return { ok: true, session };
     },
-    async authorize({ session, locationId, permission, workstationMode, deviceCredential, routeName } = {}) {
-      const token = session?.accessToken || readStoredAuthSession(storage)?.accessToken || "";
-      if (!token) return { ok: false, reason: AUTH_DENIAL_REASONS.SIGN_IN_REQUIRED, route: routeName };
-      const result = await request("/rest/v1/rpc/authorize_staff_access", {
-        token,
-        body: {
-          p_location_id: normalizeText(locationId),
-          p_permission_key: normalizeText(permission),
-          p_workstation_mode: normalizeWorkstationMode(workstationMode),
-          p_device_credential: normalizeText(deviceCredential)
-        }
+    async authorize({ locationId, permission, workstationMode, routeName } = {}) {
+      const sessionResult = await currentSessionInfo();
+      if (!sessionResult.session) return { ok: false, reason: AUTH_DENIAL_REASONS.SIGN_IN_REQUIRED, route: routeName };
+      const result = await rpc("authorize_staff_access", {
+        p_location_id: normalizeText(locationId),
+        p_permission_key: normalizeText(permission),
+        p_workstation_mode: normalizeWorkstationMode(workstationMode),
+        p_device_credential: readStoredDeviceCredential(deviceStorage)
       });
       if (!result.ok) return { ok: false, reason: result.reason || AUTH_DENIAL_REASONS.BACKEND_UNAVAILABLE, route: routeName };
       return normalizeAuthorizationResult(result.payload, routeName);
     },
-    async getStaffContext({ session, locationId, deviceCredential } = {}) {
-      const token = session?.accessToken || readStoredAuthSession(storage)?.accessToken || "";
-      if (!token) return [];
-      const result = await request("/rest/v1/rpc/get_my_staff_context", {
-        token,
-        body: {
-          p_location_id: normalizeText(locationId) || null,
-          p_device_credential: normalizeText(deviceCredential)
-        }
+    async getStaffContext({ locationId, workstationMode } = {}) {
+      const sessionResult = await currentSessionInfo();
+      if (!sessionResult.session) return [];
+      const result = await rpc("get_my_staff_context", {
+        p_location_id: normalizeText(locationId) || null,
+        p_workstation_mode: normalizeWorkstationMode(workstationMode),
+        p_device_credential: readStoredDeviceCredential(deviceStorage)
       });
       if (!result.ok) return [];
       return normalizeStaffContextRows(result.payload);
     },
-    logout() {
-      clearStoredAuthSession(storage);
+    async registerWorkstationDevice({ locationId, label, workstationMode, currentWorkstationMode } = {}) {
+      const result = await rpc("register_workstation_device", {
+        p_location_id: normalizeText(locationId),
+        p_label: normalizeText(label),
+        p_mode: normalizeWorkstationMode(workstationMode),
+        p_current_workstation_mode: normalizeWorkstationMode(currentWorkstationMode),
+        p_current_device_credential: readStoredDeviceCredential(deviceStorage)
+      });
+      if (!result.ok) return { ok: false, reason: result.reason };
+      const row = Array.isArray(result.payload) ? result.payload[0] : result.payload;
+      const deviceCredential = normalizeText(row?.device_credential || row?.deviceCredential);
+      if (row?.ok === true && deviceCredential) writeStoredDeviceCredential(deviceStorage, deviceCredential);
+      return {
+        ok: row?.ok === true,
+        reason: normalizeText(row?.reason),
+        deviceId: normalizeText(row?.device_id || row?.deviceId),
+        deviceCredential
+      };
+    },
+    async logout() {
+      const activeClient = await getClient();
+      const { error } = await activeClient.auth.signOut({ scope: "local" });
+      if (error) return { ok: false, reason: error.message || "LOGOUT_FAILED" };
+      return { ok: true };
+    },
+    onAuthStateChange(callback) {
+      let subscription = null;
+      let active = true;
+      getClient()
+        .then((activeClient) => {
+          if (!active) return;
+          const { data } = activeClient.auth.onAuthStateChange((event, session) => {
+            callback?.({ event, session: normalizeAuthSession(session) });
+          });
+          subscription = data?.subscription || null;
+        })
+        .catch(() => {
+          callback?.({ event: "AUTH_CLIENT_UNAVAILABLE", session: null });
+        });
+      return {
+        unsubscribe() {
+          active = false;
+          subscription?.unsubscribe?.();
+        }
+      };
     }
   };
 }
 
-export function normalizeAuthSession(payload = {}) {
-  return {
-    accessToken: normalizeText(payload.access_token || payload.accessToken),
-    refreshToken: normalizeText(payload.refresh_token || payload.refreshToken),
-    expiresAt: Number(payload.expires_at || payload.expiresAt || 0) || 0,
-    tokenType: normalizeText(payload.token_type || payload.tokenType) || "bearer",
-    userEmail: normalizeText(payload.user?.email || payload.userEmail)
-  };
-}
-
-export function readStoredAuthSession(storage = safeSessionStorage()) {
-  try {
-    const raw = storage?.getItem?.(AUTH_SESSION_KEY);
-    if (!raw) return null;
-    const session = normalizeAuthSession(JSON.parse(raw));
-    return session.accessToken ? session : null;
-  } catch {
-    return null;
+async function resolveSupabaseCreateClient(injectedCreateClient) {
+  if (typeof injectedCreateClient === "function") return injectedCreateClient;
+  if (typeof globalThis.supabase?.createClient === "function") return globalThis.supabase.createClient;
+  if (typeof document !== "undefined") {
+    const browserModule = await import(SUPABASE_BROWSER_ESM_URL);
+    if (typeof browserModule.createClient === "function") return browserModule.createClient;
   }
+  const module = await import("@supabase/supabase-js");
+  if (typeof module.createClient === "function") return module.createClient;
+  throw new Error("Supabase client is unavailable.");
 }
 
-export function writeStoredAuthSession(storage = safeSessionStorage(), session) {
-  const normalized = normalizeAuthSession(session);
-  if (!normalized.accessToken) return false;
-  storage?.setItem?.(AUTH_SESSION_KEY, JSON.stringify(normalized));
-  return true;
-}
-
-export function clearStoredAuthSession(storage = safeSessionStorage()) {
-  storage?.removeItem?.(AUTH_SESSION_KEY);
+export function normalizeAuthSession(payload = {}) {
+  if (!payload || typeof payload !== "object") return null;
+  const user = payload.user || {};
+  const userEmail = normalizeText(user.email || payload.userEmail);
+  const userId = normalizeText(user.id || payload.userId);
+  if (!userEmail && !userId) return null;
+  return {
+    userEmail,
+    userId
+  };
 }
 
 export function routeAuthorizationKey({ routeName, authState, policy } = {}) {
   return [
     routeName || "",
-    authState?.session?.accessToken || "",
     authState?.locationId || "",
-    authState?.deviceCredential || "",
     policy?.permission || "",
-    policy?.workstationMode || ""
+    policy?.workstationMode || "",
+    authState?.authVersion || 0
   ].join("|");
+}
+
+export function readStoredDeviceCredential(storage = safeLocalStorage()) {
+  return normalizeText(storage?.getItem?.(DEVICE_CREDENTIAL_KEY));
+}
+
+export function writeStoredDeviceCredential(storage = safeLocalStorage(), credential) {
+  const normalized = normalizeText(credential);
+  if (!normalized) return false;
+  storage?.setItem?.(DEVICE_CREDENTIAL_KEY, normalized);
+  return true;
 }
 
 function normalizeStringList(value) {
@@ -394,14 +448,6 @@ function normalizeWorkstationMode(value) {
 
 function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
-}
-
-function safeSessionStorage() {
-  try {
-    return globalThis.sessionStorage || null;
-  } catch {
-    return null;
-  }
 }
 
 function safeLocalStorage() {

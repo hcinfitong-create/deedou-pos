@@ -7,8 +7,9 @@ DD-008B introduces staff authentication and role-based access control while keep
 `src/shared/auth` provides a thin presentation/auth boundary:
 
 - Staff route policies for `#/cashier`, `#/staff`, `#/bar`, `#/kitchen`, `#/dessert`, and `#/admin`.
-- Minimal Supabase email/password login through public publishable configuration.
-- Current location, workstation mode, and device credential submission.
+- Supabase-managed email/password lifecycle through `@supabase/supabase-js`: sign-in, restore, auto-refresh, auth state changes, and local/current-session logout.
+- Current location and intended workstation mode presentation.
+- Opaque workstation identity storage after an authorized server-issued registration.
 - Login/denied/logout UI helpers.
 
 The public customer route `#/t/<token>` remains unauthenticated.
@@ -24,6 +25,10 @@ The app must not trust:
 - Local storage.
 - Client-submitted actor IDs.
 - JWT custom claims for staff role or permissions.
+
+The app must not copy Supabase `access_token` or `refresh_token` into DeeDou state or authorization cache keys. Browser storage for the Supabase session is owned by `supabase-js`.
+
+Workstation credentials are generated server-side, returned once at registration, and stored server-side only as SHA-256 hashes. The normal login form does not show or accept a visible device token.
 
 ## Role Permission Matrix
 
@@ -43,5 +48,6 @@ Role assignments are location-specific. Device/workstation mode can restrict acc
 ## Known Limitations
 
 - Business writes remain denied until DD-008C introduces authoritative command RPCs.
+- In `SUPABASE` mode, successful Auth/RBAC currently opens only a read-only/fail-closed staff surface until DD-008C. LOCAL_DEMO behavior remains unchanged.
 - Device credentials are bearer-style soft trust, not hardware attestation.
 - Staff invitation and full MFA/AAL2 UX are deferred to later backend work.

@@ -8,12 +8,14 @@ import {
   createInitialStaffAuthState,
   createSupabasePasswordAuthApi,
   DEFAULT_LOCATION_ID,
+  DEVICE_CREDENTIAL_KEY,
   evaluateStaffRouteAccess,
   getStaffRoutePolicy,
   isStaffRoute,
   normalizeAuthorizationResult,
   normalizeStaffContextRows,
   renderStaffAuthGate,
+  routeAuthorizationKey,
   STAFF_ROUTE_POLICIES,
   WORKSTATION_MODES
 } from "../src/shared/auth/index.js";
@@ -43,12 +45,12 @@ test("LOCAL_DEMO route access remains open while SUPABASE signed-out staff route
   });
   const access = evaluateStaffRouteAccess({ config: supabaseConfig(), routeName: "cashier", authState: supabaseState });
   assert.equal(access.ok, false);
-  assert.equal(access.reason, AUTH_DENIAL_REASONS.SIGN_IN_REQUIRED);
+  assert.equal(access.reason, AUTH_DENIAL_REASONS.AUTH_LOADING);
   assert.equal(evaluateStaffRouteAccess({ config: supabaseConfig(), routeName: "customer", authState: supabaseState }).ok, true);
 });
 
 test("SUPABASE route gate waits for the matching server authorization result", () => {
-  const session = { accessToken: "jwt-local-test" };
+  const session = { userEmail: "staff@example.invalid", userId: "auth-user" };
   const loading = evaluateStaffRouteAccess({
     config: supabaseConfig(),
     routeName: "kitchen",
@@ -112,63 +114,89 @@ test("staff context and auth result normalization preserve identity and deny mal
   });
 });
 
-test("Supabase password auth API uses public auth and RPC endpoints only", async () => {
+test("Supabase auth API delegates lifecycle to Supabase-managed client", async () => {
   const calls = [];
   const storage = memoryStorage();
+  const deviceStorage = memoryStorage();
+  deviceStorage.setItem(DEVICE_CREDENTIAL_KEY, "server-issued-device-credential");
+  const session = { user: { id: "auth-user", email: "cashier@example.invalid" } };
   const api = createSupabasePasswordAuthApi({
     config: supabaseConfig(),
     storage,
-    fetch: async (url, options) => {
-      calls.push({ url, options, body: JSON.parse(options.body || "{}") });
-      if (url.endsWith("/auth/v1/token?grant_type=password")) {
-        return jsonResponse({
-          access_token: "access-token",
-          refresh_token: "refresh-token",
-          expires_at: 123,
-          user: { email: "cashier@example.invalid" }
-        });
+    deviceStorage,
+    client: {
+      auth: {
+        getSession: async () => {
+          calls.push({ type: "getSession" });
+          return { data: { session } };
+        },
+        signInWithPassword: async (credentials) => {
+          calls.push({ type: "signInWithPassword", credentials });
+          return { data: { session } };
+        },
+        signOut: async (options) => {
+          calls.push({ type: "signOut", options });
+          return {};
+        },
+        onAuthStateChange: (callback) => {
+          calls.push({ type: "onAuthStateChange", callback: typeof callback });
+          return { data: { subscription: { unsubscribe() {} } } };
+        }
+      },
+      rpc: async (functionName, params) => {
+        calls.push({ type: "rpc", functionName, params });
+        if (functionName === "authorize_staff_access") {
+          return { data: [{ ok: true, reason: "", staff_profile_id: "staff-cashier", location_id: "deedou-demo", device_id: "dev-cashier", workstation_mode: "CASHIER" }] };
+        }
+        if (functionName === "get_my_staff_context") {
+          return { data: [{ staff_profile_id: "staff-cashier", display_name: "Cashier", active: true, location_id: "deedou-demo", roles: ["CASHIER"], permissions: ["payments.record"], device_id: "dev-cashier", workstation_mode: "CASHIER" }] };
+        }
+        return { data: [] };
       }
-      if (url.endsWith("/rest/v1/rpc/authorize_staff_access")) {
-        return jsonResponse([{ ok: true, reason: "", staff_profile_id: "staff-cashier", location_id: "deedou-demo", device_id: "dev-cashier", workstation_mode: "CASHIER" }]);
-      }
-      if (url.endsWith("/rest/v1/rpc/get_my_staff_context")) {
-        return jsonResponse([{ staff_profile_id: "staff-cashier", display_name: "Cashier", active: true, location_id: "deedou-demo", roles: ["CASHIER"], permissions: ["payments.record"], device_id: "dev-cashier", workstation_mode: "CASHIER" }]);
-      }
-      return jsonResponse({ message: "not found" }, false, 404);
     }
   });
 
   const signedIn = await api.signInWithPassword({ email: "cashier@example.invalid", password: "local-only" });
   assert.equal(signedIn.ok, true);
-  assert.equal(api.readSession().accessToken, "access-token");
+  assert.equal(signedIn.session.userEmail, "cashier@example.invalid");
+
+  const restored = await api.restoreSession();
+  assert.equal(restored.session.userId, "auth-user");
 
   const authorization = await api.authorize({
-    session: signedIn.session,
     locationId: DEFAULT_LOCATION_ID,
     permission: "payments.record",
     workstationMode: "CASHIER",
-    deviceCredential: "ci-cashier-device",
     routeName: "cashier"
   });
   assert.equal(authorization.ok, true);
   assert.equal(authorization.deviceId, "dev-cashier");
 
   const context = await api.getStaffContext({
-    session: signedIn.session,
     locationId: DEFAULT_LOCATION_ID,
-    deviceCredential: "ci-cashier-device"
+    workstationMode: "CASHIER"
   });
   assert.equal(context[0].staffProfileId, "staff-cashier");
 
-  assert.equal(calls[0].url, "https://deedou-demo.supabase.co/auth/v1/token?grant_type=password");
-  assert.equal(calls[1].url, "https://deedou-demo.supabase.co/rest/v1/rpc/authorize_staff_access");
-  assert.equal(calls[1].options.headers.Authorization, "Bearer access-token");
-  assert.deepEqual(calls[1].body, {
+  const logout = await api.logout();
+  assert.equal(logout.ok, true);
+
+  assert.deepEqual(calls.find((call) => call.type === "signInWithPassword").credentials, {
+    email: "cashier@example.invalid",
+    password: "local-only"
+  });
+  assert.deepEqual(calls.find((call) => call.functionName === "authorize_staff_access").params, {
     p_location_id: DEFAULT_LOCATION_ID,
     p_permission_key: "payments.record",
     p_workstation_mode: "CASHIER",
-    p_device_credential: "ci-cashier-device"
+    p_device_credential: "server-issued-device-credential"
   });
+  assert.deepEqual(calls.find((call) => call.functionName === "get_my_staff_context").params, {
+    p_location_id: DEFAULT_LOCATION_ID,
+    p_workstation_mode: "CASHIER",
+    p_device_credential: "server-issued-device-credential"
+  });
+  assert.deepEqual(calls.find((call) => call.type === "signOut").options, { scope: "local" });
 });
 
 test("auth gate renders escaped denial context and does not expose privileged page content", () => {
@@ -178,18 +206,46 @@ test("auth gate renders escaped denial context and does not expose privileged pa
     access: { ok: false, reason: "PERMISSION_DENIED", policy: getStaffRoutePolicy("admin") },
     authState: {
       status: "DENIED",
-      session: { accessToken: "token" },
+      session: { userEmail: "admin@example.invalid" },
       locationId: "<script>",
       workstationMode: "ADMIN",
-      deviceCredential: "\"token\"",
+      hasDeviceCredential: true,
       authorization: { ok: false, reason: "PERMISSION_DENIED" }
     }
   });
 
   assert.match(html, /Không đủ quyền truy cập/);
   assert.match(html, /&lt;script&gt;/);
-  assert.match(html, /&quot;token&quot;/);
+  assert.doesNotMatch(html, /Device token/);
+  assert.doesNotMatch(html, /name="deviceCredential"/);
   assert.doesNotMatch(html, /DeeDou POS setup/);
+});
+
+test("authorization cache keys never include JWTs or device bearer credentials", () => {
+  const key = routeAuthorizationKey({
+    routeName: "cashier",
+    authState: {
+      session: { accessToken: "jwt-secret", userEmail: "cashier@example.invalid" },
+      locationId: DEFAULT_LOCATION_ID,
+      deviceCredential: "device-secret",
+      authVersion: 7
+    },
+    policy: getStaffRoutePolicy("cashier")
+  });
+
+  assert.doesNotMatch(key, /jwt-secret/);
+  assert.doesNotMatch(key, /device-secret/);
+  assert.match(key, /cashier/);
+  assert.match(key, /payments\.record/);
+});
+
+test("authorized SUPABASE routes do not unlock legacy localStorage mutation handlers", () => {
+  assert.match(appSource, /if \(shouldRenderSupabaseReadOnly\(current\.name, staffAccess\)\) \{\s*bindSupabaseReadOnlyRoute\(current\.name\);/s);
+  assert.match(appSource, /if \(shouldRenderSupabaseReadOnly\(active, staffAccess\)\) return supabaseReadOnlyPage\(active\);/);
+  assert.match(appSource, /function saveState\(\) \{\s*if \(blockSupabaseLocalCommand\("STATE_SAVE"\)\)/s);
+  assert.match(appSource, /function saveProducts\(\) \{\s*if \(blockSupabaseLocalCommand\("MENU_SAVE"\)\)/s);
+  assert.match(appSource, /function saveCounterDraft\(\) \{\s*if \(blockSupabaseLocalCommand\("COUNTER_DRAFT"\)\)/s);
+  assert.match(appSource, /server command not available until DD-008C/);
 });
 
 test("browser source has no Supabase admin API or server secret exposure", () => {
@@ -201,6 +257,16 @@ test("browser source has no Supabase admin API or server secret exposure", () =>
   });
   assert.match(appSource, /shouldRenderStaffAuthGate\(current\.name, staffAccess\)/);
   assert.match(appSource, /return renderStaffAuthGate/);
+  assert.match(authSource, /resolveSupabaseCreateClient/);
+  assert.match(authSource, /@supabase\/supabase-js/);
+  assert.match(authSource, /signInWithPassword/);
+  assert.match(authSource, /getSession/);
+  assert.match(authSource, /autoRefreshToken:\s*true/);
+  assert.match(authSource, /onAuthStateChange/);
+  assert.match(authSource, /signOut\(\{\s*scope:\s*"local"\s*\}\)/);
+  assert.doesNotMatch(authSource, /accessToken|refreshToken/);
+  assert.match(appSource, /shouldRenderSupabaseReadOnly/);
+  assert.match(appSource, /server command not available until DD-008C/);
 });
 
 function supabaseConfig() {
@@ -208,14 +274,6 @@ function supabaseConfig() {
     mode: BACKEND_MODES.SUPABASE,
     supabaseUrl: "https://deedou-demo.supabase.co",
     supabasePublishableKey: "sb_publishable_demo_key"
-  };
-}
-
-function jsonResponse(payload, ok = true, status = 200) {
-  return {
-    ok,
-    status,
-    text: async () => JSON.stringify(payload)
   };
 }
 

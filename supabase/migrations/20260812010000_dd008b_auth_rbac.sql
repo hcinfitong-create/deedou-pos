@@ -192,8 +192,28 @@ set search_path = ''
 as $$
   select case
     when length(btrim(coalesce(p_device_credential, ''))) = 0 then ''
-    else md5('deedou-device-v1:' || p_device_credential)
+    else encode(digest(convert_to('deedou-device-v2:' || p_device_credential, 'utf8'), 'sha256'), 'hex')
   end
+$$;
+
+create or replace function public.generate_device_credential()
+returns text
+language sql
+volatile
+security definer
+set search_path = ''
+as $$
+  select rtrim(translate(encode(gen_random_bytes(32), 'base64'), '+/', '-_'), '=')
+$$;
+
+create or replace function public.generate_device_id()
+returns text
+language sql
+volatile
+security definer
+set search_path = ''
+as $$
+  select 'DEV-' || replace(gen_random_uuid()::text, '-', '')
 $$;
 
 create or replace function public.current_staff_id()
@@ -342,9 +362,8 @@ as $$
   limit 1
 $$;
 
-create or replace function public.authorize_staff_access(
+create or replace function public.resolve_staff_workstation_context(
   p_location_id text,
-  p_permission_key text,
   p_workstation_mode text default '',
   p_device_credential text default ''
 )
@@ -403,17 +422,65 @@ begin
     return;
   end if;
 
-  if public.workstation_mode_allows_permission(v_device_mode, p_permission_key) = false then
-    return query select false, 'DEVICE_MODE_DENIED', v_staff_id, p_location_id, v_device_id, v_device_mode;
+  return query select true, ''::text, v_staff_id, p_location_id, v_device_id, v_device_mode;
+end
+$$;
+
+create or replace function public.authorize_staff_access(
+  p_location_id text,
+  p_permission_key text,
+  p_workstation_mode text default '',
+  p_device_credential text default ''
+)
+returns table (
+  ok boolean,
+  reason text,
+  staff_profile_id text,
+  location_id text,
+  device_id text,
+  workstation_mode text
+)
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_context record;
+begin
+  select *
+  into v_context
+  from public.resolve_staff_workstation_context(p_location_id, p_workstation_mode, p_device_credential)
+  limit 1;
+
+  if v_context.ok is distinct from true then
+    return query select
+      false,
+      coalesce(v_context.reason, 'DEVICE_UNREGISTERED'),
+      coalesce(v_context.staff_profile_id, ''),
+      p_location_id,
+      coalesce(v_context.device_id, ''),
+      coalesce(v_context.workstation_mode, '');
     return;
   end if;
 
-  return query select true, ''::text, v_staff_id, p_location_id, v_device_id, v_device_mode;
+  if public.has_permission(p_location_id, p_permission_key) = false then
+    return query select false, 'PERMISSION_DENIED', v_context.staff_profile_id, p_location_id, v_context.device_id, v_context.workstation_mode;
+    return;
+  end if;
+
+  if public.workstation_mode_allows_permission(v_context.workstation_mode, p_permission_key) = false then
+    return query select false, 'DEVICE_MODE_DENIED', v_context.staff_profile_id, p_location_id, v_context.device_id, v_context.workstation_mode;
+    return;
+  end if;
+
+  return query select true, ''::text, v_context.staff_profile_id, p_location_id, v_context.device_id, v_context.workstation_mode;
 end
 $$;
 
 create or replace function public.get_my_staff_context(
   p_location_id text default null,
+  p_workstation_mode text default '',
   p_device_credential text default ''
 )
 returns table (
@@ -471,6 +538,11 @@ as $$
   where public.staff_profiles.auth_user_id = auth.uid()
     and public.staff_profiles.active = true
     and (p_location_id is null or public.locations.id = p_location_id)
+    and exists (
+      select 1
+      from public.resolve_staff_workstation_context(public.locations.id, p_workstation_mode, p_device_credential) as workstation_context
+      where workstation_context.ok = true
+    )
   group by
     public.staff_profiles.id,
     public.staff_profiles.display_name,
@@ -481,7 +553,11 @@ as $$
     public.workstation_devices.mode
 $$;
 
-create or replace function public.list_staff_menu_products(p_location_id text)
+create or replace function public.list_staff_menu_products(
+  p_location_id text,
+  p_workstation_mode text default '',
+  p_device_credential text default ''
+)
 returns table (
   id text,
   location_id text,
@@ -510,10 +586,18 @@ as $$
     public.products.available
   from public.products
   where public.products.location_id = p_location_id
-    and public.has_permission(p_location_id, 'menu.read')
+    and exists (
+      select 1
+      from public.authorize_staff_access(p_location_id, 'menu.read', p_workstation_mode, p_device_credential) as authz
+      where authz.ok = true
+    )
 $$;
 
-create or replace function public.list_staff_tables(p_location_id text)
+create or replace function public.list_staff_tables(
+  p_location_id text,
+  p_workstation_mode text default '',
+  p_device_credential text default ''
+)
 returns table (
   id text,
   location_id text,
@@ -536,11 +620,19 @@ as $$
     public.physical_tables.display_order
   from public.physical_tables
   where public.physical_tables.location_id = p_location_id
-    and public.has_permission(p_location_id, 'tables.read')
+    and exists (
+      select 1
+      from public.authorize_staff_access(p_location_id, 'tables.read', p_workstation_mode, p_device_credential) as authz
+      where authz.ok = true
+    )
   order by public.physical_tables.display_order, public.physical_tables.code
 $$;
 
-create or replace function public.list_staff_orders(p_location_id text)
+create or replace function public.list_staff_orders(
+  p_location_id text,
+  p_workstation_mode text default '',
+  p_device_credential text default ''
+)
 returns table (
   id text,
   location_id text,
@@ -573,11 +665,19 @@ as $$
     public.orders.payment_status
   from public.orders
   where public.orders.location_id = p_location_id
-    and public.has_permission(p_location_id, 'orders.read')
+    and exists (
+      select 1
+      from public.authorize_staff_access(p_location_id, 'orders.read', p_workstation_mode, p_device_credential) as authz
+      where authz.ok = true
+    )
   order by public.orders.created_at desc, public.orders.id
 $$;
 
-create or replace function public.list_staff_service_requests(p_location_id text)
+create or replace function public.list_staff_service_requests(
+  p_location_id text,
+  p_workstation_mode text default '',
+  p_device_credential text default ''
+)
 returns table (
   id text,
   location_id text,
@@ -604,11 +704,19 @@ as $$
     public.service_requests.created_at
   from public.service_requests
   where public.service_requests.location_id = p_location_id
-    and public.has_permission(p_location_id, 'service_requests.read')
+    and exists (
+      select 1
+      from public.authorize_staff_access(p_location_id, 'service_requests.read', p_workstation_mode, p_device_credential) as authz
+      where authz.ok = true
+    )
   order by public.service_requests.created_at desc, public.service_requests.id
 $$;
 
-create or replace function public.list_staff_payment_transactions(p_location_id text)
+create or replace function public.list_staff_payment_transactions(
+  p_location_id text,
+  p_workstation_mode text default '',
+  p_device_credential text default ''
+)
 returns table (
   id text,
   location_id text,
@@ -641,7 +749,11 @@ as $$
     public.payment_transactions.created_at
   from public.payment_transactions
   where public.payment_transactions.location_id = p_location_id
-    and public.has_permission(p_location_id, 'payments.read')
+    and exists (
+      select 1
+      from public.authorize_staff_access(p_location_id, 'payments.read', p_workstation_mode, p_device_credential) as authz
+      where authz.ok = true
+    )
   order by public.payment_transactions.created_at desc, public.payment_transactions.id
 $$;
 
@@ -674,37 +786,34 @@ security definer
 set search_path = ''
 as $$
 declare
-  v_staff_id text := public.current_staff_id();
-  v_device_id text := '';
-  v_device_mode text := '';
+  v_context record;
 begin
-  select resolved_device.device_id, resolved_device.mode
-  into v_device_id, v_device_mode
-  from public.resolve_registered_device(p_location_id, p_device_credential) as resolved_device
+  select *
+  into v_context
+  from public.resolve_staff_workstation_context(p_location_id, p_workstation_mode, p_device_credential) as workstation_context
   limit 1;
 
   return query select
     auth.uid(),
-    coalesce(v_staff_id, ''),
+    coalesce(v_context.staff_profile_id, public.current_staff_id(), ''),
     p_location_id,
-    coalesce(v_device_id, ''),
-    case
-      when length(btrim(coalesce(p_workstation_mode, ''))) > 0 then p_workstation_mode
-      else coalesce(v_device_mode, '')
-    end,
+    coalesce(v_context.device_id, ''),
+    coalesce(v_context.workstation_mode, ''),
     p_command,
     p_target_type,
     p_target_id,
     p_outcome,
     length(btrim(coalesce(p_client_actor_id, ''))) > 0
-      and p_client_actor_id <> coalesce(v_staff_id, ''),
+      and p_client_actor_id <> coalesce(v_context.staff_profile_id, public.current_staff_id(), ''),
     now();
 end
 $$;
 
 create or replace function public.can_assign_staff_location(
   p_target_staff_profile_id text,
-  p_location_id text
+  p_location_id text,
+  p_current_workstation_mode text default '',
+  p_current_device_credential text default ''
 )
 returns table (
   ok boolean,
@@ -717,7 +826,18 @@ set search_path = ''
 as $$
 declare
   v_actor_staff_id text := public.current_staff_id();
+  v_authz record;
 begin
+  select *
+  into v_authz
+  from public.authorize_staff_access(p_location_id, 'staff.manage', p_current_workstation_mode, p_current_device_credential)
+  limit 1;
+
+  if v_authz.ok is distinct from true then
+    return query select false, coalesce(v_authz.reason, 'PERMISSION_DENIED');
+    return;
+  end if;
+
   if v_actor_staff_id is null or public.is_active_staff() = false then
     return query select false, 'STAFF_INACTIVE';
     return;
@@ -725,11 +845,6 @@ begin
 
   if p_target_staff_profile_id = v_actor_staff_id then
     return query select false, 'SELF_ESCALATION_BLOCKED';
-    return;
-  end if;
-
-  if public.has_permission(p_location_id, 'staff.manage') = false then
-    return query select false, 'LOCATION_DENIED';
     return;
   end if;
 
@@ -748,7 +863,9 @@ $$;
 
 create or replace function public.assign_staff_to_location(
   p_target_staff_profile_id text,
-  p_location_id text
+  p_location_id text,
+  p_current_workstation_mode text default '',
+  p_current_device_credential text default ''
 )
 returns table (
   ok boolean,
@@ -764,7 +881,7 @@ declare
 begin
   select *
   into v_allowed
-  from public.can_assign_staff_location(p_target_staff_profile_id, p_location_id)
+  from public.can_assign_staff_location(p_target_staff_profile_id, p_location_id, p_current_workstation_mode, p_current_device_credential)
   limit 1;
 
   if v_allowed.ok is distinct from true then
@@ -785,7 +902,9 @@ $$;
 create or replace function public.can_grant_role_at_location(
   p_target_staff_profile_id text,
   p_location_id text,
-  p_role_id text
+  p_role_id text,
+  p_current_workstation_mode text default '',
+  p_current_device_credential text default ''
 )
 returns table (
   ok boolean,
@@ -800,7 +919,18 @@ as $$
 declare
   v_actor_staff_id text := public.current_staff_id();
   v_missing_permissions text[] := array[]::text[];
+  v_authz record;
 begin
+  select *
+  into v_authz
+  from public.authorize_staff_access(p_location_id, 'staff.manage', p_current_workstation_mode, p_current_device_credential)
+  limit 1;
+
+  if v_authz.ok is distinct from true then
+    return query select false, coalesce(v_authz.reason, 'PERMISSION_DENIED'), v_missing_permissions;
+    return;
+  end if;
+
   if v_actor_staff_id is null or public.is_active_staff() = false then
     return query select false, 'STAFF_INACTIVE', v_missing_permissions;
     return;
@@ -808,11 +938,6 @@ begin
 
   if p_target_staff_profile_id = v_actor_staff_id then
     return query select false, 'SELF_ESCALATION_BLOCKED', v_missing_permissions;
-    return;
-  end if;
-
-  if public.has_permission(p_location_id, 'staff.manage') = false then
-    return query select false, 'LOCATION_DENIED', v_missing_permissions;
     return;
   end if;
 
@@ -856,7 +981,9 @@ $$;
 create or replace function public.assign_staff_role_at_location(
   p_target_staff_profile_id text,
   p_location_id text,
-  p_role_id text
+  p_role_id text,
+  p_current_workstation_mode text default '',
+  p_current_device_credential text default ''
 )
 returns table (
   ok boolean,
@@ -872,7 +999,7 @@ declare
 begin
   select *
   into v_allowed
-  from public.can_grant_role_at_location(p_target_staff_profile_id, p_location_id, p_role_id)
+  from public.can_grant_role_at_location(p_target_staff_profile_id, p_location_id, p_role_id, p_current_workstation_mode, p_current_device_credential)
   limit 1;
 
   if v_allowed.ok is distinct from true then
@@ -894,13 +1021,14 @@ create or replace function public.register_workstation_device(
   p_location_id text,
   p_label text,
   p_mode text,
-  p_device_credential text,
-  p_device_id text default ''
+  p_current_workstation_mode text default '',
+  p_current_device_credential text default ''
 )
 returns table (
   ok boolean,
   reason text,
-  device_id text
+  device_id text,
+  device_credential text
 )
 language plpgsql
 volatile
@@ -909,27 +1037,27 @@ set search_path = ''
 as $$
 declare
   v_device_id text;
+  v_device_credential text;
+  v_authz record;
 begin
-  if public.has_permission(p_location_id, 'devices.manage') = false then
-    return query select false, 'PERMISSION_DENIED', ''::text;
+  select *
+  into v_authz
+  from public.authorize_staff_access(p_location_id, 'devices.manage', p_current_workstation_mode, p_current_device_credential)
+  limit 1;
+
+  if v_authz.ok is distinct from true then
+    return query select false, coalesce(v_authz.reason, 'PERMISSION_DENIED'), ''::text, ''::text;
     return;
   end if;
 
   if public.workstation_mode_allows_permission(p_mode, 'orders.read') = false
      and p_mode <> 'ADMIN' then
-    return query select false, 'DEVICE_MODE_DENIED', ''::text;
+    return query select false, 'DEVICE_MODE_DENIED', ''::text, ''::text;
     return;
   end if;
 
-  if length(btrim(coalesce(p_device_credential, ''))) < 20 then
-    return query select false, 'DEVICE_CREDENTIAL_WEAK', ''::text;
-    return;
-  end if;
-
-  v_device_id := coalesce(
-    nullif(btrim(p_device_id), ''),
-    'DEV-' || substring(public.hash_device_credential(p_device_credential) from 1 for 24)
-  );
+  v_device_id := public.generate_device_id();
+  v_device_credential := public.generate_device_credential();
 
   insert into public.workstation_devices (
     id,
@@ -946,26 +1074,21 @@ begin
     p_location_id,
     coalesce(nullif(btrim(p_label), ''), p_mode),
     p_mode,
-    public.hash_device_credential(p_device_credential),
+    public.hash_device_credential(v_device_credential),
     true,
     public.current_staff_id(),
     null
-  )
-  on conflict (credential_hash) do update
-  set location_id = excluded.location_id,
-      label = excluded.label,
-      mode = excluded.mode,
-      active = true,
-      registered_by_staff_profile_id = excluded.registered_by_staff_profile_id,
-      revoked_at = null;
+  );
 
-  return query select true, '', v_device_id;
+  return query select true, '', v_device_id, v_device_credential;
 end
 $$;
 
 create or replace function public.revoke_workstation_device(
   p_location_id text,
-  p_device_id text
+  p_device_id text,
+  p_current_workstation_mode text default '',
+  p_current_device_credential text default ''
 )
 returns table (
   ok boolean,
@@ -976,9 +1099,16 @@ volatile
 security definer
 set search_path = ''
 as $$
+declare
+  v_authz record;
 begin
-  if public.has_permission(p_location_id, 'devices.manage') = false then
-    return query select false, 'PERMISSION_DENIED';
+  select *
+  into v_authz
+  from public.authorize_staff_access(p_location_id, 'devices.manage', p_current_workstation_mode, p_current_device_credential)
+  limit 1;
+
+  if v_authz.ok is distinct from true then
+    return query select false, coalesce(v_authz.reason, 'PERMISSION_DENIED');
     return;
   end if;
 
@@ -999,26 +1129,29 @@ end
 $$;
 
 revoke all on function public.hash_device_credential(text) from public;
+revoke all on function public.generate_device_credential() from public;
+revoke all on function public.generate_device_id() from public;
 revoke all on function public.current_staff_id() from public;
 revoke all on function public.is_active_staff() from public;
 revoke all on function public.has_location_access(text) from public;
 revoke all on function public.has_permission(text, text) from public;
 revoke all on function public.workstation_mode_allows_permission(text, text) from public;
 revoke all on function public.resolve_registered_device(text, text) from public;
+revoke all on function public.resolve_staff_workstation_context(text, text, text) from public;
 revoke all on function public.authorize_staff_access(text, text, text, text) from public;
-revoke all on function public.get_my_staff_context(text, text) from public;
-revoke all on function public.list_staff_menu_products(text) from public;
-revoke all on function public.list_staff_tables(text) from public;
-revoke all on function public.list_staff_orders(text) from public;
-revoke all on function public.list_staff_service_requests(text) from public;
-revoke all on function public.list_staff_payment_transactions(text) from public;
+revoke all on function public.get_my_staff_context(text, text, text) from public;
+revoke all on function public.list_staff_menu_products(text, text, text) from public;
+revoke all on function public.list_staff_tables(text, text, text) from public;
+revoke all on function public.list_staff_orders(text, text, text) from public;
+revoke all on function public.list_staff_service_requests(text, text, text) from public;
+revoke all on function public.list_staff_payment_transactions(text, text, text) from public;
 revoke all on function public.prepare_audit_context(text, text, text, text, text, text, text, text) from public;
-revoke all on function public.can_assign_staff_location(text, text) from public;
-revoke all on function public.assign_staff_to_location(text, text) from public;
-revoke all on function public.can_grant_role_at_location(text, text, text) from public;
-revoke all on function public.assign_staff_role_at_location(text, text, text) from public;
+revoke all on function public.can_assign_staff_location(text, text, text, text) from public;
+revoke all on function public.assign_staff_to_location(text, text, text, text) from public;
+revoke all on function public.can_grant_role_at_location(text, text, text, text, text) from public;
+revoke all on function public.assign_staff_role_at_location(text, text, text, text, text) from public;
 revoke all on function public.register_workstation_device(text, text, text, text, text) from public;
-revoke all on function public.revoke_workstation_device(text, text) from public;
+revoke all on function public.revoke_workstation_device(text, text, text, text) from public;
 
 grant execute on function public.authorize_staff_access(text, text, text, text) to anon, authenticated;
 grant execute on function public.current_staff_id() to authenticated;
@@ -1026,17 +1159,16 @@ grant execute on function public.is_active_staff() to authenticated;
 grant execute on function public.has_location_access(text) to authenticated;
 grant execute on function public.has_permission(text, text) to authenticated;
 grant execute on function public.workstation_mode_allows_permission(text, text) to authenticated;
-grant execute on function public.resolve_registered_device(text, text) to authenticated;
-grant execute on function public.get_my_staff_context(text, text) to authenticated;
-grant execute on function public.list_staff_menu_products(text) to authenticated;
-grant execute on function public.list_staff_tables(text) to authenticated;
-grant execute on function public.list_staff_orders(text) to authenticated;
-grant execute on function public.list_staff_service_requests(text) to authenticated;
-grant execute on function public.list_staff_payment_transactions(text) to authenticated;
+grant execute on function public.get_my_staff_context(text, text, text) to authenticated;
+grant execute on function public.list_staff_menu_products(text, text, text) to authenticated;
+grant execute on function public.list_staff_tables(text, text, text) to authenticated;
+grant execute on function public.list_staff_orders(text, text, text) to authenticated;
+grant execute on function public.list_staff_service_requests(text, text, text) to authenticated;
+grant execute on function public.list_staff_payment_transactions(text, text, text) to authenticated;
 grant execute on function public.prepare_audit_context(text, text, text, text, text, text, text, text) to authenticated;
-grant execute on function public.can_assign_staff_location(text, text) to authenticated;
-grant execute on function public.assign_staff_to_location(text, text) to authenticated;
-grant execute on function public.can_grant_role_at_location(text, text, text) to authenticated;
-grant execute on function public.assign_staff_role_at_location(text, text, text) to authenticated;
+grant execute on function public.can_assign_staff_location(text, text, text, text) to authenticated;
+grant execute on function public.assign_staff_to_location(text, text, text, text) to authenticated;
+grant execute on function public.can_grant_role_at_location(text, text, text, text, text) to authenticated;
+grant execute on function public.assign_staff_role_at_location(text, text, text, text, text) to authenticated;
 grant execute on function public.register_workstation_device(text, text, text, text, text) to authenticated;
-grant execute on function public.revoke_workstation_device(text, text) to authenticated;
+grant execute on function public.revoke_workstation_device(text, text, text, text) to authenticated;

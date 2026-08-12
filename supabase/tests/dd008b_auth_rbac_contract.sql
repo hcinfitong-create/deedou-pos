@@ -166,7 +166,7 @@ end $$;
 
 do $$
 begin
-  perform public.register_workstation_device('auth-location-a', 'Anon device', 'CASHIER', 'ci-anon-device-token-0001', 'dev-anon');
+  perform public.register_workstation_device('auth-location-a', 'Anon device', 'CASHIER', 'ADMIN', 'ci-admin-a-device-token-0001');
   raise exception 'expected anonymous device registration to be denied';
 exception
   when insufficient_privilege then null;
@@ -249,14 +249,14 @@ begin
   end if;
 
   select count(*) into v_tables
-  from public.list_staff_tables('auth-location-a')
+  from public.list_staff_tables('auth-location-a', 'CASHIER', 'ci-cashier-a-device-token-0001')
   where id = 'auth-table-a01';
   if v_tables <> 1 then
     raise exception 'expected authorized cashier location read, got %', v_tables;
   end if;
 
   select count(*) into v_tables
-  from public.list_staff_tables('auth-location-b');
+  from public.list_staff_tables('auth-location-b', 'CASHIER', 'ci-cashier-a-device-token-0001');
   if v_tables <> 0 then
     raise exception 'expected cashier location B read denied, got %', v_tables;
   end if;
@@ -372,7 +372,7 @@ begin
   from public.prepare_audit_context(
     'auth-location-a',
     'ci-admin-a-device-token-0001',
-    'ADMIN',
+    'CASHIER',
     'STAFF_ASSIGN',
     'staff_profile',
     'staff-cashier-a',
@@ -381,12 +381,14 @@ begin
   )
   limit 1;
 
-  if v_context.staff_profile_id <> 'staff-manager-a' or v_context.client_actor_ignored <> true then
-    raise exception 'expected audit context to ignore client actor spoof, got %/%', v_context.staff_profile_id, v_context.client_actor_ignored;
+  if v_context.staff_profile_id <> 'staff-manager-a'
+     or v_context.workstation_mode <> 'ADMIN'
+     or v_context.client_actor_ignored <> true then
+    raise exception 'expected audit context to ignore client mode/actor spoof, got %/%/%', v_context.staff_profile_id, v_context.workstation_mode, v_context.client_actor_ignored;
   end if;
 
   select * into v_can_grant
-  from public.can_grant_role_at_location('staff-cashier-a', 'auth-location-a', 'KITCHEN')
+  from public.can_grant_role_at_location('staff-cashier-a', 'auth-location-a', 'KITCHEN', 'ADMIN', 'ci-admin-a-device-token-0001')
   limit 1;
   if v_can_grant.ok <> false
      or v_can_grant.reason <> 'PRIVILEGE_CEILING_EXCEEDED'
@@ -395,28 +397,28 @@ begin
   end if;
 
   select * into v_can_grant
-  from public.can_grant_role_at_location('staff-manager-a', 'auth-location-a', 'CASHIER')
+  from public.can_grant_role_at_location('staff-manager-a', 'auth-location-a', 'CASHIER', 'ADMIN', 'ci-admin-a-device-token-0001')
   limit 1;
   if v_can_grant.ok <> false or v_can_grant.reason <> 'SELF_ESCALATION_BLOCKED' then
     raise exception 'expected self-escalation role grant blocked, got %/%', v_can_grant.ok, v_can_grant.reason;
   end if;
 
   select * into v_can_location
-  from public.can_assign_staff_location('staff-cashier-a', 'auth-location-b')
+  from public.can_assign_staff_location('staff-cashier-a', 'auth-location-b', 'ADMIN', 'ci-admin-a-device-token-0001')
   limit 1;
   if v_can_location.ok <> false or v_can_location.reason <> 'LOCATION_DENIED' then
     raise exception 'expected target-location escalation blocked, got %/%', v_can_location.ok, v_can_location.reason;
   end if;
 
   select * into v_can_location
-  from public.can_assign_staff_location('staff-manager-a', 'auth-location-a')
+  from public.can_assign_staff_location('staff-manager-a', 'auth-location-a', 'ADMIN', 'ci-admin-a-device-token-0001')
   limit 1;
   if v_can_location.ok <> false or v_can_location.reason <> 'SELF_ESCALATION_BLOCKED' then
     raise exception 'expected self location assignment blocked, got %/%', v_can_location.ok, v_can_location.reason;
   end if;
 
   select count(*) into v_count
-  from public.list_staff_payment_transactions('auth-location-a')
+  from public.list_staff_payment_transactions('auth-location-a', 'ADMIN', 'ci-admin-a-device-token-0001')
   where id = 'auth-pay-a';
   if v_count <> 1 then
     raise exception 'expected payment ledger read for manager A, got %', v_count;
@@ -434,14 +436,14 @@ declare
   v_tables integer;
 begin
   select count(*) into v_tables
-  from public.list_staff_tables('auth-location-b')
+  from public.list_staff_tables('auth-location-b', 'CASHIER', 'ci-cashier-b-device-token-0001')
   where id = 'auth-table-b01';
   if v_tables <> 1 then
     raise exception 'expected manager B location B access, got %', v_tables;
   end if;
 
   select count(*) into v_tables
-  from public.list_staff_tables('auth-location-a');
+  from public.list_staff_tables('auth-location-a', 'CASHIER', 'ci-cashier-b-device-token-0001');
   if v_tables <> 0 then
     raise exception 'expected same role different location to deny location A, got %', v_tables;
   end if;
@@ -476,16 +478,18 @@ begin
     'auth-location-a',
     'Temporary Admin Device',
     'ADMIN',
-    'ci-owner-new-admin-device-token-0001',
-    'dev-owner-new-admin'
+    'ADMIN',
+    'ci-admin-a-device-token-0001'
   )
   limit 1;
-  if v_registered.ok <> true or v_registered.device_id <> 'dev-owner-new-admin' then
-    raise exception 'expected owner to register device, got %/%', v_registered.ok, v_registered.reason;
+  if v_registered.ok <> true
+     or length(v_registered.device_id) < 12
+     or length(v_registered.device_credential) < 32 then
+    raise exception 'expected owner to register server-issued device, got %/%/%/%', v_registered.ok, v_registered.reason, v_registered.device_id, length(v_registered.device_credential);
   end if;
 
   select * into v_revoked
-  from public.revoke_workstation_device('auth-location-a', 'dev-revoked-a')
+  from public.revoke_workstation_device('auth-location-a', 'dev-revoked-a', 'ADMIN', 'ci-admin-a-device-token-0001')
   limit 1;
   if v_revoked.ok <> true then
     raise exception 'expected owner to revoke device, got %', v_revoked.reason;
