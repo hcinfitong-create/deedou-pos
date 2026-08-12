@@ -401,11 +401,6 @@ begin
     return;
   end if;
 
-  if public.has_permission(p_location_id, p_permission_key) = false then
-    return query select false, 'PERMISSION_DENIED', v_staff_id, p_location_id, ''::text, ''::text;
-    return;
-  end if;
-
   select resolved_device.device_id, resolved_device.mode
   into v_device_id, v_device_mode
   from public.resolve_registered_device(p_location_id, p_device_credential) as resolved_device
