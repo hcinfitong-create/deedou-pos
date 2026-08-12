@@ -43,6 +43,8 @@ const adminClient = createClient(apiUrl, serviceRoleKey, {
   }
 });
 
+await waitForAuthReady();
+
 const users = {
   owner: await createRuntimeUser("owner"),
   cashier: await createRuntimeUser("cashier"),
@@ -252,12 +254,12 @@ console.log("real password login/JWT, restore, refresh, local logout, server-iss
 async function createRuntimeUser(kind) {
   const email = `${runId}_${kind}@example.invalid`;
   const password = secret(`${kind}-password`);
-  const { data, error } = await adminClient.auth.admin.createUser({
+  const { data, error } = await retryAuthCall(() => adminClient.auth.admin.createUser({
     email,
     password,
     email_confirm: true,
     user_metadata: { dd008b_runtime: runId, kind }
-  });
+  }), `create runtime auth user ${kind}`);
   if (error || !data.user?.id) throw new Error(`Failed to create runtime auth user ${kind}: ${error?.message || "missing user"}`);
   return { id: data.user.id, email, password, storage: memoryStorage() };
 }
@@ -279,6 +281,32 @@ function createRuntimeClient(storage) {
       storage
     }
   });
+}
+
+async function waitForAuthReady() {
+  await retryAuthCall(
+    () => adminClient.auth.admin.listUsers({ page: 1, perPage: 1 }),
+    "wait for local Supabase Auth"
+  );
+}
+
+async function retryAuthCall(operation, label, attempts = 20) {
+  let lastErrorMessage = "unknown auth error";
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const result = await operation();
+      if (!result.error) return result;
+      lastErrorMessage = result.error.message || lastErrorMessage;
+    } catch (error) {
+      lastErrorMessage = error?.message || String(error);
+    }
+    await sleep(Math.min(500 * attempt, 3000));
+  }
+  throw new Error(`Failed to ${label}: ${lastErrorMessage}`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function rpc(client, functionName, params) {
