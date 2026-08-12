@@ -8,7 +8,8 @@ This map adapts the requested feature-module architecture to the current static 
 - Hash routes in `index.html`.
 - State stored in `localStorage`.
 - Cross-tab sync through `BroadcastChannel`.
-- No backend, database, auth, migrations, React, Next.js, or build system yet.
+- Supabase/PostgreSQL foundation files exist for DD-008A, but runtime remains local-first in `LOCAL_DEMO`.
+- No auth, authoritative backend mutations, React, Next.js, or build system yet.
 
 ## Dependency Direction
 
@@ -410,9 +411,38 @@ Must not own:
 - Menu-specific filtering rules.
 - Payment rules.
 
+### shared/backend
+
+Owns:
+
+- Backend mode/config normalization.
+- Public/publishable Supabase client setup boundary.
+- Connection state and backend health probe helpers.
+- Supabase local development documentation.
+
+Current location:
+
+- `src/shared/backend/index.js`
+- `src/shared/backend/config.js`
+- `src/shared/backend/connection.js`
+
+Does not own:
+
+- Order/payment/table-session/KDS/service-request business rules.
+- Staff login, RBAC, PIN, or permission UI.
+- Authoritative writes or production realtime behavior.
+- Service role keys, database credentials, JWT secrets, or private keys.
+
+Notes:
+
+- Default mode is `LOCAL_DEMO`.
+- `SUPABASE` mode must be explicitly configured with public URL plus publishable key.
+- Connection state must not report `ONLINE` from browser network status alone.
+- DD-008B/C/D own auth, command authorization, realtime, and reconnect workflows.
+
 ### shared/db
 
-Not created yet. No database exists.
+Supabase/PostgreSQL schema foundation exists under `supabase/`, but it is not runtime-authoritative yet.
 
 ### shared/auth
 
@@ -428,7 +458,13 @@ Not created yet. This repository is JavaScript, not TypeScript. Introduce this w
 
 ## Server Infrastructure
 
-Not created yet. There is no server runtime in the current repository.
+DD-008A adds committed Supabase local development infrastructure:
+
+- `supabase/config.toml`
+- `supabase/migrations/20260812000000_dd008a_backend_foundation.sql`
+- `supabase/seed.sql`
+
+The schema prepares tables, RLS, public-safe projections, idempotency support, and append-oriented audit/payment foundations. No server runtime or production deployment is added.
 
 Future candidates:
 
@@ -455,6 +491,7 @@ Current:
 - `src/features/station-workflow/index.js`
 - `src/features/table-session/index.js`
 - `src/features/payments/index.js`
+- `src/shared/backend/index.js`
 
 ## Protected Modules By Common Task
 
