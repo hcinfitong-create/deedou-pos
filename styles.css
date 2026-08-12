@@ -896,6 +896,25 @@ textarea {
   font: inherit;
 }
 
+.compact-payment-entry {
+  max-width: 260px;
+}
+
+.refund-entry {
+  display: inline-grid;
+  gap: 4px;
+  min-width: 116px;
+}
+
+.refund-entry input {
+  width: 116px;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 8px;
+  font: inherit;
+}
+
 .table-payment-actions {
   padding-top: 2px;
 }

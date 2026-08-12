@@ -66,6 +66,7 @@ import {
   canVoidOrder,
   createEqualSplitPlan,
   normalizePaymentLedger,
+  parsePositiveIntegerVnd,
   paymentHistoryView,
   paymentSummaryForOrder,
   paymentSummaryForOrders,
@@ -499,7 +500,7 @@ function cashierPage() {
   };
   const selectedOrders = tableOrders(activeCashierTable);
   const paymentReport = paymentSummaryForOrders(state.orders);
-  const paidOrders = state.orders.filter((order) => ["PAID", "VOIDED", "REFUNDED"].includes(order.status) || (order.paymentStatus && order.paymentStatus !== "UNPAID")).slice(-6).reverse();
+  const paidOrders = state.orders.filter((order) => ["PAID", "VOIDED", "REFUNDED", "PARTIALLY_REFUNDED"].includes(order.status)).slice(-6).reverse();
   return `
     <section class="page admin-page">
       <div class="ops-head">
@@ -540,7 +541,7 @@ function cashierPage() {
       <section class="panel section-pad">
         <h2>Order đã đóng gần đây</h2>
         <div class="cashier-orders compact-list">
-          ${paidOrders.map((order) => `<div class="status-pill"><span>${order.orderNo} - ${orderLocationLabel(order)} - ${order.status}</span><strong>${formatMoney(order.total)}</strong></div>`).join("") || `<div class="empty">Chưa có lịch sử đóng order.</div>`}
+          ${paidOrders.map(renderClosedPaymentOrder).join("") || `<div class="empty">Chưa có lịch sử đóng order.</div>`}
         </div>
       </section>
       <section class="panel section-pad">
@@ -614,6 +615,7 @@ function renderTableSessionControls(model) {
 }
 
 function tablePaymentPanel(table, orders) {
+  if (table.code === "TAKEAWAY") return "";
   const summary = paymentSummaryForOrders(orders);
   const splitPlan = pendingSplitPlan?.scope === "TABLE" && pendingSplitPlan.tableCode === table.code ? pendingSplitPlan : null;
   const disabled = summary.outstandingVnd <= 0 ? "disabled" : "";
@@ -634,8 +636,8 @@ function tablePaymentPanel(table, orders) {
         <div class="metric"><span class="muted">Còn phải thu</span><strong>${formatMoney(summary.outstandingVnd)}</strong></div>
       </div>
       <label class="payment-entry-row">
-        <span class="muted">Số tiền thu / hoàn</span>
-        <input data-payment-amount="${escapeAttr(table.code)}" value="${summary.outstandingVnd || summary.refundableVnd || 0}" inputmode="numeric" />
+        <span class="muted">Số tiền thu</span>
+        <input data-payment-amount="${escapeAttr(table.code)}" value="${summary.outstandingVnd || 0}" inputmode="numeric" />
       </label>
       ${splitPlan ? renderSplitPlan(splitPlan) : ""}
       <div class="split-actions table-payment-actions">
@@ -648,7 +650,6 @@ function tablePaymentPanel(table, orders) {
         <button class="ghost" data-table-pay="${table.code}" data-method="ZALOPAY" ${disabled}>ZaloPay</button>
         <button class="ghost" data-table-split="${table.code}" ${disabled}>Split 2</button>
         <button class="danger" data-table-void="${table.code}">Void bill</button>
-        ${summary.refundableVnd > 0 ? `<button class="danger" data-table-refund="${table.code}">Refund</button>` : ""}
       </div>
       ${orders.map(renderPaymentHistory).join("")}
     </section>
@@ -675,21 +676,72 @@ function renderSplitPlan(plan) {
   `;
 }
 
-function renderPaymentHistory(order) {
+function renderClosedPaymentOrder(order) {
+  const payment = paymentSummaryForOrder(order);
+  return `
+    <article class="order-card cashier-card compact-batch closed-payment-card">
+      <div class="order-head">
+        <strong>${order.orderNo} - ${orderLocationLabel(order)}</strong>
+        <span class="station">${order.status}</span>
+      </div>
+      <div class="batch-meta">
+        <span>Thanh toán ${payment.paymentStatus}</span>
+        <strong>${formatMoney(payment.effectivePaidVnd)}</strong>
+        <strong>Net ${formatMoney(payment.netCollectedVnd)}</strong>
+      </div>
+      ${renderPaymentHistory(order, { allowVoid: false })}
+    </article>
+  `;
+}
+
+function renderOrderPaymentControls(order) {
+  const summary = paymentSummaryForOrder(order);
+  if (summary.outstandingVnd <= 0) return "";
+  const key = orderPaymentAmountKey(order.id);
+  return `
+    <div class="payment-history order-payment-panel">
+      <strong>Thanh toán riêng ${order.orderNo}</strong>
+      <label class="payment-entry-row compact-payment-entry">
+        <span class="muted">Số tiền thu</span>
+        <input data-payment-amount="${escapeAttr(key)}" value="${summary.outstandingVnd}" inputmode="numeric" />
+      </label>
+      <div class="split-actions compact-actions">
+        <button class="primary compact" data-pay="${escapeAttr(order.id)}" data-method="CASH">Cash</button>
+        <button class="primary compact" data-pay="${escapeAttr(order.id)}" data-method="CARD_EXTERNAL_TERMINAL">Card</button>
+        <button class="ghost compact" data-pay="${escapeAttr(order.id)}" data-method="BANK_TRANSFER">Bank</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderPaymentHistory(order, options = {}) {
   const history = paymentHistoryView(order);
   if (!history.length) return "";
+  const summary = paymentSummaryForOrder(order);
+  const allowVoid = options.allowVoid !== false && isOpenOrderStatus(order.status);
   return `
     <div class="payment-history">
       <strong>Lịch sử thanh toán ${order.orderNo}</strong>
       ${history.map((transaction) => {
-        const canVoidPayment = transaction.type === "PAYMENT" && !transaction.voided && transaction.refundedVnd === 0;
-        const canRefundPayment = transaction.type === "PAYMENT" && !transaction.voided && transaction.refundableVnd > 0;
+        const canVoidPayment = allowVoid && transaction.type === "PAYMENT" && !transaction.voided && transaction.refundedVnd === 0;
+        const canRefundPayment = transaction.type === "PAYMENT"
+          && !transaction.voided
+          && transaction.refundableVnd > 0
+          && summary.billTotalVnd > 0
+          && summary.effectivePaidVnd >= summary.billTotalVnd;
+        const refundKey = refundPaymentAmountKey(order.id, transaction.id);
         return `
           <div class="status-pill">
             <span>${transaction.type} ${transaction.method} ${formatMoney(transaction.amountVnd)}${transaction.voided ? " - voided" : ""}${transaction.refundedVnd ? ` - refunded ${formatMoney(transaction.refundedVnd)}` : ""}</span>
             <span class="split-actions compact-actions">
               ${canVoidPayment ? `<button class="ghost compact" data-payment-void="${escapeAttr(order.id)}" data-payment-id="${escapeAttr(transaction.id)}">Void payment</button>` : ""}
-              ${canRefundPayment ? `<button class="danger compact" data-payment-refund="${escapeAttr(order.id)}" data-payment-id="${escapeAttr(transaction.id)}">Refund</button>` : ""}
+              ${canRefundPayment ? `
+                <label class="refund-entry">
+                  <span class="muted">Số tiền</span>
+                  <input data-payment-amount="${escapeAttr(refundKey)}" value="${transaction.refundableVnd}" inputmode="numeric" />
+                </label>
+                <button class="danger compact" data-payment-refund="${escapeAttr(order.id)}" data-payment-id="${escapeAttr(transaction.id)}">Refund</button>
+              ` : ""}
             </span>
           </div>
         `;
@@ -806,6 +858,8 @@ function cashierOrderCard(order) {
   const progress = getServiceProgress(order);
   const payment = paymentSummaryForOrder(order);
   const billableItems = order.items.map((line, index) => ({ line, index })).filter((item) => item.line.isBillable);
+  const context = normalizeOrderServiceContext(order);
+  const isolatedPayment = context.fulfillmentType === FULFILLMENT_TYPES.TAKEAWAY;
   return `
     <article class="order-card cashier-card compact-batch">
       <div class="order-head">
@@ -842,6 +896,8 @@ function cashierOrderCard(order) {
           <button class="danger compact" data-void="${order.id}">Hủy lượt gọi</button>
         </div>
       `}
+      ${isolatedPayment ? renderOrderPaymentControls(order) : ""}
+      ${isolatedPayment ? renderPaymentHistory(order) : ""}
     </article>
   `;
 }
@@ -1101,12 +1157,10 @@ function bindCashier() {
   document.querySelectorAll("[data-void-cancel]").forEach((button) => button.addEventListener("click", cancelVoidOrder));
   document.querySelectorAll("[data-bill-dec]").forEach((button) => button.addEventListener("click", () => adjustBillQty(button.dataset.billDec, button.dataset.lineIndex, -1)));
   document.querySelectorAll("[data-bill-inc]").forEach((button) => button.addEventListener("click", () => adjustBillQty(button.dataset.billInc, button.dataset.lineIndex, 1)));
-  document.querySelectorAll("[data-refund]").forEach((button) => button.addEventListener("click", () => refundOrder(button.dataset.refund)));
   document.querySelectorAll("[data-table-pay]").forEach((button) => button.addEventListener("click", () => payTable(button.dataset.tablePay, button.dataset.method)));
   document.querySelectorAll("[data-table-split]").forEach((button) => button.addEventListener("click", () => splitTableInTwo(button.dataset.tableSplit)));
   document.querySelectorAll("[data-table-prebill]").forEach((button) => button.addEventListener("click", () => preBillTable(button.dataset.tablePrebill)));
   document.querySelectorAll("[data-table-void]").forEach((button) => button.addEventListener("click", () => voidTable(button.dataset.tableVoid)));
-  document.querySelectorAll("[data-table-refund]").forEach((button) => button.addEventListener("click", () => refundTable(button.dataset.tableRefund)));
   document.querySelectorAll("[data-split-share-pay]").forEach((button) => button.addEventListener("click", () => paySplitShare(button.dataset.splitSharePay, button.dataset.method)));
   document.querySelectorAll("[data-payment-void]").forEach((button) => button.addEventListener("click", () => voidPayment(button.dataset.paymentVoid, button.dataset.paymentId)));
   document.querySelectorAll("[data-payment-refund]").forEach((button) => button.addEventListener("click", () => refundPayment(button.dataset.paymentRefund, button.dataset.paymentId)));
@@ -1600,16 +1654,14 @@ function isOrderServiceComplete(order = {}) {
 }
 
 function parseMoneyInput(value) {
-  const normalized = String(value || "").replace(/[^\d]/g, "");
-  const amount = Number(normalized || 0);
-  return Number.isFinite(amount) ? Math.max(0, Math.round(amount)) : 0;
+  return parsePositiveIntegerVnd(value);
 }
 
-function readPaymentAmount(tableCode, maxAmount) {
-  const max = Math.max(0, Math.round(Number(maxAmount) || 0));
+function readPaymentAmount(amountKey, maxAmount) {
+  const max = parsePositiveIntegerVnd(maxAmount);
   if (!max) return null;
   const input = [...document.querySelectorAll("[data-payment-amount]")]
-    .find((node) => node.dataset.paymentAmount === tableCode);
+    .find((node) => node.dataset.paymentAmount === amountKey);
   const rawAmount = input?.value || String(max);
   const amount = parseMoneyInput(rawAmount);
   if (!amount || amount > max) {
@@ -1617,6 +1669,14 @@ function readPaymentAmount(tableCode, maxAmount) {
     return null;
   }
   return amount;
+}
+
+function orderPaymentAmountKey(orderId) {
+  return `ORDER-${orderId}`;
+}
+
+function refundPaymentAmountKey(orderId, paymentId) {
+  return `REFUND-${orderId}-${paymentId}`;
 }
 
 function nextTenderGroupId(scope) {
@@ -1671,11 +1731,21 @@ function payableTableOrders(tableCode) {
 }
 
 function payTable(tableCode, method) {
+  if (tableCode === "TAKEAWAY") {
+    reportPaymentFailure("TABLE_PAYMENT_FAILED", tableCode, { reason: "TAKEAWAY_REQUIRES_ORDER_PAYMENT" });
+    saveState();
+    render();
+    return;
+  }
   const orders = payableTableOrders(tableCode);
   const balance = paymentSummaryForOrders(orders).outstandingVnd;
   if (!balance) return;
   const amount = readPaymentAmount(tableCode, balance);
-  if (!amount) return;
+  if (!amount) {
+    saveState();
+    render();
+    return;
+  }
   const result = applyTablePayment(tableCode, method, amount, { tenderGroupId: nextTenderGroupId(`TABLE-${tableCode}`) });
   if (!result.ok) reportPaymentFailure("TABLE_PAYMENT_FAILED", tableCode, result);
   else pendingSplitPlan = null;
@@ -1684,6 +1754,7 @@ function payTable(tableCode, method) {
 }
 
 function applyTablePayment(tableCode, method, amountVnd, options = {}) {
+  if (tableCode === "TAKEAWAY") return { ok: false, reason: "TAKEAWAY_REQUIRES_ORDER_PAYMENT" };
   if (tableCode !== "TAKEAWAY") {
     const repair = currentTableSessionRepair();
     if (repair.ok === false) return { ok: false, reason: repair.reason || "UNSAFE_TABLE_SESSION_GRAPH" };
@@ -1711,6 +1782,7 @@ function applyTablePayment(tableCode, method, amountVnd, options = {}) {
 }
 
 function splitTableInTwo(tableCode) {
+  if (tableCode === "TAKEAWAY") return;
   if (tableCode !== "TAKEAWAY" && blockUnsafeTableSessionMutation("TABLE_SPLIT_BLOCKED", tableCode)) return;
   const orders = payableTableOrders(tableCode);
   const balance = paymentSummaryForOrders(orders).outstandingVnd;
@@ -1798,41 +1870,17 @@ function voidTable(tableCode) {
   render();
 }
 
-function refundTable(tableCode) {
-  if (tableCode !== "TAKEAWAY" && blockUnsafeTableSessionMutation("TABLE_REFUND_BLOCKED", tableCode)) return;
-  const entries = refundableEntries(tableOrders(tableCode));
-  const refundable = entries.reduce((sum, entry) => sum + entry.transaction.refundableVnd, 0);
-  if (!refundable) return;
-  const amount = readPaymentAmount(tableCode, refundable);
-  if (!amount) return;
-  let remaining = amount;
-  entries.forEach(({ order, transaction }) => {
-    if (remaining <= 0) return;
-    const refund = Math.min(transaction.refundableVnd, remaining);
-    const result = recordRefund(order, {
-      id: nextPaymentId("REF", order, `-${transaction.id}`),
-      paymentId: transaction.id,
-      amountVnd: refund,
-      now: new Date().toISOString(),
-      note: `Table ${tableCode} refund`,
-      serviceComplete: isOrderServiceComplete(order)
-    });
-    if (result.ok) remaining -= refund;
-  });
-  reconcileOpenTableSessions("table refund");
-  cashierNotice = `Đã ghi nhận refund ${formatMoney(amount)}.`;
-  audit("TABLE_REFUND", `${tableCode} ${formatMoney(amount)}`);
-  saveState();
-  render();
-}
-
 function payOrder(orderId, method) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   const balance = orderBalance(order);
   if (!balance) return;
-  const amount = readPaymentAmount(activeCashierTable, balance);
-  if (!amount) return;
+  const amount = readPaymentAmount(orderPaymentAmountKey(order.id), balance);
+  if (!amount) {
+    saveState();
+    render();
+    return;
+  }
   const result = applyOrderPayment(order, method, amount, { note: "Order payment" });
   if (!result.ok) {
     reportPaymentFailure("PAYMENT_FAILED", order.orderNo, result);
@@ -1919,35 +1967,6 @@ function voidOrder(orderId, reason = "") {
   render();
 }
 
-function refundOrder(orderId) {
-  const order = state.orders.find((item) => item.id === orderId);
-  if (!order) return;
-  const entries = refundableEntries([order]);
-  const refundable = entries.reduce((sum, entry) => sum + entry.transaction.refundableVnd, 0);
-  if (!refundable) return;
-  const amount = readPaymentAmount(activeCashierTable, refundable);
-  if (!amount) return;
-  let remaining = amount;
-  entries.forEach((entry) => {
-    if (remaining <= 0) return;
-    const refund = Math.min(entry.transaction.refundableVnd, remaining);
-    const result = recordRefund(entry.order, {
-      id: nextPaymentId("REF", entry.order, `-${entry.transaction.id}`),
-      paymentId: entry.transaction.id,
-      amountVnd: refund,
-      now: new Date().toISOString(),
-      note: "Order refund",
-      serviceComplete: isOrderServiceComplete(entry.order)
-    });
-    if (result.ok) remaining -= refund;
-  });
-  reconcileOpenTableSessions("order refund");
-  cashierNotice = `Đã ghi nhận refund ${formatMoney(amount)} cho ${order.orderNo}.`;
-  audit("REFUND", `${order.orderNo} ${formatMoney(amount)}`);
-  saveState();
-  render();
-}
-
 function voidPayment(orderId, paymentId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
@@ -1973,8 +1992,12 @@ function refundPayment(orderId, paymentId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   const max = remainingRefundableForPayment(order, paymentId);
-  const amount = readPaymentAmount(activeCashierTable, max);
-  if (!amount) return;
+  const amount = readPaymentAmount(refundPaymentAmountKey(order.id, paymentId), max);
+  if (!amount) {
+    saveState();
+    render();
+    return;
+  }
   const result = recordRefund(order, {
     id: nextPaymentId("REF", order, `-${paymentId}`),
     paymentId,
@@ -1992,16 +2015,6 @@ function refundPayment(orderId, paymentId) {
   }
   saveState();
   render();
-}
-
-function refundableEntries(orders) {
-  return orders.flatMap((order) => {
-    const summary = paymentSummaryForOrder(order);
-    if (summary.effectivePaidVnd < summary.billTotalVnd || summary.billTotalVnd <= 0) return [];
-    return paymentHistoryView(order)
-      .filter((transaction) => transaction.type === "PAYMENT" && !transaction.voided && transaction.refundableVnd > 0)
-      .map((transaction) => ({ order, transaction }));
-  });
 }
 
 function updateOrderStatus(orderId, status) {

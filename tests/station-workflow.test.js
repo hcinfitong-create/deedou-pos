@@ -52,6 +52,22 @@ test("station tickets exclude pending QR orders until staff accepts them", () =>
   assert.deepEqual(selectStationTickets([acceptedOrder], "BAR", stations).map((ticket) => ticket.orderId), ["pending-qr"]);
 });
 
+test("partially refunded legacy orders never enter KDS", () => {
+  const refundedOrder = {
+    id: "partial-refund",
+    orderNo: "D01-0010",
+    status: "PARTIALLY_REFUNDED",
+    table: "A01",
+    serviceMode: "TABLE_SERVICE",
+    fulfillmentType: "DINE_IN",
+    items: [
+      { lineId: "coffee", station: "BAR_COFFEE", qty: 1, nameVi: "Ca phe", nameEn: "Coffee", prepStatus: "QUEUED", status: "QUEUED" }
+    ]
+  };
+
+  assert.deepEqual(selectStationTickets([refundedOrder], "BAR", stations), []);
+});
+
 test("held lines are excluded from KDS until fired and age starts at fire time", () => {
   const order = {
     id: "held-order",

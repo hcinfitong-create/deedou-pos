@@ -8,6 +8,7 @@ import {
   createEqualSplitPlan,
   normalizePaymentLedger,
   PAYMENT_STATUSES,
+  parsePositiveIntegerVnd,
   paymentHistoryView,
   paymentSummaryForOrder,
   paymentSummaryForOrders,
@@ -48,7 +49,7 @@ test("normalizes legacy payments, refunds, and paidVnd-only orders into ledger t
     total: 100000,
     payments: [
       { id: "PAY-1", method: "cash", amountVnd: 100000, status: "SUCCEEDED", paidAt: "2026-08-12T01:00:00.000Z" },
-      { id: "REF-1", method: "REFUND", amountVnd: -25000, status: "SUCCEEDED", relatedPaymentId: "PAY-1" }
+      { id: "REF-1", method: "REFUND", amountVnd: 25000, status: "SUCCEEDED", relatedPaymentId: "PAY-1" }
     ]
   });
 
@@ -61,6 +62,40 @@ test("normalizes legacy payments, refunds, and paidVnd-only orders into ledger t
   assert.equal(paidOnly.length, 1);
   assert.equal(paidOnly[0].id, "LEGACY-PAID-O-paid");
   assert.equal(paidOnly[0].amountVnd, 50000);
+});
+
+test("positive integer VND parsing rejects malformed UI money inputs without sanitizing", () => {
+  const invalidValues = [100.5, "100.5", "-100", "abc100", NaN, Infinity, 0, -100, "0", "", "00100"];
+
+  invalidValues.forEach((value) => {
+    assert.equal(parsePositiveIntegerVnd(value), null, String(value));
+  });
+
+  assert.equal(parsePositiveIntegerVnd(100), 100);
+  assert.equal(parsePositiveIntegerVnd("100"), 100);
+  assert.equal(parsePositiveIntegerVnd(" 100 "), 100);
+});
+
+test("payment domain rejects malformed integer VND amounts without mutation", () => {
+  const invalidValues = [100.5, "100.5", "-100", "abc100", NaN, Infinity, 0, -100];
+
+  invalidValues.forEach((amountVnd, index) => {
+    const target = order();
+    const before = structuredClone(target);
+    const result = recordPayment(target, { id: `PAY-BAD-${index}`, amountVnd });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "INVALID_PAYMENT_AMOUNT");
+    assert.deepEqual(target, before);
+  });
+
+  const split = createEqualSplitPlan("100.5", 2);
+  assert.equal(split.ok, false);
+  assert.equal(split.reason, "INVALID_SPLIT_AMOUNT");
+
+  const allocation = allocateTableTender([order()], { amountVnd: "abc100" });
+  assert.equal(allocation.ok, false);
+  assert.equal(allocation.reason, "INVALID_TENDER_AMOUNT");
 });
 
 test("partial and mixed tender payments derive status and paidVnd from ledger", () => {
@@ -149,11 +184,100 @@ test("refunds target original payments, remain positive, and prevent over-refund
   assert.equal(target.payments.at(-1).amountVnd, 25000);
   assert.equal(target.payments.at(-1).relatedPaymentId, "PAY-1");
   assert.equal(remainingRefundableForPayment(target, "PAY-1"), 45000);
+  assert.equal(remainingRefundableForPayment(target, "PAY-2"), 30000);
   assert.equal(paymentSummaryForOrder(target).paymentStatus, PAYMENT_STATUSES.PARTIALLY_REFUNDED);
 
   const tooMuch = recordRefund(target, { id: "REF-2", paymentId: "PAY-1", amountVnd: 45001 });
   assert.equal(tooMuch.ok, false);
   assert.equal(tooMuch.reason, "REFUND_EXCEEDS_REMAINING");
+});
+
+test("refund command rejects unsettled unknown voided duplicate and over-cumulative cases", () => {
+  const unsettled = order({ status: "SERVED", total: 100000 });
+  recordPayment(unsettled, { id: "PAY-PARTIAL", amountVnd: 50000 });
+  const unsettledRefund = recordRefund(unsettled, { id: "REF-PARTIAL", paymentId: "PAY-PARTIAL", amountVnd: 10000 });
+  assert.equal(unsettledRefund.ok, false);
+  assert.equal(unsettledRefund.reason, "BILL_NOT_SETTLED");
+
+  const target = order({ status: "SERVED", total: 100000 });
+  recordPayment(target, { id: "PAY-1", amountVnd: 100000 });
+
+  const unknown = recordRefund(target, { id: "REF-UNKNOWN", paymentId: "PAY-NOPE", amountVnd: 10000 });
+  assert.equal(unknown.ok, false);
+  assert.equal(unknown.reason, "PAYMENT_NOT_FOUND");
+
+  const firstRefund = recordRefund(target, { id: "REF-1", paymentId: "PAY-1", amountVnd: 40000 });
+  assert.equal(firstRefund.ok, true);
+  const beforeDuplicate = structuredClone(target);
+  const duplicate = recordRefund(target, { id: "REF-1", paymentId: "PAY-1", amountVnd: 60000 });
+  assert.equal(duplicate.ok, true);
+  assert.equal(duplicate.noOp, true);
+  assert.deepEqual(target, beforeDuplicate);
+
+  const excessive = recordRefund(target, { id: "REF-2", paymentId: "PAY-1", amountVnd: 60001 });
+  assert.equal(excessive.ok, false);
+  assert.equal(excessive.reason, "REFUND_EXCEEDS_REMAINING");
+
+  const voided = order({ status: "SERVED", total: 100000 });
+  recordPayment(voided, { id: "PAY-VOID", amountVnd: 50000 });
+  recordPayment(voided, { id: "PAY-KEEP", amountVnd: 50000 });
+  recordPaymentVoid(voided, { id: "VOID-1", paymentId: "PAY-VOID" });
+  recordPayment(voided, { id: "PAY-REPLACE", amountVnd: 50000 });
+  const voidedRefund = recordRefund(voided, { id: "REF-VOIDED", paymentId: "PAY-VOID", amountVnd: 10000 });
+  assert.equal(voidedRefund.ok, false);
+  assert.equal(voidedRefund.reason, "PAYMENT_VOIDED");
+});
+
+test("payment void twice and payment void after refund are blocked without mutation", () => {
+  const voidTwice = order({ status: "SERVED", total: 100000 });
+  recordPayment(voidTwice, { id: "PAY-1", amountVnd: 100000 });
+  recordPaymentVoid(voidTwice, { id: "VOID-1", paymentId: "PAY-1" });
+  const beforeSecondVoid = structuredClone(voidTwice);
+  const secondVoid = recordPaymentVoid(voidTwice, { id: "VOID-2", paymentId: "PAY-1" });
+  assert.equal(secondVoid.ok, false);
+  assert.equal(secondVoid.reason, "PAYMENT_ALREADY_VOIDED");
+  assert.deepEqual(voidTwice, beforeSecondVoid);
+
+  const refunded = order({ status: "SERVED", total: 100000 });
+  recordPayment(refunded, { id: "PAY-2", amountVnd: 100000 });
+  recordRefund(refunded, { id: "REF-1", paymentId: "PAY-2", amountVnd: 10000 });
+  const beforeVoidAfterRefund = structuredClone(refunded);
+  const voidAfterRefund = recordPaymentVoid(refunded, { id: "VOID-REF", paymentId: "PAY-2" });
+  assert.equal(voidAfterRefund.ok, false);
+  assert.equal(voidAfterRefund.reason, "PAYMENT_ALREADY_REFUNDED");
+  assert.deepEqual(refunded, beforeVoidAfterRefund);
+});
+
+test("takeaway orders are independent checks without shared table allocation or sessions", () => {
+  const first = order({
+    id: "TAKE-1",
+    orderNo: "D01-TA1",
+    total: 100000,
+    serviceMode: "COUNTER_SERVICE",
+    fulfillmentType: "TAKEAWAY",
+    table: "",
+    tableSessionId: ""
+  });
+  const second = order({
+    id: "TAKE-2",
+    orderNo: "D01-TA2",
+    total: 200000,
+    serviceMode: "COUNTER_SERVICE",
+    fulfillmentType: "TAKEAWAY",
+    table: "",
+    tableSessionId: ""
+  });
+  const beforeSecond = structuredClone(second);
+
+  const result = recordPayment(first, { id: "PAY-TAKE-1", method: "CASH", amountVnd: 100000, tenderGroupId: "ORDER-TAKE-1" });
+
+  assert.equal(result.ok, true);
+  assert.equal(paymentSummaryForOrder(first).paymentStatus, PAYMENT_STATUSES.PAID);
+  assert.deepEqual(second, beforeSecond);
+  assert.equal(first.tableSessionId, "");
+  assert.equal(second.tableSessionId, "");
+  assert.equal(first.payments[0].tenderGroupId, "ORDER-TAKE-1");
+  assert.equal(second.payments.length, 0);
 });
 
 test("equal split plans divide odd VND without recording payments", () => {
@@ -180,6 +304,80 @@ test("table tender allocation pays current orders oldest first without mutation"
     { orderId: "O2", orderNo: "D01-0002", amountVnd: 50000 }
   ]);
   assert.deepEqual([first, second], before);
+});
+
+test("table tender payments share one tenderGroupId across allocated orders", () => {
+  const first = order({ id: "O1", orderNo: "D01-0001", total: 100000, createdAt: "2026-08-12T01:00:00.000Z" });
+  const second = order({ id: "O2", orderNo: "D01-0002", total: 200000, createdAt: "2026-08-12T01:05:00.000Z" });
+  const allocation = allocateTableTender([first, second], { amountVnd: 250000, tenderGroupId: "TG-TABLE-A01" });
+
+  allocation.allocations.forEach((entry) => {
+    const target = [first, second].find((item) => item.id === entry.orderId);
+    recordPayment(target, { id: `PAY-${entry.orderId}`, amountVnd: entry.amountVnd, tenderGroupId: allocation.tenderGroupId });
+  });
+
+  assert.equal(first.payments[0].tenderGroupId, "TG-TABLE-A01");
+  assert.equal(second.payments[0].tenderGroupId, "TG-TABLE-A01");
+  assert.equal(first.payments[0].amountVnd, 100000);
+  assert.equal(second.payments[0].amountVnd, 150000);
+});
+
+test("paying a current table session order leaves previous closed-session and unrelated orders untouched", () => {
+  const previousClosed = order({ id: "OLD", status: "PAID", tableSessionId: "TS-old", total: 100000, payments: [{ id: "PAY-OLD", amountVnd: 100000 }] });
+  const current = order({ id: "NEW", status: "SERVED", tableSessionId: "TS-new", total: 100000 });
+  const counter = order({ id: "COUNTER", status: "SERVED", serviceMode: "COUNTER_SERVICE", fulfillmentType: "DINE_IN", table: "", tableSessionId: "", total: 50000 });
+  const takeaway = order({ id: "TAKE", status: "SERVED", serviceMode: "COUNTER_SERVICE", fulfillmentType: "TAKEAWAY", table: "", tableSessionId: "", total: 50000 });
+  const before = structuredClone({ previousClosed, counter, takeaway });
+
+  recordPayment(current, { id: "PAY-NEW", amountVnd: 100000, tenderGroupId: "TG-CURRENT" });
+
+  assert.deepEqual(previousClosed, before.previousClosed);
+  assert.deepEqual(counter, before.counter);
+  assert.deepEqual(takeaway, before.takeaway);
+  assert.equal(current.payments.length, 1);
+});
+
+test("malformed legacy payment normalization drops unsafe amounts instead of coercing them", () => {
+  const transactions = normalizePaymentLedger({
+    id: "LEGACY-BAD",
+    paidVnd: "100.5",
+    payments: [
+      { id: "BAD-DECIMAL", amountVnd: "100.5" },
+      { id: "BAD-NEGATIVE", amountVnd: "-100" },
+      { id: "BAD-TEXT", amountVnd: "abc100" },
+      { id: "BAD-NAN", amountVnd: NaN },
+      { id: "GOOD", amountVnd: "100", method: "CASH" },
+      { id: "GOOD-REF", type: "REFUND", amountVnd: "25", relatedPaymentId: "GOOD" }
+    ]
+  });
+
+  assert.deepEqual(transactions.map((transaction) => [transaction.id, transaction.type, transaction.amountVnd]), [
+    ["GOOD", "PAYMENT", 100],
+    ["GOOD-REF", "REFUND", 25]
+  ]);
+});
+
+test("closed paid order can refund a specific payment without reopening operational context", () => {
+  const target = order({
+    status: "PAID",
+    total: 100000,
+    table: "A01",
+    tableSessionId: "TS-closed",
+    payments: [{ id: "PAY-1", type: "PAYMENT", method: "CASH", amountVnd: 100000, status: "SUCCEEDED" }]
+  });
+
+  const partial = recordRefund(target, { id: "REF-PARTIAL", paymentId: "PAY-1", amountVnd: 40000, serviceComplete: true });
+  assert.equal(partial.ok, true);
+  assert.equal(target.status, "PAID");
+  assert.equal(target.tableSessionId, "TS-closed");
+  assert.equal(target.payments.at(-1).relatedPaymentId, "PAY-1");
+  assert.equal(paymentSummaryForOrder(target).paymentStatus, PAYMENT_STATUSES.PARTIALLY_REFUNDED);
+
+  const full = recordRefund(target, { id: "REF-FULL", paymentId: "PAY-1", amountVnd: 60000, serviceComplete: true });
+  assert.equal(full.ok, true);
+  assert.equal(target.status, "REFUNDED");
+  assert.equal(target.tableSessionId, "TS-closed");
+  assert.equal(paymentSummaryForOrder(target).paymentStatus, PAYMENT_STATUSES.REFUNDED);
 });
 
 test("table payment summaries distinguish bill, paid, refunds, net, and outstanding", () => {

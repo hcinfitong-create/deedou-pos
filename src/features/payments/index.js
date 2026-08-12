@@ -42,6 +42,17 @@ export function normalizePaymentMethod(method) {
   return aliases[key] || key || PAYMENT_METHODS.CASH;
 }
 
+export function parsePositiveIntegerVnd(value) {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value > 0 ? value : null;
+  }
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!/^[1-9]\d*$/.test(trimmed)) return null;
+  const amount = Number(trimmed);
+  return Number.isSafeInteger(amount) && amount > 0 ? amount : null;
+}
+
 export function normalizePaymentLedger(input = {}, options = {}) {
   const source = Array.isArray(input) ? { payments: input } : input || {};
   const rawPayments = Array.isArray(source.payments) ? source.payments : [];
@@ -360,11 +371,9 @@ function normalizePaymentTransaction(record = {}, context = {}) {
   const rawStatus = String(record.status || PAYMENT_TRANSACTION_STATUS).trim().toUpperCase();
   if (rawStatus && rawStatus !== PAYMENT_TRANSACTION_STATUS) return null;
 
-  const rawAmount = Number(record.amountVnd ?? record.amount ?? record.value);
-  if (!Number.isFinite(rawAmount) || rawAmount === 0) return null;
-  const type = normalizeTransactionType(record, rawAmount);
-  const amountVnd = normalizeMoney(Math.abs(rawAmount));
+  const amountVnd = normalizeMoney(record.amountVnd ?? record.amount ?? record.value);
   if (!amountVnd) return null;
+  const type = normalizeTransactionType(record);
 
   const id = normalizeId(record.id || `${type === PAYMENT_TRANSACTION_TYPES.REFUND ? "LEGACY-REF" : "LEGACY-PAY"}-${context.index + 1}`);
   const method = type === PAYMENT_TRANSACTION_TYPES.REFUND
@@ -388,11 +397,11 @@ function normalizePaymentTransaction(record = {}, context = {}) {
   };
 }
 
-function normalizeTransactionType(record = {}, rawAmount = 0) {
+function normalizeTransactionType(record = {}) {
   const key = String(record.type || "").trim().toUpperCase();
   const method = normalizePaymentMethod(record.method);
   if (key === PAYMENT_TRANSACTION_TYPES.PAYMENT_VOID || method === PAYMENT_TRANSACTION_TYPES.PAYMENT_VOID) return PAYMENT_TRANSACTION_TYPES.PAYMENT_VOID;
-  if (key === PAYMENT_TRANSACTION_TYPES.REFUND || method === PAYMENT_METHODS.REFUND || rawAmount < 0) return PAYMENT_TRANSACTION_TYPES.REFUND;
+  if (key === PAYMENT_TRANSACTION_TYPES.REFUND || method === PAYMENT_METHODS.REFUND) return PAYMENT_TRANSACTION_TYPES.REFUND;
   return PAYMENT_TRANSACTION_TYPES.PAYMENT;
 }
 
@@ -475,9 +484,7 @@ function normalizeOrderStatusLike(status) {
 }
 
 function normalizeMoney(value) {
-  const amount = Number(value || 0);
-  if (!Number.isFinite(amount)) return 0;
-  return Math.max(0, Math.round(amount));
+  return parsePositiveIntegerVnd(value) || 0;
 }
 
 function normalizeId(value) {
