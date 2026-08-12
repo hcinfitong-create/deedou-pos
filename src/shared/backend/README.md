@@ -26,7 +26,7 @@ Equivalent runtime object keys are:
 Never put these in browser config:
 
 - Supabase service role key
-- Legacy Supabase JWT whose decoded `role` is `service_role`
+- Legacy Supabase JWT whose decoded `role` is anything other than `anon`
 - Database password or connection string
 - JWT signing secret
 - Access token

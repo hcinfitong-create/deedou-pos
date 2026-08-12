@@ -17,6 +17,7 @@ import {
 const migrationSql = readFileSync(new URL("../supabase/migrations/20260812000000_dd008a_backend_foundation.sql", import.meta.url), "utf8");
 const seedSql = readFileSync(new URL("../supabase/seed.sql", import.meta.url), "utf8");
 const gitignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
+const ciWorkflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 
 const exposedTables = Object.freeze([
   "locations",
@@ -76,18 +77,17 @@ test("browser backend config rejects obvious service and secret keys", () => {
     { serviceRoleKey: "service_role_key_must_not_be_public" },
     { supabasePublishableKey: "sb_secret_obvious_server_secret" },
     { supabaseUrl: "postgresql://user:pass@example.com:5432/postgres" },
-    { privateKey: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----" },
-    { supabasePublishableKey: fakeJwt({ role: "service_role" }) },
-    { supabasePublishableKey: "malformed.jwt." }
+    { privateKey: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----" }
   ].forEach((config) => {
     assert.equal(validatePublicBackendConfig(config).ok, false);
     assert.equal(getBackendConfig({ mode: "SUPABASE", ...config }).mode, BACKEND_MODES.LOCAL_DEMO);
   });
 });
 
-test("browser backend config accepts legacy anon JWT but rejects service_role JWT", () => {
+test("browser backend config accepts modern publishable keys and legacy anon JWT only", () => {
+  assert.equal(validatePublicBackendConfig({ supabasePublishableKey: "sb_publishable_demo_key" }).ok, true);
+
   const anonJwt = fakeJwt({ role: "anon" });
-  const serviceRoleJwt = fakeJwt({ role: "service_role" });
 
   assert.equal(validatePublicBackendConfig({ supabasePublishableKey: anonJwt }).ok, true);
   assert.equal(getBackendConfig({
@@ -96,12 +96,20 @@ test("browser backend config accepts legacy anon JWT but rejects service_role JW
     supabasePublishableKey: anonJwt
   }).mode, BACKEND_MODES.SUPABASE);
 
-  assert.equal(validatePublicBackendConfig({ supabasePublishableKey: serviceRoleJwt }).ok, false);
-  assert.equal(getBackendConfig({
-    mode: "SUPABASE",
-    supabaseUrl: "https://deedou-demo.supabase.co",
-    supabasePublishableKey: serviceRoleJwt
-  }).mode, BACKEND_MODES.LOCAL_DEMO);
+  [
+    ["service_role", fakeJwt({ role: "service_role" })],
+    ["authenticated", fakeJwt({ role: "authenticated" })],
+    ["custom_role", fakeJwt({ role: "deedou_admin" })],
+    ["missing role", fakeJwt({ sub: "anonymous" })],
+    ["malformed", "malformed.jwt."]
+  ].forEach(([, key]) => {
+    assert.equal(validatePublicBackendConfig({ supabasePublishableKey: key }).ok, false);
+    assert.equal(getBackendConfig({
+      mode: "SUPABASE",
+      supabaseUrl: "https://deedou-demo.supabase.co",
+      supabasePublishableKey: key
+    }).mode, BACKEND_MODES.LOCAL_DEMO);
+  });
 });
 
 test("backend client setup uses injected Supabase factory and actual probe for ONLINE", async () => {
@@ -238,6 +246,23 @@ test("public access grants only narrow public functions and health view", () => 
   });
 });
 
+test("public security definer functions use empty search path and fully qualified objects", () => {
+  [
+    "resolve_table_token",
+    "list_public_menu_products",
+    "list_public_menu_product_variants",
+    "list_public_menu_modifier_groups",
+    "list_public_menu_modifier_options"
+  ].forEach((functionName) => {
+    const sql = functionSql(functionName);
+    assert.match(sql, /security definer/i);
+    assert.match(sql, /set search_path = ''/i);
+    assert.doesNotMatch(sql, /set search_path = public/i);
+    assert.doesNotMatch(sql, /\sfrom\s+(?!public\.)[a-z_][a-z0-9_]*/i);
+    assert.doesNotMatch(sql, /\sjoin\s+(?!public\.)[a-z_][a-z0-9_]*/i);
+  });
+});
+
 test("public menu contract is location scoped and hides internal routing", () => {
   const products = functionSql("list_public_menu_products");
   const groups = functionSql("list_public_menu_modifier_groups");
@@ -326,6 +351,19 @@ test("gitignore excludes local Supabase and environment secrets", () => {
   [".env", ".env.local", ".env.*.local", "supabase/.env", "supabase/.temp/"].forEach((entry) => {
     assert.match(gitignore, new RegExp(escapeRegExp(entry)));
   });
+});
+
+test("CI executes real DD-008A Supabase database contract on GitHub runner", () => {
+  assert.match(ciWorkflow, /backend-db:/i);
+  assert.match(ciWorkflow, /npm ci/i);
+  assert.match(ciWorkflow, /npx supabase --version/i);
+  assert.match(ciWorkflow, /npx supabase start/i);
+  assert.match(ciWorkflow, /npx supabase db reset/i);
+  assert.match(ciWorkflow, /supabase\/tests\/dd008a_contract\.sql/i);
+  assert.match(ciWorkflow, /psql "\$DB_URL" -v ON_ERROR_STOP=1 -f supabase\/tests\/dd008a_contract\.sql/i);
+  assert.match(ciWorkflow, /if: always\(\)/i);
+  assert.match(ciWorkflow, /npx supabase stop/i);
+  assert.doesNotMatch(ciWorkflow, /SUPABASE_SERVICE_ROLE|SERVICE_ROLE|DATABASE_URL|PRODUCTION/i);
 });
 
 function functionSql(functionName) {

@@ -342,7 +342,7 @@ returns table (
 language sql
 stable
 security definer
-set search_path = public
+set search_path = ''
 as $$
   select
     pt.location_id,
@@ -373,7 +373,7 @@ returns table (
 language sql
 stable
 security definer
-set search_path = public
+set search_path = ''
 as $$
   select
     p.location_id,
@@ -407,7 +407,7 @@ returns table (
 language sql
 stable
 security definer
-set search_path = public
+set search_path = ''
 as $$
   select
     p.location_id,
@@ -441,7 +441,7 @@ returns table (
 language sql
 stable
 security definer
-set search_path = public
+set search_path = ''
 as $$
   select
     p.location_id,
@@ -476,7 +476,7 @@ returns table (
 language sql
 stable
 security definer
-set search_path = public
+set search_path = ''
 as $$
   select
     mg.location_id,

@@ -80,7 +80,9 @@ declare
   resolved_count integer;
   unknown_count integer;
   product_count integer;
+  cross_location_product_count integer;
   group_count integer;
+  option_count integer;
 begin
   select count(*) into resolved_count
   from public.resolve_table_token('review-token-a01-47VLmz')
@@ -105,6 +107,14 @@ begin
     raise exception 'expected location-scoped menu product result, got %', product_count;
   end if;
 
+  select count(*) into cross_location_product_count
+  from public.list_public_menu_products('review-location-b')
+  where location_id = 'review-location-a'
+    or id = 'review-product-a';
+  if cross_location_product_count <> 0 then
+    raise exception 'expected location B menu to exclude location A products, got %', cross_location_product_count;
+  end if;
+
   select count(*) into group_count
   from public.list_public_menu_modifier_groups('review-location-a')
   where location_id = 'review-location-a'
@@ -113,10 +123,33 @@ begin
   if group_count <> 1 then
     raise exception 'expected location-scoped modifier group result, got %', group_count;
   end if;
+
+  select count(*) into option_count
+  from public.list_public_menu_modifier_options('review-location-b')
+  where location_id = 'review-location-b'
+    and modifier_group_id = 'review-group-b'
+    and option_key = 'less';
+  if option_count <> 1 then
+    raise exception 'expected location-scoped modifier option result, got %', option_count;
+  end if;
 end $$;
 
 do $$
 begin
+  begin
+    perform 1 from public.public_table_qr limit 1;
+    raise exception 'expected public_table_qr enumeration surface to be absent';
+  exception
+    when undefined_table or insufficient_privilege then null;
+  end;
+
+  begin
+    perform qr_token from public.physical_tables limit 1;
+    raise exception 'expected anon raw qr_token enumeration to fail';
+  exception
+    when insufficient_privilege then null;
+  end;
+
   begin
     perform 1 from public.physical_tables limit 1;
     raise exception 'expected anon raw physical_tables read to fail';

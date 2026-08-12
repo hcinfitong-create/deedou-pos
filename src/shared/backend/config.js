@@ -132,7 +132,7 @@ function isUnsafeJwtLikeKey(value) {
   const payload = decodeJwtPayload(value);
   if (!payload) return true;
   const role = normalizeText(payload.role).toLowerCase();
-  return ["service_role", "supabase_admin", "admin", "owner"].includes(role);
+  return role !== "anon";
 }
 
 function looksLikeJwt(value) {
