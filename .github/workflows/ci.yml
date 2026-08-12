@@ -161,6 +161,14 @@ jobs:
           DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
         run: npm run dd008b:browser-smoke
 
+      - name: Upload DD-008B browser smoke failure screenshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dd008b-browser-smoke-failure
+          path: artifacts/dd008b-browser-smoke/
+          if-no-files-found: ignore
+
       - name: Stop Supabase local stack
         if: always()
         run: npx supabase stop

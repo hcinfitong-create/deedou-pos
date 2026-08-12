@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,6 +16,8 @@ const apiUrl = statusEnv.API_URL || statusEnv.SUPABASE_URL || "http://127.0.0.1:
 const anonKey = statusEnv.ANON_KEY || statusEnv.SUPABASE_ANON_KEY;
 const serviceRoleKey = statusEnv.SERVICE_ROLE_KEY || statusEnv.SUPABASE_SERVICE_ROLE_KEY;
 const dbUrl = process.env.DB_URL || statusEnv.DB_URL || "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
+const failureArtifactDir = resolve(repoRoot, "artifacts", "dd008b-browser-smoke");
+const failureScreenshotPath = resolve(failureArtifactDir, "failure.png");
 
 if (!anonKey || !serviceRoleKey) {
   throw new Error("Supabase local anon/service-role keys were not available from `supabase status -o env`.");
@@ -48,6 +50,11 @@ const deviceSecrets = Object.freeze({
   cashierB: secret("cashier-b-device"),
   revoked: secret("revoked-device")
 });
+const diagnosticSecrets = [
+  anonKey,
+  serviceRoleKey,
+  ...Object.values(deviceSecrets)
+];
 
 const adminClient = createClient(apiUrl, serviceRoleKey, {
   auth: {
@@ -59,6 +66,8 @@ const adminClient = createClient(apiUrl, serviceRoleKey, {
 const server = await startStaticServer(repoRoot);
 const browser = await chromium.launch();
 const consoleErrors = [];
+const networkRecords = [];
+let failureReported = false;
 
 try {
   const users = await provisionRuntimeFixture();
@@ -74,6 +83,9 @@ try {
   console.log("SUPABASE browser: location B denied, inactive denied, wrong/revoked workstation denied, local logout returned to sign-in gate");
   console.log("SUPABASE browser: read-only/fail-closed route left legacy localStorage business state unchanged");
   console.log("zero app console errors");
+} catch (error) {
+  printCollectedDiagnostics(consoleErrors);
+  throw error;
 } finally {
   await browser.close();
   await server.close();
@@ -147,12 +159,14 @@ async function runLocalDemoSmoke(activeBrowser, baseUrl, errorSink) {
     ];
 
     for (const [label, hashRoute] of routes) {
-      const page = await newObservedPage(context, `LOCAL_DEMO ${label}`, errorSink);
-      await page.goto(`${baseUrl}/index.html?v=dd008b-local-smoke${hashRoute}`, { waitUntil: "domcontentloaded" });
-      await assertAppReady(page, `LOCAL_DEMO ${label}`);
-      assert.equal(await page.locator(".auth-gate").count(), 0, `LOCAL_DEMO ${label} should not show Supabase auth gate`);
-      assertNotContains(await bodyText(page), "Cannot GET", `LOCAL_DEMO ${label}`);
-      await settle();
+    const page = await newObservedPage(context, `LOCAL_DEMO ${label}`, errorSink);
+      await withFailureDiagnostics(page, `LOCAL_DEMO ${label}`, errorSink, async () => {
+        await page.goto(`${baseUrl}/index.html?v=dd008b-local-smoke${hashRoute}`, { waitUntil: "domcontentloaded" });
+        await assertAppReady(page, `LOCAL_DEMO ${label}`);
+        assert.equal(await page.locator(".auth-gate").count(), 0, `LOCAL_DEMO ${label} should not show Supabase auth gate`);
+        assertNotContains(await bodyText(page), "Cannot GET", `LOCAL_DEMO ${label}`);
+        await settle();
+      });
       await page.close();
     }
   } finally {
@@ -171,18 +185,24 @@ async function runSupabaseSmoke(activeBrowser, baseUrl, users, errorSink) {
   });
   try {
     const cashierPage = await newObservedPage(cashierContext, "SUPABASE cashier", errorSink);
-    await verifySignedOutGateNoFlash(cashierPage, `${baseUrl}/index.html?v=dd008b-supabase#/cashier`, "Cashier POS");
-    await loginThroughGate(cashierPage, users.cashier, ids.locationA, "CASHIER");
-    await expectReadOnlyAuthorized(cashierPage, "Cashier");
-    await expectLegacyBusinessStateUnchanged(cashierPage);
+    await withFailureDiagnostics(cashierPage, "SUPABASE cashier allow/read-only", errorSink, async () => {
+      await verifySignedOutGateNoFlash(cashierPage, `${baseUrl}/index.html?v=dd008b-supabase#/cashier`, "Cashier POS");
+      await loginThroughGate(cashierPage, users.cashier, ids.locationA, "CASHIER");
+      await expectReadOnlyAuthorized(cashierPage, "Cashier");
+      await expectLegacyBusinessStateUnchanged(cashierPage);
+    });
 
-    await cashierPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/admin`, { waitUntil: "domcontentloaded" });
-    await expectDeniedGate(cashierPage, "cashier denied admin", ["DeeDou POS setup"]);
+    await withFailureDiagnostics(cashierPage, "SUPABASE cashier denied admin", errorSink, async () => {
+      await cashierPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/admin`, { waitUntil: "domcontentloaded" });
+      await expectDeniedGate(cashierPage, "cashier denied admin", ["DeeDou POS setup"]);
+    });
 
-    await cashierPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/cashier`, { waitUntil: "domcontentloaded" });
-    await expectReadOnlyAuthorized(cashierPage, "Cashier");
-    await cashierPage.locator("section [data-auth-logout]").click();
-    await expectSignedOutGate(cashierPage, "cashier logout");
+    await withFailureDiagnostics(cashierPage, "SUPABASE cashier logout", errorSink, async () => {
+      await cashierPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/cashier`, { waitUntil: "domcontentloaded" });
+      await expectReadOnlyAuthorized(cashierPage, "Cashier");
+      await cashierPage.locator("section [data-auth-logout]").click();
+      await expectSignedOutGate(cashierPage, "cashier logout");
+    });
   } finally {
     await cashierContext.close();
   }
@@ -195,17 +215,21 @@ async function runSupabaseSmoke(activeBrowser, baseUrl, users, errorSink) {
   });
   try {
     const kitchenPage = await newObservedPage(kitchenContext, "SUPABASE kitchen", errorSink);
-    await kitchenPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/kitchen`, { waitUntil: "domcontentloaded" });
-    await loginThroughGate(kitchenPage, users.kitchen, ids.locationA, "KDS_KITCHEN");
-    await expectReadOnlyAuthorized(kitchenPage, "Kitchen KDS");
+    await withFailureDiagnostics(kitchenPage, "SUPABASE kitchen allow/read-only", errorSink, async () => {
+      await kitchenPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/kitchen`, { waitUntil: "domcontentloaded" });
+      await loginThroughGate(kitchenPage, users.kitchen, ids.locationA, "KDS_KITCHEN");
+      await expectReadOnlyAuthorized(kitchenPage, "Kitchen KDS");
+    });
 
     for (const [routeName, forbidden] of [
       ["cashier", ["Cashier POS"]],
       ["bar", ["Bar drinks queue"]],
       ["admin", ["DeeDou POS setup"]]
     ]) {
-      await kitchenPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/${routeName}`, { waitUntil: "domcontentloaded" });
-      await expectDeniedGate(kitchenPage, `kitchen denied ${routeName}`, forbidden);
+      await withFailureDiagnostics(kitchenPage, `SUPABASE kitchen denied ${routeName}`, errorSink, async () => {
+        await kitchenPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/${routeName}`, { waitUntil: "domcontentloaded" });
+        await expectDeniedGate(kitchenPage, `kitchen denied ${routeName}`, forbidden);
+      });
     }
   } finally {
     await kitchenContext.close();
@@ -261,10 +285,12 @@ async function verifyPublicQrSignedOut(activeBrowser, baseUrl, errorSink) {
   });
   try {
     const page = await newObservedPage(context, "SUPABASE public QR", errorSink);
-    await page.goto(`${baseUrl}/index.html?v=dd008b-supabase#/t/beach-a01-47VLmz`, { waitUntil: "domcontentloaded" });
-    await assertAppReady(page, "SUPABASE public QR");
-    assert.equal(await page.locator(".auth-gate").count(), 0, "public QR should not require staff sign-in");
-    assertContains(await bodyText(page), "DeeDou", "public QR");
+    await withFailureDiagnostics(page, "SUPABASE public QR", errorSink, async () => {
+      await page.goto(`${baseUrl}/index.html?v=dd008b-supabase#/t/beach-a01-47VLmz`, { waitUntil: "domcontentloaded" });
+      await assertAppReady(page, "SUPABASE public QR");
+      assert.equal(await page.locator(".auth-gate").count(), 0, "public QR should not require staff sign-in");
+      assertContains(await bodyText(page), "DeeDou", "public QR");
+    });
   } finally {
     await context.close();
   }
@@ -274,9 +300,11 @@ async function expectDeniedLogin(activeBrowser, baseUrl, errorSink, options) {
   const context = await createSupabaseContext(activeBrowser, options);
   try {
     const page = await newObservedPage(context, options.label, errorSink);
-    await page.goto(`${baseUrl}/index.html?v=dd008b-supabase#/${options.routeName}`, { waitUntil: "domcontentloaded" });
-    await loginThroughGate(page, options.user, options.locationId, options.workstationMode);
-    await expectDeniedGate(page, options.label, options.forbidden || []);
+    await withFailureDiagnostics(page, options.label, errorSink, async () => {
+      await page.goto(`${baseUrl}/index.html?v=dd008b-supabase#/${options.routeName}`, { waitUntil: "domcontentloaded" });
+      await loginThroughGate(page, options.user, options.locationId, options.workstationMode);
+      await expectDeniedGate(page, options.label, options.forbidden || []);
+    });
   } finally {
     await context.close();
   }
@@ -309,7 +337,119 @@ async function newObservedPage(context, label, errorSink) {
   page.on("pageerror", (error) => {
     errorSink.push(`${label}: pageerror: ${error.message}`);
   });
+  page.on("requestfailed", (request) => {
+    if (!isRelevantNetworkUrl(request.url())) return;
+    networkRecords.push({
+      label,
+      type: "requestfailed",
+      url: safeNetworkUrl(request.url()),
+      error: sanitizeDiagnosticText(request.failure()?.errorText || "unknown")
+    });
+  });
+  page.on("response", (response) => {
+    if (!isRelevantNetworkUrl(response.url())) return;
+    networkRecords.push({
+      label,
+      type: "response",
+      url: safeNetworkUrl(response.url()),
+      status: response.status()
+    });
+  });
   return page;
+}
+
+async function withFailureDiagnostics(page, label, errorSink, operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    await reportFailureDiagnostics({ page, label, error, errorSink });
+    throw error;
+  }
+}
+
+async function reportFailureDiagnostics({ page, label, error, errorSink }) {
+  if (failureReported) return;
+  failureReported = true;
+
+  console.error("DD-008B BROWSER-SMOKE DIAGNOSTIC FAILURE");
+  console.error(`phase: ${sanitizeDiagnosticText(label)}`);
+  console.error(`error: ${sanitizeDiagnosticText(error?.stack || error?.message || String(error))}`);
+
+  try {
+    const diagnostics = await collectSafePageDiagnostics(page);
+    console.error(`safe page diagnostics: ${JSON.stringify(diagnostics, null, 2)}`);
+  } catch (diagnosticError) {
+    console.error(`safe page diagnostics failed: ${sanitizeDiagnosticText(diagnosticError?.message || String(diagnosticError))}`);
+  }
+
+  await writeFailureScreenshot(page);
+  printCollectedDiagnostics(errorSink);
+}
+
+async function collectSafePageDiagnostics(page) {
+  return page.evaluate(() => {
+    const textLimit = 5000;
+    const authGate = document.querySelector(".auth-gate");
+    const bodyText = document.body?.innerText || "";
+    const authGateText = authGate?.innerText || "";
+    return {
+      currentUrl: location.href,
+      hash: location.hash,
+      bodyText: bodyText.slice(0, textLimit),
+      bodyTextTruncated: bodyText.length > textLimit,
+      authGate: {
+        exists: Boolean(authGate),
+        text: authGateText.slice(0, textLimit),
+        textTruncated: authGateText.length > textLimit
+      },
+      loginFormExists: Boolean(document.querySelector("form[data-auth-login]")),
+      logoutExists: document.querySelectorAll("[data-auth-logout]").length > 0,
+      supabaseCommandExists: Boolean(document.querySelector("[data-supabase-command]")),
+      storedLocationId: localStorage.getItem("deedou_staff_location_id") || "",
+      storedWorkstationMode: localStorage.getItem("deedou_workstation_mode") || "",
+      hasDeviceCredential: Boolean(localStorage.getItem("deedou_device_credential"))
+    };
+  }).then((diagnostics) => sanitizeDiagnosticValue(diagnostics));
+}
+
+async function writeFailureScreenshot(page) {
+  try {
+    await mkdir(failureArtifactDir, { recursive: true });
+    await page.screenshot({ path: failureScreenshotPath, fullPage: true });
+    console.error(`failure screenshot: ${failureScreenshotPath}`);
+  } catch (screenshotError) {
+    console.error(`failure screenshot failed: ${sanitizeDiagnosticText(screenshotError?.message || String(screenshotError))}`);
+  }
+}
+
+function printCollectedDiagnostics(errorSink = []) {
+  const safeConsoleErrors = (errorSink || []).map(sanitizeDiagnosticText);
+  const safeNetworkRecords = networkRecords.map(sanitizeDiagnosticValue);
+  console.error(`browser console/page errors: ${JSON.stringify(safeConsoleErrors, null, 2)}`);
+  console.error(`filtered network diagnostics: ${JSON.stringify(safeNetworkRecords, null, 2)}`);
+}
+
+function isRelevantNetworkUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    const path = url.pathname;
+    return (url.hostname === "cdn.jsdelivr.net" && path.includes("/@supabase/supabase-js@"))
+      || path.includes("/auth/v1/")
+      || path === "/rest/v1/rpc/authorize_staff_access"
+      || path === "/rest/v1/rpc/get_my_staff_context";
+  } catch {
+    return false;
+  }
+}
+
+function safeNetworkUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    if (url.hostname === "cdn.jsdelivr.net") return `${url.hostname}${url.pathname}`;
+    return url.pathname;
+  } catch {
+    return sanitizeDiagnosticText(rawUrl);
+  }
 }
 
 async function verifySignedOutGateNoFlash(page, targetUrl, privilegedText) {
@@ -442,6 +582,7 @@ function contentTypeFor(filePath) {
 async function createRuntimeUser(kind) {
   const email = `${runId}_${kind}@example.invalid`;
   const password = runtimeAuthPassword(`${kind}-password`);
+  diagnosticSecrets.push(password);
   const { data, error } = await adminClient.auth.admin.createUser({
     email,
     password,
@@ -494,6 +635,24 @@ function assertContains(text, expected, label) {
 
 function assertNotContains(text, unexpected, label) {
   assert(!text.includes(unexpected), `${label} should not include ${JSON.stringify(unexpected)}`);
+}
+
+function sanitizeDiagnosticValue(value) {
+  if (typeof value === "string") return sanitizeDiagnosticText(value);
+  if (Array.isArray(value)) return value.map(sanitizeDiagnosticValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sanitizeDiagnosticValue(item)]));
+}
+
+function sanitizeDiagnosticText(value) {
+  let text = String(value || "")
+    .replace(/Bearer\s+eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "Bearer [JWT_REDACTED]")
+    .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[JWT_REDACTED]")
+    .replace(/(authorization|apikey|password|refresh_token|access_token)=([^&\s]+)/gi, "$1=[SECRET_REDACTED]");
+  diagnosticSecrets.filter(Boolean).forEach((secretValue) => {
+    text = text.split(secretValue).join("[SECRET_REDACTED]");
+  });
+  return text;
 }
 
 function settle() {

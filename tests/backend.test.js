@@ -532,6 +532,8 @@ test("DD-008B merge gates run on Node 22 and include exact-head browser smoke", 
   assert.match(ciWorkflow, /npx supabase start/i);
   assert.match(ciWorkflow, /npx supabase db reset/i);
   assert.match(ciWorkflow, /npm run dd008b:browser-smoke/i);
+  assert.match(ciWorkflow, /actions\/upload-artifact@v4/i);
+  assert.match(ciWorkflow, /artifacts\/dd008b-browser-smoke\//i);
   assert.doesNotMatch(ciWorkflow, /SUPABASE_SERVICE_ROLE|PRODUCTION/i);
 });
 
