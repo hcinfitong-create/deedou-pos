@@ -192,7 +192,7 @@ set search_path = ''
 as $$
   select case
     when length(btrim(coalesce(p_device_credential, ''))) = 0 then ''
-    else encode(digest(convert_to('deedou-device-v2:' || p_device_credential, 'utf8'), 'sha256'), 'hex')
+    else encode(extensions.digest(convert_to('deedou-device-v2:' || p_device_credential, 'utf8'), 'sha256'), 'hex')
   end
 $$;
 
@@ -203,7 +203,7 @@ volatile
 security definer
 set search_path = ''
 as $$
-  select rtrim(translate(encode(gen_random_bytes(32), 'base64'), '+/', '-_'), '=')
+  select rtrim(translate(encode(extensions.gen_random_bytes(32), 'base64'), '+/', '-_'), '=')
 $$;
 
 create or replace function public.generate_device_id()
@@ -213,7 +213,7 @@ volatile
 security definer
 set search_path = ''
 as $$
-  select 'DEV-' || replace(gen_random_uuid()::text, '-', '')
+  select 'DEV-' || replace(extensions.gen_random_uuid()::text, '-', '')
 $$;
 
 create or replace function public.current_staff_id()
