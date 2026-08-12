@@ -340,15 +340,27 @@ Current location:
 
 Owns:
 
-- Payment requests.
-- Payment method transitions.
-- Split bill.
-- Refund.
-- Void at bill/payment layer.
+- Append-only payment ledger normalization and duplicate transaction id handling.
+- Legacy payment, refund, and `paidVnd`-only normalization.
+- Payment summaries: bill total, gross paid, voided payments, effective paid, refunded, net collected, outstanding, refundable, and payment status.
+- Partial, mixed-tender, and split-tender allocation rules.
+- Table-level tender allocation across current-session orders, oldest first.
+- Payment void and targeted refund rules.
+- Bill quantity editing and order void guards once effective payment exists.
+- `paidVnd` compatibility projection from the ledger.
 
 Current location:
 
-- Still inside cashier functions in `app.js`.
+- `src/features/payments/index.js`
+- Cashier DOM binding, prompts, audit, localStorage persistence, and button rendering remain in `app.js`.
+
+Does not own:
+
+- KDS preparation workflow.
+- Item-level serving.
+- Menu price calculation or billable quantity totals.
+- Payment provider settlement callbacks.
+- Table-session lifecycle.
 
 ### reports
 
@@ -442,6 +454,7 @@ Current:
 - `src/features/staff-orders/index.js`
 - `src/features/station-workflow/index.js`
 - `src/features/table-session/index.js`
+- `src/features/payments/index.js`
 
 ## Protected Modules By Common Task
 

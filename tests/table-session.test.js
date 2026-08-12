@@ -22,6 +22,7 @@ import {
   selectOrdersForTableSession,
   transferTableSession
 } from "../src/features/table-session/index.js";
+import { recordPayment } from "../src/features/payments/index.js";
 
 const tables = [
   { code: "A01", zone: "Beach" },
@@ -300,6 +301,29 @@ test("unsafe duplicate graph blocks close reconcile and transfer without mutatin
   });
   assert.deepEqual(closeResult.closedSessions, []);
   assert.deepEqual(reconcileResult.closedSessions, []);
+});
+
+test("unsafe duplicate table graph blocks payment without mutation", () => {
+  const sessions = [
+    { id: "TS-old", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: "2026-08-11T08:00:00.000Z", openedSource: "STAFF" },
+    { id: "TS-new", tableCode: "A01", zone: "Beach", status: "OPEN", openedAt: "2026-08-11T09:00:00.000Z", openedSource: "STAFF" }
+  ];
+  const orders = [
+    tableOrder({ id: "unsafe", orderNo: "D01-0001", table: "C01", zone: "Camping", tableSessionId: "TS-old", total: 100000 }),
+    tableOrder({ id: "safe", orderNo: "D01-0002", tableSessionId: "TS-new", total: 200000 })
+  ];
+  const events = [
+    { id: "request-old", type: "CALL_STAFF", table: "A01", zone: "Beach", tableSessionId: "TS-old", done: false }
+  ];
+  const beforeOrders = structuredClone(orders);
+  const graph = repairTableSessionGraph({ tableSessions: sessions, orders, events, tables, now: "2026-08-11T10:00:00.000Z" });
+  const paymentAttempt = graph.ok
+    ? recordPayment(orders[0], { id: "PAY-UNSAFE", amountVnd: 100000 })
+    : graph;
+
+  assert.equal(paymentAttempt.ok, false);
+  assert.equal(paymentAttempt.reason, "UNSAFE_DUPLICATE_OPEN_SESSION_REPAIR");
+  assert.deepEqual(orders, beforeOrders);
 });
 
 test("floor-plan selector marks a table vacant when no open session exists", () => {

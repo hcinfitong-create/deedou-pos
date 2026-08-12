@@ -878,16 +878,67 @@ textarea {
 }
 
 .payment-summary {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+}
+
+.payment-entry-row {
+  display: grid;
+  gap: 6px;
+}
+
+.payment-entry-row input {
+  width: min(240px, 100%);
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #fff;
+  font: inherit;
+}
+
+.compact-payment-entry {
+  max-width: 260px;
+}
+
+.refund-entry {
+  display: inline-grid;
+  gap: 4px;
+  min-width: 116px;
+}
+
+.refund-entry input {
+  width: 116px;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 8px;
+  font: inherit;
 }
 
 .table-payment-actions {
   padding-top: 2px;
 }
 
-.payments-list {
+.payments-list,
+.payment-history {
   padding-top: 8px;
   border-top: 1px solid var(--line);
+}
+
+.payment-history {
+  display: grid;
+  gap: 8px;
+}
+
+.payment-history > strong {
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.payment-history .status-pill {
+  align-items: center;
+  flex-wrap: wrap;
 }
 
 .compact-list {

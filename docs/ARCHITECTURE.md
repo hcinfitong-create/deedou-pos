@@ -28,6 +28,7 @@ index.html
       -> features/staff-orders
       -> features/station-workflow
       -> features/table-session
+      -> features/payments
 ```
 
 The current router is hash-based:
@@ -52,6 +53,7 @@ Orders now carry explicit service context so DeeDou can support both cafe/counte
 - Line-level `prepStatus` is the canonical preparation source of truth for KDS: `QUEUED -> ACKNOWLEDGED -> PREPARING -> READY`.
 - Line-level `course` and `holdState` are scheduling/release fields owned by `course-workflow`; they do not replace preparation, serving, or billing state.
 - Line-level `servedQty` tracks FOH delivery to guests and is independent from `billQty`.
+- Payment ledger state is separate from preparation, serving, billing quantity, and table-session lifecycle. `paidVnd` is a compatibility projection from payment ledger summaries.
 - Overall `READY` is derived when all remaining unserved required lines are prep-ready. Overall `SERVED` is derived only when all serviceable quantities are fully served.
 
 Counter/takeaway orders may have no table. Takeaway is a fulfillment type, not a physical service area.
@@ -125,6 +127,7 @@ Phase B has extracted the first stable, low-risk modules:
 - `features/staff-orders`
 - `features/station-workflow`
 - `features/table-session`
+- `features/payments`
 
 Larger UI decomposition should come later, after each phase validates.
 
@@ -132,6 +135,8 @@ DD-005 adds `features/product-options` as the pure owner for product variants, m
 
 DD-006 adds `features/course-workflow` as the pure owner for restaurant course assignment and HELD/FIRED release. KDS still uses `station-workflow` and `ordering.applyPrepStatusTransition(...)`; fired lines become KDS-eligible, while held lines remain visible to FOH but out of active station workload.
 
+DD-007 adds `features/payments` as the pure owner for append-only payment ledger normalization, partial/mixed tender summaries, split allocation plans, payment voids, targeted refunds, bill locks, and `paidVnd` projection. `app.js` still owns cashier DOM binding, prompts, audit logging, and persistence orchestration.
+
 ## Current Known Coupling
 
-`app.js` still owns broad page composition, event binding, localStorage orchestration, admin actions, cashier actions, payments, reports, and station/session persistence orchestration. Cart rules/UI, customer order status presentation, customer service request event creation, ordering contracts, staff board presentation/selectors, station/KDS rendering/selectors, course pacing rules, and table-session domain rules now live behind feature public APIs.
+`app.js` still owns broad page composition, event binding, localStorage orchestration, admin actions, cashier UI orchestration, reports, and station/session persistence orchestration. Cart rules/UI, customer order status presentation, customer service request event creation, ordering contracts, staff board presentation/selectors, station/KDS rendering/selectors, course pacing rules, table-session domain rules, and payment ledger rules now live behind feature public APIs.

@@ -4,7 +4,7 @@ export const HOLD_STATES = Object.freeze({
 });
 
 const ACTIVE_PREP_STATUSES = Object.freeze(["ACKNOWLEDGED", "PREPARING", "READY"]);
-const CLOSED_ORDER_STATUSES = Object.freeze(["PAID", "REJECTED", "VOIDED", "REFUNDED"]);
+const CLOSED_ORDER_STATUSES = Object.freeze(["PAID", "REJECTED", "VOIDED", "REFUNDED", "PARTIALLY_REFUNDED"]);
 const OPERATIONAL_ORDER_STATUSES = Object.freeze(["ACCEPTED", "IN_PREPARATION", "READY"]);
 
 export function normalizeCourse(value) {

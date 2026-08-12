@@ -17,6 +17,7 @@ import {
   FULFILLMENT_TYPES,
   getAllowedOrderStatusTransitions,
   getServiceProgress,
+  isClosedOrderStatus,
   isOpenPhysicalTableOrder,
   isLineFullyServed,
   normalizeOrderLineOperationalFields,
@@ -165,6 +166,7 @@ test("expandOrderLines drops missing product references instead of substituting 
 test("order status normalization preserves canonical status", () => {
   assert.equal(normalizeOrderStatus("PENDING"), "PENDING_ACCEPTANCE");
   assert.equal(normalizeOrderStatus("READY"), "READY");
+  assert.equal(isClosedOrderStatus("PARTIALLY_REFUNDED"), true);
 });
 
 test("station status derives only non-combo stations", () => {
