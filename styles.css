@@ -792,9 +792,13 @@ textarea {
 
 .course-family {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 8px;
   align-items: center;
+}
+
+.course-family > span:first-child {
+  grid-column: 1 / -1;
 }
 
 .inline-control {
@@ -815,6 +819,14 @@ textarea {
   background: #fff;
   font: inherit;
   color: var(--ink);
+}
+
+.course-family .inline-control {
+  grid-template-columns: auto 56px;
+}
+
+.course-family .inline-control input {
+  width: 56px;
 }
 
 .void-confirm {

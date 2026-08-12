@@ -163,6 +163,18 @@ export function canFireServiceFamily(order = {}, rootLineId) {
 export function fireServiceFamily(order = {}, rootLineId, options = {}) {
   const allowed = canFireServiceFamily(order, rootLineId);
   if (!allowed.ok) return { ...allowed, order };
+  if (allowed.family.holdState === HOLD_STATES.FIRED) {
+    return {
+      ok: true,
+      noOp: true,
+      reason: "ALREADY_FIRED",
+      order,
+      family: allowed.family,
+      holdState: HOLD_STATES.FIRED,
+      lineIds: allowed.family.lineIds,
+      firedAt: normalizeIsoTimestamp(allowed.family.root?.firedAt)
+    };
+  }
   const now = normalizeIsoTimestamp(options.now) || new Date().toISOString();
   const operational = isOperationalOrder(order);
   applyToFamily(allowed.family, {

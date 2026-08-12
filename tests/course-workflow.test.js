@@ -101,6 +101,58 @@ test("hold and fire preserve queued prep semantics and reset queue age", () => {
   assert.equal(line.status, "QUEUED");
 });
 
+test("duplicate fire is a no-op for already fired queued family", () => {
+  const line = queuedLine({
+    lineId: "mint-juice",
+    qty: 2,
+    course: "1",
+    holdState: "FIRED",
+    firedAt: "2026-08-11T05:00:00.000Z",
+    queuedAt: "2026-08-11T05:00:00.000Z",
+    billQty: 2,
+    price: 59000,
+    optionSnapshot: { variant: "Large", modifiers: ["Less sugar"] }
+  });
+  const order = orderWithLines([line]);
+  const before = structuredClone(order);
+
+  const result = fireServiceFamily(order, "mint-juice", { now: "2026-08-11T05:20:00.000Z" });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.noOp, true);
+  assert.equal(result.reason, "ALREADY_FIRED");
+  assert.equal(line.queuedAt, "2026-08-11T05:00:00.000Z");
+  assert.equal(line.firedAt, "2026-08-11T05:00:00.000Z");
+  assert.equal(line.prepStatus, "QUEUED");
+  assert.deepEqual(order, before);
+});
+
+test("duplicate fire is a no-op after station work has started", () => {
+  ["ACKNOWLEDGED", "PREPARING", "READY"].forEach((prepStatus) => {
+    const line = queuedLine({
+      lineId: `line-${prepStatus.toLowerCase()}`,
+      course: "1",
+      holdState: "FIRED",
+      firedAt: "2026-08-11T05:00:00.000Z",
+      queuedAt: "2026-08-11T05:00:00.000Z",
+      prepStatus,
+      status: prepStatus,
+      acknowledgedAt: "2026-08-11T05:03:00.000Z",
+      prepStartedAt: prepStatus === "ACKNOWLEDGED" ? "" : "2026-08-11T05:06:00.000Z",
+      readyAt: prepStatus === "READY" ? "2026-08-11T05:10:00.000Z" : ""
+    });
+    const order = orderWithLines([line], { id: `order-${prepStatus}` });
+    const before = structuredClone(order);
+
+    const result = fireServiceFamily(order, line.lineId, { now: "2026-08-11T05:20:00.000Z" });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.noOp, true);
+    assert.equal(result.reason, "ALREADY_FIRED");
+    assert.deepEqual(order, before);
+  });
+});
+
 test("hold and course reassignment are blocked after prep starts", () => {
   const line = queuedLine({ lineId: "soup" });
   const order = orderWithLines([line]);
@@ -114,9 +166,16 @@ test("hold and course reassignment are blocked after prep starts", () => {
 
 test("whole-course fire is isolated and does not mutate already fired or other courses", () => {
   const course1Held = queuedLine({ lineId: "c1-held", course: "1", holdState: "HELD" });
-  const course1Fired = queuedLine({ lineId: "c1-fired", course: "1", holdState: "FIRED", queuedAt: "2026-08-11T05:00:00.000Z" });
+  const course1Fired = queuedLine({
+    lineId: "c1-fired",
+    course: "1",
+    holdState: "FIRED",
+    firedAt: "2026-08-11T05:00:00.000Z",
+    queuedAt: "2026-08-11T05:00:00.000Z"
+  });
   const course2Held = queuedLine({ lineId: "c2-held", course: "2", holdState: "HELD" });
   const order = orderWithLines([course1Held, course1Fired, course2Held]);
+  const firedBefore = structuredClone(course1Fired);
 
   const result = fireCourse(order, "1", { now: "2026-08-11T05:12:00.000Z" });
 
@@ -126,6 +185,8 @@ test("whole-course fire is isolated and does not mutate already fired or other c
   assert.equal(course1Held.queuedAt, "2026-08-11T05:12:00.000Z");
   assert.equal(course1Fired.holdState, "FIRED");
   assert.equal(course1Fired.queuedAt, "2026-08-11T05:00:00.000Z");
+  assert.equal(course1Fired.firedAt, "2026-08-11T05:00:00.000Z");
+  assert.deepEqual(course1Fired, firedBefore);
   assert.equal(course2Held.holdState, "HELD");
   assert.equal(course2Held.queuedAt || "", "");
 });
