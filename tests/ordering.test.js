@@ -66,6 +66,97 @@ test("expandOrderLines expands combo components while billing only parent", () =
   assert.equal(billableTotal(lines), 600000);
 });
 
+test("expandOrderLines snapshots configured unit price from current catalog", () => {
+  const product = {
+    id: "mango-tea",
+    vi: "Trà xoài",
+    en: "Mango Tea",
+    price: 55000,
+    station: "BAR_TEA",
+    variants: [
+      { id: "regular", vi: "Ly vừa", en: "Regular", priceDelta: 0, available: true },
+      { id: "large", vi: "Ly lớn", en: "Large", priceDelta: 10000, available: true }
+    ],
+    modifierGroups: [{
+      id: "topping",
+      vi: "Topping",
+      en: "Topping",
+      multiple: true,
+      minSelect: 0,
+      maxSelect: 2,
+      options: [
+        { id: "aloe", vi: "Nha đam", en: "Aloe", priceDelta: 6000, available: true },
+        { id: "jelly", vi: "Thạch dừa", en: "Jelly", priceDelta: 8000, available: true }
+      ]
+    }]
+  };
+  const lines = expandOrderLines([{
+    id: "mango-tea",
+    qty: 2,
+    selection: { variantId: "large", modifierSelections: { topping: ["jelly"] } }
+  }], (id) => id === "mango-tea" ? product : null);
+
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].basePrice, 55000);
+  assert.equal(lines[0].price, 73000);
+  assert.equal(lines[0].billQty, 2);
+  assert.equal(lines[0].configuredKey, "mango-tea|v:large|m:topping=jelly");
+  assert.deepEqual(lines[0].configuredOptions, { variantId: "large", modifierSelections: { topping: ["jelly"] } });
+  assert.equal(lines[0].optionSnapshot.variant.en, "Large");
+  assert.equal(lines[0].optionSnapshot.modifierGroups[0].options[0].priceDelta, 8000);
+  assert.equal(billableTotal(lines), 146000);
+
+  product.price = 99000;
+  product.modifierGroups[0].options[1].priceDelta = 99000;
+  lines[0].billQty = 1;
+
+  assert.equal(lines[0].price, 73000);
+  assert.equal(lines[0].optionSnapshot.modifierGroups[0].options[0].priceDelta, 8000);
+  assert.equal(billableTotal(lines), 73000);
+});
+
+test("configured combo keeps one billable parent and component service quantities unchanged", () => {
+  const products = new Map([
+    ["combo", {
+      id: "combo",
+      vi: "Combo",
+      en: "Combo",
+      price: 300000,
+      station: "KITCHEN_BBQ",
+      variants: [{ id: "premium", vi: "Cao cấp", en: "Premium", priceDelta: 50000, available: true }],
+      modifierGroups: [{
+        id: "sauce",
+        vi: "Sốt",
+        en: "Sauce",
+        required: true,
+        minSelect: 1,
+        maxSelect: 1,
+        options: [{ id: "spicy", vi: "Cay", en: "Spicy", priceDelta: 0, available: true }]
+      }],
+      components: [
+        { vi: "Tôm", en: "Shrimp", qty: 2, station: "KITCHEN_BBQ" },
+        { vi: "Trà", en: "Tea", qty: 1, station: "BAR_TEA" }
+      ]
+    }]
+  ]);
+
+  const lines = expandOrderLines([{
+    id: "combo",
+    qty: 2,
+    selection: { variantId: "premium", modifierSelections: { sauce: ["spicy"] } }
+  }], (id) => products.get(id) ?? null);
+
+  assert.equal(lines.length, 3);
+  assert.equal(lines[0].isBillable, true);
+  assert.equal(lines[0].price, 350000);
+  assert.equal(lines[1].isBillable, false);
+  assert.equal(lines[1].qty, 4);
+  assert.equal(lines[2].qty, 2);
+  assert.equal(getServiceProgress({ items: lines }).serviceableQty, 6);
+  assert.equal(billableTotal(lines), 700000);
+  assert.equal(lines[1].optionSnapshot, undefined);
+});
+
 test("expandOrderLines drops missing product references instead of substituting another item", () => {
   const lines = expandOrderLines([{ id: "missing", qty: 1 }], () => null);
   assert.deepEqual(lines, []);

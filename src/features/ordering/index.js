@@ -1,3 +1,5 @@
+import { createOrderLineOptionSnapshot, defaultConfiguredSelection, optionSummaryLines } from "../product-options/index.js";
+
 export function clampBillQty(value, maxQty) {
   const max = Math.max(0, Number(maxQty) || 0);
   const rawValue = value === undefined || value === null || value === "" ? max : Number(value);
@@ -217,6 +219,10 @@ export function expandOrderLines(cartLines, productById) {
 
     const qty = Math.max(1, Number(line.qty) || 1);
     const parentLineId = line.lineId || createOperationalLineId(item.id, cartIndex, "item");
+    const configured = createOrderLineOptionSnapshot(item, line.selection || defaultConfiguredSelection(item));
+    if (!configured.ok) return [];
+    const parentComboOptionSummaryVi = optionSummaryLines({ optionSnapshot: configured.optionSnapshot }, "vi");
+    const parentComboOptionSummaryEn = optionSummaryLines({ optionSnapshot: configured.optionSnapshot }, "en");
     const parent = {
       id: item.id,
       lineId: parentLineId,
@@ -224,7 +230,8 @@ export function expandOrderLines(cartLines, productById) {
       station: item.components?.length ? "COMBO" : item.station,
       nameVi: item.vi,
       nameEn: item.en,
-      price: Number(item.price) || 0,
+      basePrice: configured.basePrice,
+      price: configured.unitPrice,
       billQty: qty,
       status: "QUEUED",
       prepStatus: "QUEUED",
@@ -232,6 +239,9 @@ export function expandOrderLines(cartLines, productById) {
       isBillable: true,
       isComponent: false,
       parentComboId: "",
+      configuredKey: configured.configuredKey,
+      configuredOptions: configured.selection,
+      optionSnapshot: configured.optionSnapshot,
       ...normalizeOrderLineOperationalFields({
         ...line,
         lineId: parentLineId,
@@ -258,6 +268,10 @@ export function expandOrderLines(cartLines, productById) {
       isBillable: false,
       isComponent: true,
       parentComboId: item.id,
+      parentComboNameVi: item.vi,
+      parentComboNameEn: item.en,
+      parentComboOptionSummaryVi,
+      parentComboOptionSummaryEn,
       ...normalizeOrderLineOperationalFields({
         ...part,
         lineId: `${parentLineId}:component-${index}`,

@@ -4,7 +4,7 @@ Responsibility: staff-facing order board presentation, staff order selectors/met
 
 Does not own payment capture, cashier table aggregation, station queue internals, admin menu CRUD, or persistence.
 
-Allowed dependencies: `src/shared/*` and public APIs from `src/features/ordering/` where needed.
+Allowed dependencies: `src/shared/*`, public APIs from `src/features/ordering/` where needed, and public product-option summary helpers.
 
 Prohibited dependencies: direct `localStorage`, payment internals, admin internals, private implementation files from other features.
 

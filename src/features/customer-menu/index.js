@@ -27,7 +27,24 @@ export const categoryAliases = {
 export const defaultProducts = [
   product("coconut-coffee", "DRINK", "drink-coffee", "Cà phê dừa", "Coconut Coffee", "Cà phê rang đậm, kem dừa mịn và đá xay.", "Bold coffee with creamy coconut foam.", 59000, "BAR_COFFEE", true, "#dcefe5", "cup", ["morning", "afternoon", "evening"]),
   product("espresso", "DRINK", "drink-coffee", "Espresso", "Espresso", "Shot cà phê đậm vị, phục vụ nóng.", "A short, bold espresso served hot.", 39000, "BAR_COFFEE", true, "#f0e2d0", "cup", ["morning", "afternoon", "evening"]),
-  product("mango-tea", "DRINK", "drink-tea", "Trà xoài", "Mango Tea", "Trà trái cây, xoài chín, hậu vị thanh.", "Fruit tea with ripe mango and a clean finish.", 55000, "BAR_TEA", true, "#f7e5b5", "glass", ["morning", "afternoon", "evening"]),
+  product("mango-tea", "DRINK", "drink-tea", "Trà xoài", "Mango Tea", "Trà trái cây, xoài chín, hậu vị thanh.", "Fruit tea with ripe mango and a clean finish.", 55000, "BAR_TEA", true, "#f7e5b5", "glass", ["morning", "afternoon", "evening"], "", [], {
+    variants: [
+      variant("regular", "Ly vừa", "Regular", 0),
+      variant("large", "Ly lớn", "Large", 10000)
+    ],
+    modifierGroups: [
+      modifierGroup("sugar", "Đường", "Sugar", true, false, 1, 1, [
+        modifierOption("sugar-100", "100% đường", "100% sugar", 0),
+        modifierOption("sugar-50", "50% đường", "50% sugar", 0),
+        modifierOption("sugar-0", "Không đường", "No sugar", 0)
+      ]),
+      modifierGroup("topping", "Topping", "Topping", false, true, 0, 2, [
+        modifierOption("coconut-jelly", "Thạch dừa", "Coconut jelly", 8000),
+        modifierOption("aloe-vera", "Nha đam", "Aloe vera", 6000),
+        modifierOption("mango-popping", "Hạt xoài", "Mango popping", 10000, false)
+      ])
+    ]
+  }),
   product("sunset-soda", "DRINK", "drink-signature", "Soda hoàng hôn", "Sunset Soda", "Soda cam chanh, syrup lựu và lát trái cây.", "Citrus soda with pomegranate syrup.", 65000, "BAR", true, "#f6d4c8", "glass", ["afternoon", "evening"]),
   product("xoi-cha", "FOOD", "food-single", "Xôi chả quế", "Sticky Rice with Pork Roll", "Xôi nóng, chả quế, hành phi và đồ chua.", "Warm sticky rice with cinnamon pork roll.", 49000, "KITCHEN_HOT", true, "#efe7d7", "plate", ["morning"]),
   product("croissant", "FOOD", "food-dessert", "Croissant bơ", "Butter Croissant", "Bánh nướng giòn, thơm bơ, dùng cùng mứt.", "Flaky butter croissant with jam.", 45000, "DESSERT", false, "#f3dfb8", "dessert", ["afternoon", "evening"]),
@@ -63,10 +80,40 @@ export function filterMenuItems(items, { period, activeKind = "all", activeCateg
   });
 }
 
-function product(id, kind, category, vi, en, descVi, descEn, price, station, available, color, art, periods, image = "", components = []) {
-  return { id, kind, category, vi, en, descVi, descEn, price, station, available, color, art, periods, image, components };
+function product(id, kind, category, vi, en, descVi, descEn, price, station, available, color, art, periods, image = "", components = [], optionConfig = {}) {
+  return {
+    id,
+    kind,
+    category,
+    vi,
+    en,
+    descVi,
+    descEn,
+    price,
+    station,
+    available,
+    color,
+    art,
+    periods,
+    image,
+    components,
+    variants: optionConfig.variants || [],
+    modifierGroups: optionConfig.modifierGroups || []
+  };
 }
 
 function component(vi, en, qty, station) {
   return { vi, en, qty, station };
+}
+
+function variant(id, vi, en, priceDelta = 0, available = true) {
+  return { id, vi, en, priceDelta, available };
+}
+
+function modifierGroup(id, vi, en, required, multiple, minSelect, maxSelect, options) {
+  return { id, vi, en, required, multiple, minSelect, maxSelect, options };
+}
+
+function modifierOption(id, vi, en, priceDelta = 0, available = true) {
+  return { id, vi, en, priceDelta, available };
 }

@@ -21,6 +21,7 @@ DD-002.1 makes the staff board service-aware:
 - Staff serving controls call ordering service-progress APIs through the app shell. This module does not mutate orders directly.
 - KDS preparation remains owned by `station-workflow` and must not set `SERVED`.
 - DD-004 lets staff open-table metrics consume active table sessions when the app shell provides them. Without session state, selectors keep the legacy order-based fallback for compatibility.
+- DD-005 displays configured variant/modifier summaries for order lines using the public `product-options` summary helper.
 
 Public API:
 

@@ -27,3 +27,11 @@ test("kind and category filters still apply together with service period", () =>
 
   assert.deepEqual(drinks.map((item) => item.id), ["sunset-soda"]);
 });
+
+test("demo catalog includes a configurable drink for DD-005 smoke flows", () => {
+  const mangoTea = defaultProducts.find((item) => item.id === "mango-tea");
+
+  assert.equal(mangoTea.variants.length, 2);
+  assert.equal(mangoTea.modifierGroups.find((group) => group.id === "sugar").minSelect, 1);
+  assert.equal(mangoTea.modifierGroups.find((group) => group.id === "topping").maxSelect, 2);
+});

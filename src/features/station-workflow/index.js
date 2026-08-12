@@ -8,6 +8,7 @@ import {
   normalizePrepStatus,
   SERVICE_MODES
 } from "../ordering/index.js";
+import { optionSummaryLines } from "../product-options/index.js";
 import { escapeAttr, escapeHtml } from "../../shared/utils/index.js";
 
 export { applyPrepStatusTransition, canTransitionPrepStatus };
@@ -117,7 +118,7 @@ export function renderStationTicket(ticket) {
         <span class="status-pill"><span>Age</span><strong>${formatAge(ticket.ageMinutes)}</strong></span>
       </div>
       <ul class="item-list">
-        ${ticket.lines.map((line) => `<li><strong>${line.qty} x ${escapeHtml(line.nameVi)}</strong> <span class="station">${escapeHtml(line.station)}</span><br><span class="muted">${escapeHtml(line.nameEn)} - ${escapeHtml(normalizePrepStatus(line.prepStatus || line.status))}</span></li>`).join("")}
+        ${ticket.lines.map((line) => renderStationLine(line)).join("")}
       </ul>
       ${ticket.order?.note ? `<p class="muted">Note: ${escapeHtml(ticket.order.note)}</p>` : ""}
       <div class="split-actions">
@@ -125,6 +126,33 @@ export function renderStationTicket(ticket) {
       </div>
     </article>
   `;
+}
+
+function renderStationLine(line) {
+  const summaries = stationLineSummaryLines(line, "vi");
+  return `
+    <li>
+      <strong>${line.qty} x ${escapeHtml(line.nameVi)}</strong> <span class="station">${escapeHtml(line.station)}</span>
+      ${summaries.map((summary) => `<br><span class="muted">${escapeHtml(summary)}</span>`).join("")}
+      <br><span class="muted">${escapeHtml(line.nameEn)} - ${escapeHtml(normalizePrepStatus(line.prepStatus || line.status))}</span>
+    </li>
+  `;
+}
+
+function stationLineSummaryLines(line, lang) {
+  const ownSummaries = optionSummaryLines(line, lang);
+  const parentSummaries = lang === "en" ? line.parentComboOptionSummaryEn : line.parentComboOptionSummaryVi;
+  if (!Array.isArray(parentSummaries) || !parentSummaries.length) return ownSummaries;
+
+  const variantPrefix = lang === "en" ? "Variant: " : "Phiên bản: ";
+  const variantSummary = parentSummaries.find((summary) => summary.startsWith(variantPrefix));
+  const otherParentSummaries = parentSummaries.filter((summary) => summary !== variantSummary);
+  const parentName = (lang === "en" ? line.parentComboNameEn : line.parentComboNameVi) || line.parentComboId || "Combo";
+  const configuredParent = variantSummary
+    ? `${parentName} — ${variantSummary.slice(variantPrefix.length).trim()}`
+    : parentName;
+
+  return [configuredParent, ...otherParentSummaries, ...ownSummaries];
 }
 
 function stationTitle(stationGroup) {

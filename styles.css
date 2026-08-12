@@ -342,6 +342,48 @@ h1 {
   font-weight: 800;
 }
 
+.option-picker {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8faf6;
+}
+
+.option-group {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.option-group legend {
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.option-choice {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.option-choice.unavailable {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.option-feedback {
+  min-height: 16px;
+  color: #a43c2f;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .add-btn,
 .primary,
 .danger,
@@ -411,6 +453,13 @@ h1 {
   border-radius: 8px;
   background: var(--mint);
   color: var(--ink);
+}
+
+.qty [data-remove-cart] {
+  width: auto;
+  padding: 0 8px;
+  background: #fff3ef;
+  color: #a43c2f;
 }
 
 textarea {
@@ -878,6 +927,11 @@ textarea {
   color: var(--ink);
 }
 
+.counter-product.with-options {
+  gap: 8px;
+  min-height: 0;
+}
+
 .counter-product span {
   font-weight: 800;
 }
@@ -933,6 +987,18 @@ textarea {
 .product-form label select {
   color: var(--ink);
   font-weight: 500;
+}
+
+.product-form textarea[name="variantsJson"],
+.product-form textarea[name="modifierGroupsJson"] {
+  min-height: 120px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+.option-admin-help {
+  margin: -4px 0 2px;
+  font-size: 12px;
 }
 
 .product-form fieldset {

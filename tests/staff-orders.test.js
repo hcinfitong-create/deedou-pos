@@ -133,7 +133,25 @@ test("staff order card renders escaped item content and valid action buttons", (
     total: 52000,
     note: "<script>",
     stationStatus: { BAR_TEA: "QUEUED" },
-    items: [{ lineId: "tea-1", qty: 1, nameEn: "<Tea>", station: "BAR_TEA", status: "QUEUED", prepStatus: "QUEUED", servedQty: 0, isComponent: false }]
+    items: [{
+      lineId: "tea-1",
+      qty: 1,
+      nameEn: "<Tea>",
+      station: "BAR_TEA",
+      status: "QUEUED",
+      prepStatus: "QUEUED",
+      servedQty: 0,
+      isComponent: false,
+      optionSnapshot: {
+        variant: { id: "large", vi: "Ly lớn", en: "<Large>", priceDelta: 10000 },
+        modifierGroups: [{
+          id: "sugar",
+          vi: "Đường",
+          en: "Sugar",
+          options: [{ id: "less", vi: "Ít đường", en: "<Less sugar>", priceDelta: 0 }]
+        }]
+      }
+    }]
   });
 
   assert.match(html, /D01-0001 - Beach Table A01/);
@@ -141,6 +159,8 @@ test("staff order card renders escaped item content and valid action buttons", (
   assert.match(html, /Dine-in/);
   assert.match(html, /QR/);
   assert.match(html, /&lt;Tea&gt;/);
+  assert.match(html, /Variant: &lt;Large&gt;/);
+  assert.match(html, /Sugar: &lt;Less sugar&gt;/);
   assert.match(html, /Note: &lt;script&gt;/);
   assert.match(html, /data-status="ACCEPTED"/);
   assert.match(html, /data-status="REJECTED"/);

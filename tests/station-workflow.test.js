@@ -10,11 +10,18 @@ import {
   renderStationPage,
   selectStationTickets
 } from "../src/features/station-workflow/index.js";
+import {
+  billableTotal,
+  expandOrderLines,
+  getServiceProgress,
+  stationStatusFor
+} from "../src/features/ordering/index.js";
 
 const stations = [
   { code: "BAR_COFFEE", group: "BAR", en: "Coffee Bar" },
   { code: "BAR_TEA", group: "BAR", en: "Tea Bar" },
-  { code: "KITCHEN_HOT", group: "KITCHEN", en: "Hot Kitchen" }
+  { code: "KITCHEN_HOT", group: "KITCHEN", en: "Hot Kitchen" },
+  { code: "KITCHEN_BBQ", group: "KITCHEN", en: "BBQ Kitchen" }
 ];
 
 test("station workflow exports prep transition guards without served action", () => {
@@ -94,13 +101,118 @@ test("station ticket age is deterministic and render targets station code", () =
     table: "",
     serviceMode: "COUNTER_SERVICE",
     fulfillmentType: "TAKEAWAY",
-    items: [{ lineId: "coffee", station: "BAR_COFFEE", qty: 1, nameVi: "Cà phê", nameEn: "Coffee", prepStatus: "QUEUED", status: "QUEUED", queuedAt: "2026-08-11T05:00:00.000Z" }]
+    items: [{
+      lineId: "coffee",
+      station: "BAR_COFFEE",
+      qty: 1,
+      nameVi: "Cà phê",
+      nameEn: "Coffee",
+      prepStatus: "QUEUED",
+      status: "QUEUED",
+      queuedAt: "2026-08-11T05:00:00.000Z",
+      optionSnapshot: {
+        variant: { id: "large", vi: "<Ly lớn>", en: "Large", priceDelta: 10000 },
+        modifierGroups: [{
+          id: "milk",
+          vi: "Sữa",
+          en: "Milk",
+          options: [{ id: "oat", vi: "<Sữa yến mạch>", en: "Oat milk", priceDelta: 8000 }]
+        }]
+      }
+    }]
   };
   const tickets = selectStationTickets([order], "BAR", stations, { now: "2026-08-11T05:07:00.000Z" });
 
   assert.equal(getStationTicketAge(tickets[0], "2026-08-11T05:07:00.000Z"), 7);
   const html = renderStationPage({ orders: [order], stationGroup: "BAR", stations, now: "2026-08-11T05:07:00.000Z" });
   assert.match(html, /data-station-code="BAR_COFFEE"/);
+  assert.match(html, /Phiên bản: &lt;Ly lớn&gt;/);
+  assert.match(html, /Sữa: &lt;Sữa yến mạch&gt;/);
   assert.doesNotMatch(html, /data-station-group=/);
   assert.doesNotMatch(html, /SERVED/);
+});
+
+test("configured combo summary is visible on station tickets without changing billing or service", () => {
+  const combo = {
+    id: "combo-bbq",
+    vi: "Set BBQ đôi",
+    en: "BBQ Couple Set",
+    price: 329000,
+    station: "KITCHEN_BBQ",
+    variants: [
+      { id: "standard", vi: "Tiêu chuẩn", en: "Standard", priceDelta: 0 },
+      { id: "premium", vi: "Cao cấp", en: "Premium", priceDelta: 40000 }
+    ],
+    modifierGroups: [{
+      id: "sauce",
+      vi: "Sốt",
+      en: "Sauce",
+      required: true,
+      multiple: false,
+      minSelect: 1,
+      maxSelect: 1,
+      options: [
+        { id: "spicy", vi: "Cay", en: "Spicy", priceDelta: 0 },
+        { id: "mild", vi: "Dịu", en: "Mild", priceDelta: 0 }
+      ]
+    }],
+    components: [
+      { vi: "Ba chỉ bò", en: "Beef belly", qty: 2, station: "KITCHEN_BBQ" },
+      { vi: "Trà xoài", en: "Mango tea", qty: 1, station: "BAR_TEA" }
+    ]
+  };
+  const lines = expandOrderLines([{
+    id: "combo-bbq",
+    qty: 1,
+    selection: { variantId: "premium", modifierSelections: { sauce: ["spicy"] } }
+  }], (id) => id === combo.id ? combo : null);
+  const [parent, kitchenLine, barLine] = lines;
+
+  assert.equal(lines.length, 3);
+  assert.equal(lines.filter((line) => line.isBillable).length, 1);
+  assert.equal(parent.price, 369000);
+  assert.equal(parent.billQty, 1);
+  [kitchenLine, barLine].forEach((line) => {
+    assert.equal(line.isBillable, false);
+    assert.equal(line.billQty, 0);
+    assert.equal(line.price, 0);
+    assert.equal(line.optionSnapshot, undefined);
+  });
+  assert.equal(billableTotal(lines), 369000);
+  assert.equal(getServiceProgress({ items: lines }).serviceableQty, 3);
+  assert.equal(getServiceProgress({ items: lines }).servedQty, 0);
+
+  const order = {
+    id: "order-combo",
+    orderNo: "D01-0100",
+    status: "ACCEPTED",
+    table: "A01",
+    serviceMode: "TABLE_SERVICE",
+    fulfillmentType: "DINE_IN",
+    items: lines,
+    stationStatus: stationStatusFor(lines, "QUEUED")
+  };
+  const kitchenHtml = renderStationPage({ orders: [order], stationGroup: "KITCHEN", stations, now: "2026-08-11T05:07:00.000Z" });
+  const barHtml = renderStationPage({ orders: [order], stationGroup: "BAR", stations, now: "2026-08-11T05:07:00.000Z" });
+
+  assert.match(kitchenHtml, /Set BBQ đôi — Cao cấp/);
+  assert.match(kitchenHtml, /Sốt: Cay/);
+  assert.match(barHtml, /Set BBQ đôi — Cao cấp/);
+  assert.match(barHtml, /Sốt: Cay/);
+
+  assert.equal(kitchenLine.prepStatus, "QUEUED");
+  assert.equal(applyPrepStatusTransition(order, { stationCode: "KITCHEN_BBQ" }, "ACKNOWLEDGED").ok, true);
+  assert.equal(kitchenLine.prepStatus, "ACKNOWLEDGED");
+  assert.equal(applyPrepStatusTransition(order, { stationCode: "KITCHEN_BBQ" }, "PREPARING").ok, true);
+  assert.equal(kitchenLine.prepStatus, "PREPARING");
+  assert.equal(applyPrepStatusTransition(order, { stationCode: "KITCHEN_BBQ" }, "READY").ok, true);
+  assert.equal(kitchenLine.prepStatus, "READY");
+  assert.equal(order.status, "IN_PREPARATION");
+
+  assert.equal(applyPrepStatusTransition(order, { stationCode: "BAR_TEA" }, "ACKNOWLEDGED").ok, true);
+  assert.equal(applyPrepStatusTransition(order, { stationCode: "BAR_TEA" }, "PREPARING").ok, true);
+  assert.equal(applyPrepStatusTransition(order, { stationCode: "BAR_TEA" }, "READY").ok, true);
+  assert.equal(barLine.prepStatus, "READY");
+  assert.equal(order.status, "READY");
+  assert.equal(getServiceProgress(order).serviceableQty, 3);
 });

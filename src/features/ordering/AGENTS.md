@@ -4,11 +4,10 @@ Responsibility: pure order contracts, status normalization, station status deriv
 
 Does not own UI rendering, payment provider behavior, admin product editing, or kitchen/bar visual queues.
 
-Allowed dependencies: shared utilities only when genuinely generic.
+Allowed dependencies: shared utilities only when genuinely generic, plus the public `src/features/product-options/index.js` API for configured line pricing/snapshots.
 
-Prohibited dependencies: DOM, `localStorage`, payment capture internals, customer-menu internals.
+Prohibited dependencies: DOM, `localStorage`, payment capture internals, customer-menu internals, admin internals.
 
 Public interface: export through `index.js`; keep functions deterministic where practical.
 
-Tests: prioritize module unit tests for totals, bill quantity adjustment, status transitions, and combo routing.
-
+Tests: prioritize module unit tests for totals, configured snapshots, bill quantity adjustment, status transitions, and combo routing.

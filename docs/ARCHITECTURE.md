@@ -19,6 +19,7 @@ index.html
       -> shared/i18n
       -> shared/utils
       -> features/customer-menu
+      -> features/product-options
       -> features/ordering
       -> features/cart
       -> features/customer-orders
@@ -124,6 +125,8 @@ Phase B has extracted the first stable, low-risk modules:
 - `features/table-session`
 
 Larger UI decomposition should come later, after each phase validates.
+
+DD-005 adds `features/product-options` as the pure owner for product variants, modifier groups, canonical configured cart identity, configured pricing, and immutable order-line option snapshots. The app shell still owns DOM binding/admin persistence, while `cart`, `ordering`, `staff-orders`, and `station-workflow` consume the public product-options API.
 
 ## Current Known Coupling
 
