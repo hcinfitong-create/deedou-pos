@@ -117,7 +117,7 @@ Owns:
 - Order status normalization.
 - Direct order status transition guards.
 - Station-derived aggregate order readiness and service completion.
-- Optional future hooks for course/hold/seat/prep-time metadata.
+- Persisted line course/hold/fire fields supplied by `course-workflow`.
 - Configured order-line price snapshot creation through the public `product-options` API.
 
 Does not own:
@@ -160,6 +160,34 @@ Current files:
 
 - `src/features/ordering/index.js` after Phase B.
 
+### course-workflow
+
+Owns:
+
+- Course normalization.
+- Line/family `HELD` / `FIRED` release state.
+- Service-family selection for billable roots plus their operational station components.
+- Course assignment, hold, fire, and whole-course fire guards.
+- FOH course summaries and read-only/editable state decisions.
+
+Does not own:
+
+- `prepStatus` transitions or KDS button effects.
+- Serving quantity, bill quantity, pricing, payment, split, refund, or void behavior.
+- Table-session lifecycle.
+- Product option pricing or snapshots.
+- Customer-facing course selection.
+
+Current location:
+
+- `src/features/course-workflow/index.js`
+
+Notes:
+
+- Missing legacy `holdState` means `FIRED`; missing legacy `course` means immediate service.
+- Combo parents are the service-family root. Generated station child components inherit course and hold/fire state, but remain non-billable operational components.
+- Fire release does not skip preparation. It only makes queued operational lines KDS-eligible.
+
 ### table-session
 
 Owns:
@@ -197,6 +225,7 @@ Owns:
 - Staff presentation of service mode, fulfillment type, source, zone/table context, and order age when machine-readable timestamps exist.
 - Staff-facing ready-to-serve line selectors and presentation.
 - FOH presentation for serving one ready line/quantity and counter/takeaway serve-all-ready handoff.
+- FOH presentation for course assignment, hold, fire, and whole-course fire controls through `course-workflow`.
 
 Current location:
 
@@ -208,6 +237,7 @@ Does not own:
 - Payment capture.
 - Kitchen/bar/dessert station queue internals.
 - Table definitions.
+- Course/hold/fire business rules.
 
 ### station-workflow
 
@@ -218,6 +248,7 @@ Owns:
 - KDS ticket derivation.
 - Ticket age/wait age.
 - Thin reusable Kitchen, Bar, and Dessert rendering.
+- KDS grouping by station and course for fired lines.
 
 Does not own:
 
@@ -225,6 +256,7 @@ Does not own:
 - Billing quantity, payment, split, refund, or void logic.
 - Menu/admin CRUD.
 - Table definitions or table-session behavior.
+- Course assignment or hold/fire decisions.
 
 Current location:
 
@@ -235,6 +267,7 @@ Notes:
 - Preparation state is `prepStatus`: `QUEUED -> ACKNOWLEDGED -> PREPARING -> READY`.
 - KDS must never set `SERVED`.
 - `stationStatus` remains a readable compatibility summary derived from line preparation state.
+- KDS eligibility requires a station line to be fired by `course-workflow`; held lines are not active prep workload.
 
 ### kitchen
 
@@ -401,6 +434,7 @@ Current:
 - `src/shared/utils/index.js`
 - `src/features/customer-menu/index.js`
 - `src/features/product-options/index.js`
+- `src/features/course-workflow/index.js`
 - `src/features/ordering/index.js`
 - `src/features/cart/index.js`
 - `src/features/customer-orders/index.js`
@@ -428,7 +462,7 @@ Change payment method:
 
 Change station workflow:
 
-- Target: `station-workflow`, `staff-orders`, and `ordering` status/service contracts
+- Target: `station-workflow`, `staff-orders`, `course-workflow`, and `ordering` status/service contracts
 - Protected: `customer-menu`, `admin-menu`, `payments` unless status affects payable state
 
 Change table session or floor occupancy:

@@ -776,6 +776,47 @@ textarea {
   margin-top: 0;
 }
 
+.course-controls {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f7faf5;
+}
+
+.course-family-list {
+  display: grid;
+  gap: 8px;
+}
+
+.course-family {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.inline-control {
+  display: inline-grid;
+  grid-template-columns: auto 72px;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.inline-control input {
+  width: 72px;
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  font: inherit;
+  color: var(--ink);
+}
+
 .void-confirm {
   display: grid;
   gap: 8px;
@@ -1175,6 +1216,19 @@ textarea {
 
   .compact-items .bill-adjust-line {
     grid-template-columns: 1fr auto;
+  }
+
+  .course-family {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .inline-control {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .inline-control input {
+    width: 100%;
   }
 
   .food-art {

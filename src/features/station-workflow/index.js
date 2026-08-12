@@ -8,6 +8,12 @@ import {
   normalizePrepStatus,
   SERVICE_MODES
 } from "../ordering/index.js";
+import {
+  courseLabel,
+  courseSortValue,
+  isLineKdsReleased,
+  normalizeCourse
+} from "../course-workflow/index.js";
 import { optionSummaryLines } from "../product-options/index.js";
 import { escapeAttr, escapeHtml } from "../../shared/utils/index.js";
 
@@ -28,30 +34,36 @@ export function selectStationTickets(orders = [], stationGroup, stationDefinitio
   const now = options.now || new Date();
 
   return (orders || []).filter(isStationWorkflowEligible).flatMap((order) => {
-    return [...stationCodes].map((stationCode) => {
+    return [...stationCodes].flatMap((stationCode) => {
       const lines = (order.items || []).filter((line) => {
         return isRequiredStationLine(line)
           && line.station === stationCode
+          && isLineKdsReleased(line)
           && normalizePrepStatus(line.prepStatus || line.status) !== "READY";
       });
       if (!lines.length) return null;
       const station = stationMap.get(stationCode);
-      const ticket = {
-        order,
-        orderId: order.id,
-        orderNo: order.orderNo,
-        stationGroup,
-        stationCode,
-        stationLabel: station?.en || stationCode,
-        lines,
-        status: deriveStationTicketState(lines),
-        now
-      };
-      return {
-        ...ticket,
-        ageMinutes: getStationTicketAge(ticket, now),
-        actions: getStationTicketActions(ticket)
-      };
+      return groupLinesByCourse(lines).map((courseGroup) => {
+        const ticket = {
+          order,
+          orderId: order.id,
+          orderNo: order.orderNo,
+          stationGroup,
+          stationCode,
+          stationLabel: station?.en || stationCode,
+          course: courseGroup.course,
+          courseLabel: courseLabel(courseGroup.course),
+          lineIds: courseGroup.lines.map((line) => line.lineId).filter(Boolean),
+          lines: courseGroup.lines,
+          status: deriveStationTicketState(courseGroup.lines),
+          now
+        };
+        return {
+          ...ticket,
+          ageMinutes: getStationTicketAge(ticket, now),
+          actions: getStationTicketActions(ticket)
+        };
+      });
     }).filter(Boolean);
   });
 }
@@ -71,11 +83,12 @@ export function deriveStationTicketState(ticketOrLines = []) {
 }
 
 export function getStationTicketAge(ticket = {}, now = new Date()) {
-  const candidates = [
-    ...(ticket.lines || []).flatMap((line) => [line.queuedAt, line.acknowledgedAt, line.prepStartedAt, line.readyAt]),
-    ticket.order?.acceptedAt,
-    ticket.order?.createdAt
-  ].filter(Boolean);
+  const lineCandidates = (ticket.lines || [])
+    .flatMap((line) => [line.queuedAt, line.acknowledgedAt, line.prepStartedAt, line.readyAt])
+    .filter(Boolean);
+  const candidates = lineCandidates.length
+    ? lineCandidates
+    : [ticket.order?.acceptedAt, ticket.order?.createdAt].filter(Boolean);
   const timestamps = candidates.map((value) => new Date(value).getTime()).filter(Number.isFinite);
   if (!timestamps.length) return null;
   return Math.max(0, Math.floor((new Date(now).getTime() - Math.min(...timestamps)) / 60000));
@@ -114,6 +127,7 @@ export function renderStationTicket(ticket) {
         <span class="station">${escapeHtml(ticket.stationLabel)}</span>
       </div>
       <div class="station-grid">
+        <span class="status-pill"><span>Course</span><strong>${escapeHtml(ticket.courseLabel || courseLabel(ticket.course))}</strong></span>
         <span class="status-pill"><span>Prep</span><strong>${escapeHtml(ticket.status)}</strong></span>
         <span class="status-pill"><span>Age</span><strong>${formatAge(ticket.ageMinutes)}</strong></span>
       </div>
@@ -122,7 +136,7 @@ export function renderStationTicket(ticket) {
       </ul>
       ${ticket.order?.note ? `<p class="muted">Note: ${escapeHtml(ticket.order.note)}</p>` : ""}
       <div class="split-actions">
-        ${actions.map((action) => `<button class="primary" data-station-order="${escapeAttr(ticket.orderId)}" data-station-code="${escapeAttr(ticket.stationCode)}" data-station-status="${escapeAttr(action.status)}">${escapeHtml(action.label)}</button>`).join("")}
+        ${actions.map((action) => `<button class="primary" data-station-order="${escapeAttr(ticket.orderId)}" data-station-code="${escapeAttr(ticket.stationCode)}" data-station-line-ids="${escapeAttr(ticket.lineIds.join(","))}" data-station-status="${escapeAttr(action.status)}">${escapeHtml(action.label)}</button>`).join("")}
       </div>
     </article>
   `;
@@ -153,6 +167,17 @@ function stationLineSummaryLines(line, lang) {
     : parentName;
 
   return [configuredParent, ...otherParentSummaries, ...ownSummaries];
+}
+
+function groupLinesByCourse(lines = []) {
+  const groups = (lines || []).reduce((map, line) => {
+    const course = normalizeCourse(line.course);
+    map.set(course, [...(map.get(course) || []), line]);
+    return map;
+  }, new Map());
+  return [...groups.entries()]
+    .map(([course, groupLines]) => ({ course, lines: groupLines }))
+    .sort((left, right) => courseSortValue(left.course) - courseSortValue(right.course));
 }
 
 function stationTitle(stationGroup) {

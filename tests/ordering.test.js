@@ -171,13 +171,28 @@ test("station status derives only non-combo stations", () => {
   const statuses = stationStatusFor([
     { station: "COMBO" },
     { station: "BAR_TEA" },
-    { station: "KITCHEN_HOT" }
+    { station: "KITCHEN_HOT" },
+    { station: "BAR_COFFEE", holdState: "HELD" }
   ], "PENDING_ACCEPTANCE");
 
   assert.deepEqual(statuses, {
     BAR_TEA: "QUEUED",
     KITCHEN_HOT: "QUEUED"
   });
+});
+
+test("course scheduling defaults legacy lines to fired immediate service", () => {
+  const line = normalizeOrderLineOperationalFields({
+    lineId: "coffee",
+    station: "BAR_COFFEE",
+    qty: 1,
+    status: "QUEUED"
+  });
+
+  assert.equal(line.course, "");
+  assert.equal(line.holdState, "FIRED");
+  assert.equal(line.heldAt, "");
+  assert.equal(line.firedAt, "");
 });
 
 test("direct order transition graph allows only deterministic staff and cashier moves", () => {
@@ -425,6 +440,35 @@ test("first KDS acknowledge moves accepted order to preparation without skipping
   assert.deepEqual(order.stationStatus, { BAR_TEA: "ACKNOWLEDGED" });
   assert.equal(order.items[0].prepStatus, "ACKNOWLEDGED");
   assert.equal(order.items[0].status, "ACKNOWLEDGED");
+});
+
+test("accepted held lines stay out of active prep queues until fired", () => {
+  const order = {
+    status: "PENDING_ACCEPTANCE",
+    stationStatus: {},
+    items: [{
+      lineId: "tea-1",
+      id: "tea",
+      station: "BAR_TEA",
+      qty: 1,
+      status: "QUEUED",
+      prepStatus: "QUEUED",
+      holdState: "HELD",
+      servedQty: 0
+    }]
+  };
+
+  assert.equal(applyOrderStatusTransition(order, "ACCEPTED", { now: "2026-08-11T00:05:00.000Z" }).ok, true);
+  assert.deepEqual(order.stationStatus, {});
+  assert.equal(order.items[0].prepStatus, "QUEUED");
+  assert.equal(order.items[0].queuedAt, undefined);
+
+  const before = structuredClone(order);
+  const update = applyPrepStatusTransition(order, { stationCode: "BAR_TEA" }, "ACKNOWLEDGED", { now: "2026-08-11T00:10:00.000Z" });
+
+  assert.equal(update.ok, false);
+  assert.equal(update.reason, "NO_LINES");
+  assert.deepEqual(order, before);
 });
 
 test("invalid prep skip does not mutate the order", () => {

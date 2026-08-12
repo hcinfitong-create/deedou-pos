@@ -188,6 +188,101 @@ test("staff order card renders item-level serving controls", () => {
   assert.doesNotMatch(html, /data-status="SERVED"/);
 });
 
+test("staff order card exposes course assignment and hold before prep starts", () => {
+  const html = renderStaffOrderCard({
+    id: "order-course",
+    orderNo: "D01-0020",
+    serviceMode: "TABLE_SERVICE",
+    fulfillmentType: "DINE_IN",
+    orderSource: "CUSTOMER_QR",
+    table: "A01",
+    zone: "Beach",
+    status: "PENDING_ACCEPTANCE",
+    total: 52000,
+    stationStatus: {},
+    items: [{
+      lineId: "tea-1",
+      qty: 1,
+      nameEn: "Tea",
+      station: "BAR_TEA",
+      course: "1",
+      holdState: "FIRED",
+      prepStatus: "QUEUED",
+      status: "QUEUED",
+      servedQty: 0,
+      isComponent: false
+    }]
+  });
+
+  assert.match(html, /Course pacing/);
+  assert.match(html, /data-course-value="order-course"/);
+  assert.match(html, /data-course-family="tea-1"/);
+  assert.match(html, /data-course-assign="order-course"/);
+  assert.match(html, /data-line-hold="order-course"/);
+  assert.match(html, /Course 1/);
+  assert.match(html, /FIRED/);
+  assert.match(html, /data-status="ACCEPTED"/);
+});
+
+test("staff order card can fire held families and locks course after prep starts", () => {
+  const heldHtml = renderStaffOrderCard({
+    id: "held-course",
+    orderNo: "D01-0021",
+    serviceMode: "TABLE_SERVICE",
+    fulfillmentType: "DINE_IN",
+    orderSource: "CUSTOMER_QR",
+    table: "A01",
+    zone: "Beach",
+    status: "ACCEPTED",
+    total: 52000,
+    stationStatus: {},
+    items: [{
+      lineId: "tea-1",
+      qty: 1,
+      nameEn: "Tea",
+      station: "BAR_TEA",
+      course: "1",
+      holdState: "HELD",
+      prepStatus: "QUEUED",
+      status: "QUEUED",
+      servedQty: 0,
+      isComponent: false
+    }]
+  });
+  const lockedHtml = renderStaffOrderCard({
+    id: "locked-course",
+    orderNo: "D01-0022",
+    serviceMode: "TABLE_SERVICE",
+    fulfillmentType: "DINE_IN",
+    orderSource: "CUSTOMER_QR",
+    table: "A01",
+    zone: "Beach",
+    status: "IN_PREPARATION",
+    total: 52000,
+    stationStatus: { BAR_TEA: "ACKNOWLEDGED" },
+    items: [{
+      lineId: "tea-1",
+      qty: 1,
+      nameEn: "Tea",
+      station: "BAR_TEA",
+      course: "1",
+      holdState: "FIRED",
+      prepStatus: "ACKNOWLEDGED",
+      status: "ACKNOWLEDGED",
+      acknowledgedAt: "2026-08-11T05:00:00.000Z",
+      servedQty: 0,
+      isComponent: false
+    }]
+  });
+
+  assert.match(heldHtml, /data-line-fire="held-course"/);
+  assert.match(heldHtml, /data-course-fire="held-course"/);
+  assert.match(heldHtml, /Fire Course 1/);
+  assert.match(lockedHtml, /Course locked/);
+  assert.doesNotMatch(lockedHtml, /data-course-assign="locked-course"/);
+  assert.match(lockedHtml, /data-line-hold="locked-course"[^>]*disabled/);
+});
+
 test("staff order age formats only when machine-readable timestamp exists", () => {
   assert.equal(formatOrderAge({ createdAt: "2026-08-11T00:00:00.000Z" }, "2026-08-11T00:07:00.000Z"), "7m waiting");
   assert.equal(formatOrderAge({ time: "09:00" }, "2026-08-11T00:07:00.000Z"), "");
