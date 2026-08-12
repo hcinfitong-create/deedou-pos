@@ -181,7 +181,7 @@ async function runSupabaseSmoke(activeBrowser, baseUrl, users, errorSink) {
 
     await cashierPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/cashier`, { waitUntil: "domcontentloaded" });
     await expectReadOnlyAuthorized(cashierPage, "Cashier");
-    await cashierPage.locator("[data-auth-logout]").first().click();
+    await cashierPage.locator("section [data-auth-logout]").click();
     await expectSignedOutGate(cashierPage, "cashier logout");
   } finally {
     await cashierContext.close();
@@ -346,7 +346,7 @@ async function expectReadOnlyAuthorized(page, routeLabel) {
 
 async function expectDeniedGate(page, label, forbiddenTexts = []) {
   await page.locator(".auth-gate").waitFor({ timeout: 25000 });
-  await page.locator("[data-auth-logout]").waitFor({ timeout: 25000 });
+  await page.waitForFunction(() => document.querySelectorAll("[data-auth-logout]").length > 0, null, { timeout: 25000 });
   await waitForNotChecking(page);
   await assertAppReady(page, label);
   assert.equal(await page.locator("[data-supabase-command]").count(), 0, `${label} should not expose fail-closed command button`);
