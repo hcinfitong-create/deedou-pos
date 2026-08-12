@@ -17,6 +17,12 @@ build/
 coverage/
 .cache/
 
+# Supabase local development artifacts
+supabase/.branches/
+supabase/.temp/
+supabase/.env
+supabase/.env.*
+
 # Logs and local OS/editor files
 *.log
 npm-debug.log*

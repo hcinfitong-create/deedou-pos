@@ -29,6 +29,7 @@ index.html
       -> features/station-workflow
       -> features/table-session
       -> features/payments
+      -> shared/backend (foundation only, not runtime-authoritative yet)
 ```
 
 The current router is hash-based:
@@ -57,6 +58,37 @@ Orders now carry explicit service context so DeeDou can support both cafe/counte
 - Overall `READY` is derived when all remaining unserved required lines are prep-ready. Overall `SERVED` is derived only when all serviceable quantities are fully served.
 
 Counter/takeaway orders may have no table. Takeaway is a fulfillment type, not a physical service area.
+
+## Backend Foundation
+
+DD-008A adds a Supabase/PostgreSQL foundation without cutting production business mutations from `localStorage` to Supabase.
+
+- Default backend mode is `LOCAL_DEMO`.
+- `SUPABASE` mode requires complete public/publishable configuration.
+- Missing, partial, or unsafe config fails back to `LOCAL_DEMO`.
+- `src/shared/backend` is the only infrastructure boundary allowed to create a Supabase client.
+- Feature modules must not import Supabase directly.
+- Connection state must use an actual backend probe before reporting `ONLINE`.
+- Public QR access is exact-token resolution through `resolve_table_token(token)` only; table-token enumeration is not a supported public contract.
+- Public menu access is location-scoped through narrow SQL functions and does not expose station routing or raw internal tables.
+- Raw operational, payment, audit, and idempotency tables do not grant broad anon/authenticated read or write access in DD-008A.
+- Payment transactions use restrictive order/location references so hard-deleting an order cannot cascade-delete ledger history.
+
+Committed Supabase infrastructure lives under:
+
+```text
+supabase/
+  config.toml
+  migrations/
+  seed.sql
+  tests/
+```
+
+Identifier strategy:
+
+- Existing DeeDou business IDs remain stable strings where they already exist: table codes/tokens, product IDs, order IDs, order line IDs, table-session IDs, and payment transaction IDs.
+- Infrastructure-generated records that do not map to legacy browser IDs may use UUIDs, such as audit/idempotency rows.
+- QR table tokens remain explicit high-entropy strings and sequential table IDs alone are not sufficient for future authoritative ordering.
 
 ## Table Sessions
 
@@ -136,6 +168,8 @@ DD-005 adds `features/product-options` as the pure owner for product variants, m
 DD-006 adds `features/course-workflow` as the pure owner for restaurant course assignment and HELD/FIRED release. KDS still uses `station-workflow` and `ordering.applyPrepStatusTransition(...)`; fired lines become KDS-eligible, while held lines remain visible to FOH but out of active station workload.
 
 DD-007 adds `features/payments` as the pure owner for append-only payment ledger normalization, partial/mixed tender summaries, split allocation plans, payment voids, targeted refunds, bill locks, and `paidVnd` projection. `app.js` still owns cashier DOM binding, prompts, audit logging, and persistence orchestration.
+
+DD-008A adds `shared/backend` plus Supabase migrations/seed as a foundation-only infrastructure module. It does not replace localStorage, add auth/RBAC UI, add realtime KDS, or make order/payment commands authoritative.
 
 ## Current Known Coupling
 
