@@ -8,8 +8,8 @@ This map adapts the requested feature-module architecture to the current static 
 - Hash routes in `index.html`.
 - State stored in `localStorage`.
 - Cross-tab sync through `BroadcastChannel`.
-- Supabase/PostgreSQL foundation files exist for DD-008A, but runtime remains local-first in `LOCAL_DEMO`.
-- No auth, authoritative backend mutations, React, Next.js, or build system yet.
+- Supabase/PostgreSQL foundation files exist for DD-008A. DD-008B adds staff auth/RBAC gates for `SUPABASE` mode.
+- `LOCAL_DEMO` remains local-first. No authoritative backend business mutations, React, Next.js, or build system yet.
 
 ## Dependency Direction
 
@@ -438,7 +438,7 @@ Notes:
 - Default mode is `LOCAL_DEMO`.
 - `SUPABASE` mode must be explicitly configured with public URL plus publishable key.
 - Connection state must not report `ONLINE` from browser network status alone.
-- DD-008B/C/D own auth, command authorization, realtime, and reconnect workflows.
+- DD-008B owns staff auth/RBAC. DD-008C/D own command authorization, realtime, and reconnect workflows.
 
 ### shared/db
 
@@ -446,7 +446,24 @@ Supabase/PostgreSQL schema foundation exists under `supabase/`, but it is not ru
 
 ### shared/auth
 
-Not created yet. No auth exists.
+Owns:
+
+- Browser staff login/logout/auth gate presentation for `SUPABASE` mode.
+- Staff route-to-permission/workstation intent mapping.
+- Client-side normalization for staff context and authorization RPC results.
+- Documentation of role-to-permission matrix.
+
+Current location:
+
+- `src/shared/auth/index.js`
+- `src/shared/auth/README.md`
+
+Does not own:
+
+- Authoritative permission decisions; those live in Supabase RPC/RLS helpers.
+- Business mutations for orders, payments, KDS, service requests, or table sessions.
+- Service role keys, admin Auth API calls, password/PIN storage, or production secrets.
+- Staff invitation/MFA UX beyond documented future scope.
 
 ### shared/realtime
 
@@ -492,6 +509,7 @@ Current:
 - `src/features/table-session/index.js`
 - `src/features/payments/index.js`
 - `src/shared/backend/index.js`
+- `src/shared/auth/index.js`
 
 ## Protected Modules By Common Task
 
@@ -519,3 +537,8 @@ Change table session or floor occupancy:
 
 - Target: `table-session` plus app shell wiring for persistence/audit/DOM
 - Protected: `station-workflow`, item-level serving, payment provider/split/refund rules, menu/admin CRUD, physical table CRUD, and table merge/join
+
+Change staff auth/RBAC:
+
+- Target: `shared/auth` plus Supabase auth/RBAC migrations/tests and app route gate wiring
+- Protected: public QR/menu functions, LOCAL_DEMO behavior, order/payment/KDS/table-session business rules, service role/admin auth APIs, and DD-008A migration history

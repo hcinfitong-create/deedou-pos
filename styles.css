@@ -574,6 +574,43 @@ textarea {
   margin-top: 18px;
 }
 
+.auth-gate {
+  max-width: 780px;
+  margin: 18px auto 0;
+}
+
+.auth-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.auth-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.auth-form label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.auth-form button {
+  align-self: end;
+}
+
+.auth-note {
+  margin-bottom: 0;
+}
+
+.auth-session-pill {
+  white-space: nowrap;
+}
+
 .ops-head {
   display: flex;
   align-items: flex-start;
@@ -1238,7 +1275,8 @@ textarea {
   .cashier-layout,
   .compact-list,
   .reconcile-grid,
-  .counter-layout {
+  .counter-layout,
+  .auth-form {
     grid-template-columns: 1fr;
   }
 

@@ -15,9 +15,12 @@ import {
 } from "../src/shared/backend/index.js";
 
 const migrationSql = readFileSync(new URL("../supabase/migrations/20260812000000_dd008a_backend_foundation.sql", import.meta.url), "utf8");
+const authMigrationSql = readFileSync(new URL("../supabase/migrations/20260812010000_dd008b_auth_rbac.sql", import.meta.url), "utf8");
+const authContractSql = readFileSync(new URL("../supabase/tests/dd008b_auth_rbac_contract.sql", import.meta.url), "utf8");
 const seedSql = readFileSync(new URL("../supabase/seed.sql", import.meta.url), "utf8");
 const gitignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
 const ciWorkflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+const supabaseConfig = readFileSync(new URL("../supabase/config.toml", import.meta.url), "utf8");
 
 const exposedTables = Object.freeze([
   "locations",
@@ -367,9 +370,142 @@ test("CI executes real DD-008A Supabase database contract on GitHub runner", () 
   assert.doesNotMatch(ciWorkflow, /SUPABASE_SERVICE_ROLE|SERVICE_ROLE|DATABASE_URL|PRODUCTION/i);
 });
 
+test("DD-008B enables local Supabase Auth while disabling public signup", () => {
+  assert.match(supabaseConfig, /\[auth\]\s+enabled = true/i);
+  assert.match(supabaseConfig, /\[auth\.email\][\s\S]*enable_signup = false/i);
+});
+
+test("DD-008B creates staff profile, role, permission, assignment, and device tables with RLS", () => {
+  [
+    "staff_profiles",
+    "roles",
+    "permissions",
+    "role_permissions",
+    "staff_location_assignments",
+    "staff_role_assignments",
+    "workstation_devices"
+  ].forEach((tableName) => {
+    assert.match(authMigrationSql, new RegExp(`create table if not exists public\\.${tableName}`, "i"));
+    assert.match(authMigrationSql, new RegExp(`alter table public\\.${tableName} enable row level security;`, "i"));
+    assert.match(authMigrationSql, new RegExp(`revoke all on public\\.${tableName} from anon, authenticated;`, "i"));
+  });
+  assert.match(authMigrationSql, /auth_user_id uuid not null unique references auth\.users\(id\) on delete restrict/i);
+  assert.match(authMigrationSql, /credential_hash text not null unique/i);
+});
+
+test("DD-008B documents and seeds the role permission vocabulary", () => {
+  [
+    "menu.read",
+    "menu.manage",
+    "orders.read",
+    "orders.accept",
+    "orders.create_staff",
+    "service.serve",
+    "service_requests.read",
+    "service_requests.complete",
+    "course.manage",
+    "kds.kitchen",
+    "kds.bar",
+    "kds.dessert",
+    "tables.read",
+    "tables.manage_session",
+    "payments.read",
+    "payments.record",
+    "payments.void",
+    "payments.refund",
+    "audit.read",
+    "staff.read",
+    "staff.manage",
+    "devices.manage"
+  ].forEach((permission) => {
+    assert.match(authMigrationSql, new RegExp(`'${escapeRegExp(permission)}'`, "i"));
+  });
+  ["OWNER", "MANAGER", "CASHIER", "FLOOR_STAFF", "KITCHEN", "BAR", "DESSERT", "ADMIN_MENU"].forEach((role) => {
+    assert.match(authMigrationSql, new RegExp(`'${role}'`, "i"));
+  });
+});
+
+test("DD-008B authorization helpers use auth.uid, empty search path, and fully qualified relations", () => {
+  [
+    "current_staff_id",
+    "is_active_staff",
+    "has_location_access",
+    "has_permission",
+    "authorize_staff_access",
+    "get_my_staff_context",
+    "can_grant_role_at_location",
+    "register_workstation_device",
+    "revoke_workstation_device"
+  ].forEach((functionName) => {
+    const sql = authFunctionSql(functionName);
+    assert.match(sql, /security definer/i);
+    assert.match(sql, /set search_path = ''/i);
+    assert.doesNotMatch(sql, /set search_path = public/i);
+  });
+  assert.match(authFunctionSql("current_staff_id"), /auth\.uid\(\)/i);
+  assert.match(authFunctionSql("has_permission"), /auth\.uid\(\)/i);
+  assert.doesNotMatch(authMigrationSql, /jwt.*staff|staff.*jwt|raw_app_meta_data[\s\S]*role_permissions/i);
+});
+
+test("DD-008B exposes only intended RPCs and no business write grants", () => {
+  assert.doesNotMatch(authMigrationSql, /grant\s+(insert|update|delete|all)[\s\S]*to\s+anon/i);
+  assert.doesNotMatch(authMigrationSql, /grant\s+(insert|update|delete|all)[\s\S]*to\s+authenticated/i);
+  assert.match(authMigrationSql, /grant execute on function public\.authorize_staff_access\(text, text, text, text\) to anon, authenticated;/i);
+  ["list_staff_orders", "list_staff_payment_transactions", "assign_staff_role_at_location", "revoke_workstation_device"].forEach((functionName) => {
+    assert.match(authMigrationSql, new RegExp(`grant execute on function public\\.${functionName}`, "i"));
+  });
+});
+
+test("DD-008B delegation ceiling and device constraints are enforced server-side", () => {
+  const delegation = authFunctionSql("can_grant_role_at_location");
+  const authorize = authFunctionSql("authorize_staff_access");
+  const audit = authFunctionSql("prepare_audit_context");
+
+  assert.match(delegation, /SELF_ESCALATION_BLOCKED/i);
+  assert.match(delegation, /PRIVILEGE_CEILING_EXCEEDED/i);
+  assert.match(delegation, /public\.has_permission\(p_location_id, public\.permissions\.permission_key\) = false/i);
+  assert.match(authorize, /DEVICE_UNREGISTERED/i);
+  assert.match(authorize, /DEVICE_MODE_DENIED/i);
+  assert.match(authorize, /public\.workstation_mode_allows_permission/i);
+  assert.match(audit, /p_client_actor_id <> coalesce\(v_staff_id, ''\)/i);
+});
+
+test("DD-008B database contract covers required real Supabase auth and RBAC cases", () => {
+  [
+    "SIGN_IN_REQUIRED",
+    "STAFF_INACTIVE",
+    "PERMISSION_DENIED",
+    "LOCATION_DENIED",
+    "DEVICE_UNREGISTERED",
+    "DEVICE_MODE_DENIED",
+    "SELF_ESCALATION_BLOCKED",
+    "PRIVILEGE_CEILING_EXCEEDED",
+    "expected authenticated operational write to be blocked",
+    "expected owner to register device",
+    "expected staff deactivation immediate without JWT refresh",
+    "expected audit context to ignore client actor spoof",
+    "expected unauthenticated exact-token QR resolver to work"
+  ].forEach((evidence) => {
+    assert.match(authContractSql, new RegExp(escapeRegExp(evidence), "i"));
+  });
+});
+
+test("CI executes real DD-008B Supabase database contract on GitHub runner", () => {
+  assert.match(ciWorkflow, /supabase\/tests\/dd008b_auth_rbac_contract\.sql/i);
+  assert.match(ciWorkflow, /psql "\$DB_URL" -v ON_ERROR_STOP=1 -f supabase\/tests\/dd008b_auth_rbac_contract\.sql/i);
+  assert.match(ciWorkflow, /"feat\/\*\*"/i);
+  assert.doesNotMatch(ciWorkflow, /SUPABASE_SERVICE_ROLE|SERVICE_ROLE|PRODUCTION/i);
+});
+
 function functionSql(functionName) {
   const match = migrationSql.match(new RegExp(`create or replace function public\\.${functionName}\\([\\s\\S]*?\\n\\$\\$;`, "i"));
   assert.ok(match, `Missing function ${functionName}`);
+  return match[0];
+}
+
+function authFunctionSql(functionName) {
+  const match = authMigrationSql.match(new RegExp(`create or replace function public\\.${functionName}\\([\\s\\S]*?\\n\\$\\$;`, "i"));
+  assert.ok(match, `Missing auth function ${functionName}`);
   return match[0];
 }
 

@@ -2,7 +2,7 @@ name: DeeDou CI
 
 on:
   push:
-    branches: [main, "fix/**", "feature/**"]
+    branches: [main, "fix/**", "feature/**", "feat/**"]
   pull_request:
     branches: [main]
 
@@ -62,6 +62,11 @@ jobs:
         run: |
           DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008a_contract.sql
+
+      - name: Run DD-008B auth and RBAC database contract
+        run: |
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008b_auth_rbac_contract.sql
 
       - name: Stop Supabase local stack
         if: always()

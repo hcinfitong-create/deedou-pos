@@ -1,6 +1,21 @@
 import { COUNTER_DRAFT_KEY, COUNTER_SEARCH_KEY, PRODUCT_KEY, STATE_KEY, stationAliases, stations, tables } from "./src/shared/config/index.js";
 import { copy } from "./src/shared/i18n/index.js";
 import { escapeAttr, escapeHtml, formatMoney, normalizeSearch, slugify } from "./src/shared/utils/index.js";
+import { BACKEND_MODES, getBackendConfig } from "./src/shared/backend/index.js";
+import {
+  createInitialStaffAuthState,
+  createSupabasePasswordAuthApi,
+  DEFAULT_LOCATION_ID,
+  DEVICE_CREDENTIAL_KEY,
+  evaluateStaffRouteAccess,
+  getPreferredWorkstationMode,
+  getStaffRoutePolicy,
+  isStaffRoute,
+  renderStaffAuthGate,
+  routeAuthorizationKey,
+  STAFF_LOCATION_KEY,
+  WORKSTATION_MODE_KEY
+} from "./src/shared/auth/index.js";
 import { categories, categoryAliases, compareMenuItems, defaultProducts, filterMenuItems, menuKinds } from "./src/features/customer-menu/index.js";
 import {
   applyOrderStatusTransition,
@@ -88,6 +103,10 @@ let counterSearch = localStorage.getItem(COUNTER_SEARCH_KEY) || "";
 let pendingVoidOrderId = "";
 let pendingSplitPlan = null;
 let cashierNotice = "";
+const backendConfig = getBackendConfig();
+const staffAuthApi = createSupabasePasswordAuthApi({ config: backendConfig });
+let staffAuthState = createInitialStaffAuthState({ config: backendConfig, storage: sessionStorage, localStorage });
+let pendingStaffAuthKey = "";
 
 const CASHIER_PAYMENT_METHODS = Object.freeze([
   { method: "CASH", label: "Cash", buttonClass: "primary" },
@@ -298,7 +317,13 @@ function route() {
 
 function render() {
   const current = route();
-  document.getElementById("app").innerHTML = shell(current);
+  const staffAccess = evaluateCurrentStaffRoute(current.name);
+  document.getElementById("app").innerHTML = shell(current, staffAccess);
+  if (shouldRenderStaffAuthGate(current.name, staffAccess)) {
+    bindStaffAuthGate(current.name);
+    ensureStaffAuthorization(current.name);
+    return;
+  }
   if (current.name === "customer") bindCustomer(current.token);
   if (current.name === "staff") bindStaff();
   if (current.name === "cashier") bindCashier();
@@ -306,7 +331,7 @@ function render() {
   if (current.name === "admin") bindAdmin();
 }
 
-function shell(current) {
+function shell(current, staffAccess) {
   const c = copy[lang];
   const active = current.name;
   return `
@@ -326,21 +351,106 @@ function shell(current) {
           <button class="${active === "admin" ? "active" : ""}" data-route="#/admin">${c.admin}</button>
           <button data-lang="vi" class="${lang === "vi" ? "active" : ""}">VI</button>
           <button data-lang="en" class="${lang === "en" ? "active" : ""}">EN</button>
+          ${renderStaffAuthNav()}
         </nav>
       </header>
-      ${pageFor(active, current)}
+      ${pageFor(active, current, staffAccess)}
     </main>
   `;
 }
 
-function pageFor(active, current) {
+function pageFor(active, current, staffAccess) {
   if (active === "customer") return customerPage(current.token);
+  if (shouldRenderStaffAuthGate(active, staffAccess)) {
+    return renderStaffAuthGate({ routeName: active, authState: staffAuthState, access: staffAccess, config: backendConfig });
+  }
   if (active === "cashier") return cashierPage();
   if (active === "staff") return staffPage();
   if (active === "bar") return renderStationPage({ orders: state.orders, stationGroup: "BAR", stations });
   if (active === "kitchen") return renderStationPage({ orders: state.orders, stationGroup: "KITCHEN", stations });
   if (active === "dessert") return renderStationPage({ orders: state.orders, stationGroup: "DESSERT", stations });
   return adminPage();
+}
+
+function evaluateCurrentStaffRoute(routeName) {
+  return evaluateStaffRouteAccess({ config: backendConfig, routeName, authState: staffAuthState });
+}
+
+function shouldRenderStaffAuthGate(routeName, staffAccess) {
+  return backendConfig.mode === BACKEND_MODES.SUPABASE && isStaffRoute(routeName) && staffAccess?.ok !== true;
+}
+
+function renderStaffAuthNav() {
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE || !staffAuthState.session?.accessToken) return "";
+  const staffContext = staffAuthState.staffContext?.find((row) => row.locationId === staffAuthState.locationId) || staffAuthState.staffContext?.[0];
+  const label = staffContext?.displayName || staffAuthState.session.userEmail || "Staff";
+  const locationId = staffAuthState.locationId || DEFAULT_LOCATION_ID;
+  return `
+    <span class="station auth-session-pill">${escapeHtml(label)} · ${escapeHtml(locationId)}</span>
+    <button data-auth-logout>Logout</button>
+  `;
+}
+
+function ensureStaffAuthorization(routeName) {
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE || !isStaffRoute(routeName)) return;
+  if (!staffAuthState.session?.accessToken) return;
+  const policy = getStaffRoutePolicy(routeName);
+  const authKey = routeAuthorizationKey({ routeName, authState: staffAuthState, policy });
+  if (staffAuthState.status === "CHECKING" && pendingStaffAuthKey === authKey) return;
+  if (staffAuthState.checkedKey === authKey) return;
+  refreshStaffAuthorization(routeName, authKey);
+}
+
+async function refreshStaffAuthorization(routeName, authKey = "") {
+  const policy = getStaffRoutePolicy(routeName);
+  if (!policy || !staffAuthState.session?.accessToken) return;
+  const nextKey = authKey || routeAuthorizationKey({ routeName, authState: staffAuthState, policy });
+  pendingStaffAuthKey = nextKey;
+  staffAuthState = {
+    ...staffAuthState,
+    status: "CHECKING",
+    authorization: { ok: false, reason: "AUTH_LOADING", route: routeName },
+    error: ""
+  };
+  render();
+
+  try {
+    const [authorization, staffContext] = await Promise.all([
+      staffAuthApi.authorize({
+        session: staffAuthState.session,
+        locationId: staffAuthState.locationId,
+        permission: policy.permission,
+        workstationMode: policy.workstationMode,
+        deviceCredential: staffAuthState.deviceCredential,
+        routeName
+      }),
+      staffAuthApi.getStaffContext({
+        session: staffAuthState.session,
+        locationId: staffAuthState.locationId,
+        deviceCredential: staffAuthState.deviceCredential
+      })
+    ]);
+    if (pendingStaffAuthKey !== nextKey) return;
+    staffAuthState = {
+      ...staffAuthState,
+      status: authorization.ok ? "AUTHORIZED" : "DENIED",
+      authorization,
+      staffContext,
+      checkedKey: nextKey,
+      workstationMode: authorization.workstationMode || policy.workstationMode,
+      error: ""
+    };
+  } catch (error) {
+    if (pendingStaffAuthKey !== nextKey) return;
+    staffAuthState = {
+      ...staffAuthState,
+      status: "DENIED",
+      authorization: { ok: false, reason: "BACKEND_UNAVAILABLE", route: routeName },
+      checkedKey: nextKey,
+      error: error?.message || "Supabase Auth unavailable."
+    };
+  }
+  render();
 }
 
 function customerPage(token) {
@@ -1353,6 +1463,90 @@ function bindAdminForm() {
   });
 }
 
+function bindStaffAuthGate(routeName) {
+  bindGlobal();
+  document.querySelector("[data-auth-login]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const email = String(formData.get("email") || "").trim();
+    const password = String(formData.get("password") || "");
+    const locationId = String(formData.get("locationId") || "").trim() || DEFAULT_LOCATION_ID;
+    const workstationMode = getPreferredWorkstationMode(routeName, String(formData.get("workstationMode") || ""));
+    const deviceCredential = String(formData.get("deviceCredential") || "").trim();
+
+    localStorage.setItem(STAFF_LOCATION_KEY, locationId);
+    localStorage.setItem(WORKSTATION_MODE_KEY, workstationMode);
+    sessionStorage.setItem(DEVICE_CREDENTIAL_KEY, deviceCredential);
+
+    staffAuthState = {
+      ...staffAuthState,
+      status: "CHECKING",
+      locationId,
+      workstationMode,
+      deviceCredential,
+      authorization: { ok: false, reason: "AUTH_LOADING", route: routeName },
+      error: ""
+    };
+    pendingStaffAuthKey = "";
+    render();
+
+    try {
+      let session = staffAuthState.session;
+      if (!session?.accessToken || email || password) {
+        if (!email || !password) {
+          staffAuthState = {
+            ...staffAuthState,
+            status: "SIGNED_OUT",
+            authorization: { ok: false, reason: "SIGN_IN_REQUIRED", route: routeName },
+            error: "Email và password là bắt buộc để đăng nhập."
+          };
+          render();
+          return;
+        }
+        const signedIn = await staffAuthApi.signInWithPassword({ email, password });
+        if (!signedIn.ok) {
+          staffAuthState = {
+            ...staffAuthState,
+            status: "SIGNED_OUT",
+            session: null,
+            authorization: { ok: false, reason: "SIGN_IN_REQUIRED", route: routeName },
+            error: signedIn.reason || "Đăng nhập thất bại."
+          };
+          render();
+          return;
+        }
+        session = signedIn.session;
+      }
+
+      staffAuthState = {
+        ...staffAuthState,
+        session,
+        status: "SIGNED_IN_STALE",
+        checkedKey: "",
+        authorization: null,
+        error: ""
+      };
+      await refreshStaffAuthorization(routeName);
+    } catch (error) {
+      staffAuthState = {
+        ...staffAuthState,
+        status: "DENIED",
+        authorization: { ok: false, reason: "BACKEND_UNAVAILABLE", route: routeName },
+        error: error?.message || "Supabase Auth unavailable."
+      };
+      render();
+    }
+  });
+}
+
+function logoutStaff() {
+  staffAuthApi.logout();
+  sessionStorage.removeItem(DEVICE_CREDENTIAL_KEY);
+  staffAuthState = createInitialStaffAuthState({ config: backendConfig, storage: sessionStorage, localStorage });
+  pendingStaffAuthKey = "";
+  render();
+}
+
 function bindGlobal() {
   document.querySelectorAll("[data-route]").forEach((button) => button.addEventListener("click", () => {
     location.hash = button.dataset.route;
@@ -1362,6 +1556,7 @@ function bindGlobal() {
     localStorage.setItem("deedou_lang", lang);
     render();
   }));
+  document.querySelectorAll("[data-auth-logout]").forEach((button) => button.addEventListener("click", logoutStaff));
 }
 
 function bindOptionPickers() {
