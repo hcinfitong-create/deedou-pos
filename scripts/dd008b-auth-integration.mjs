@@ -49,6 +49,7 @@ const adminClient = createClient(apiUrl, serviceRoleKey, {
 });
 
 await waitForAuthReady();
+printSupabaseAuthRuntimeInfo();
 
 const cashierUser = await createRuntimeUser("cashier");
 await printAuthStructuralDiagnostics(cashierUser, "post-create/pre-provisioning");
@@ -264,13 +265,25 @@ async function createRuntimeUser(kind) {
   const email = `${runId}_${kind}@example.invalid`;
   const password = secret(`${kind}-password`);
   diagnosticSecrets.push(password);
-  const { data, error } = await retryAuthCall(() => adminClient.auth.admin.createUser({
-    email,
-    password,
-    email_confirm: true,
-    user_metadata: { dd008b_runtime: runId, kind }
-  }), `create runtime auth user ${kind}`);
-  if (error || !data.user?.id) throw new Error(`Failed to create runtime auth user ${kind}: ${error?.message || "missing user"}`);
+  let data;
+  let error;
+  try {
+    ({ data, error } = await retryAuthCall(() => adminClient.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: { dd008b_runtime: runId, kind }
+    }), `create runtime auth user ${kind}`));
+  } catch (createError) {
+    console.error(`DD-008B AUTH USER CREATION: admin.createUser(${kind}) failed before DeeDou provisioning.`);
+    printGoTrueLogs();
+    throw createError;
+  }
+  if (error || !data.user?.id) {
+    console.error(`DD-008B AUTH USER CREATION: admin.createUser(${kind}) failed before DeeDou provisioning.`);
+    printGoTrueLogs();
+    throw new Error(`Failed to create runtime auth user ${kind}: ${error?.message || "missing user"}`);
+  }
   return { id: data.user.id, email, password, storage: memoryStorage() };
 }
 
@@ -411,6 +424,18 @@ function printGoTrueLogs() {
   console.error(`DD-008B GOTRUE LOGS BEGIN container=${containerName}`);
   console.error(text || "[no logs returned]");
   console.error("DD-008B GOTRUE LOGS END");
+}
+
+function printSupabaseAuthRuntimeInfo() {
+  const result = spawnSync("docker", ["ps", "--format", "{{.Names}}\t{{.Image}}"], {
+    encoding: "utf8"
+  });
+  if (result.status !== 0) {
+    console.log("DD-008B SUPABASE AUTH RUNTIME: docker ps unavailable");
+    return;
+  }
+  const authRows = result.stdout.split(/\r?\n/).filter((line) => line.includes("supabase_auth_"));
+  console.log(`DD-008B SUPABASE AUTH RUNTIME: ${authRows.join(" | ") || "no supabase_auth_* container found"}`);
 }
 
 function findSupabaseAuthContainer() {
