@@ -1,7 +1,8 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 
+const AUTH_PASSWORD_MAX_BYTES = 64;
 const statusEnv = parseEnvOutput(execFileSync("npx", ["supabase", "status", "-o", "env"], { encoding: "utf8" }));
 const apiUrl = statusEnv.API_URL || statusEnv.SUPABASE_URL || "http://127.0.0.1:54321";
 const anonKey = statusEnv.ANON_KEY || statusEnv.SUPABASE_ANON_KEY;
@@ -263,7 +264,7 @@ console.log("real password login/JWT, restore, refresh, local logout, server-iss
 
 async function createRuntimeUser(kind) {
   const email = `${runId}_${kind}@example.invalid`;
-  const password = secret(`${kind}-password`);
+  const password = runtimeAuthPassword(`${kind}-password`);
   diagnosticSecrets.push(password);
   let data;
   let error;
@@ -483,6 +484,15 @@ function parseEnvOutput(output) {
 
 function secret(label) {
   return `${runId}_${label}_${randomUUID()}_${randomUUID()}`;
+}
+
+function runtimeAuthPassword(label) {
+  const password = `Dd008B-${label}-${randomBytes(24).toString("base64url")}`;
+  assert(
+    Buffer.byteLength(password, "utf8") <= AUTH_PASSWORD_MAX_BYTES,
+    `runtime Auth password exceeds ${AUTH_PASSWORD_MAX_BYTES} UTF-8 bytes`
+  );
+  return password;
 }
 
 function lit(value) {
