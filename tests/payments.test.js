@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   allocateTableTender,
@@ -49,7 +50,7 @@ test("normalizes legacy payments, refunds, and paidVnd-only orders into ledger t
     total: 100000,
     payments: [
       { id: "PAY-1", method: "cash", amountVnd: 100000, status: "SUCCEEDED", paidAt: "2026-08-12T01:00:00.000Z" },
-      { id: "REF-1", method: "REFUND", amountVnd: 25000, status: "SUCCEEDED", relatedPaymentId: "PAY-1" }
+      { id: "REF-1", method: "REFUND", amountVnd: -25000, status: "SUCCEEDED" }
     ]
   });
 
@@ -408,6 +409,51 @@ test("payment history exposes per-payment void/refund state for UI", () => {
   assert.equal(history[0].refundedVnd, 40000);
   assert.equal(history[0].refundableVnd, 60000);
   assert.equal(history[1].type, "REFUND");
+});
+
+test("payment history preserves identity when same-method tenders have the same amount", () => {
+  const target = order({ status: "SERVED", total: 200000 });
+  recordPayment(target, { id: "PAY-A", method: "CARD_EXTERNAL_TERMINAL", amountVnd: 100000 });
+  recordPayment(target, { id: "PAY-B", method: "CARD_EXTERNAL_TERMINAL", amountVnd: 100000 });
+  recordRefund(target, { id: "REF-A", paymentId: "PAY-A", amountVnd: 25000 });
+
+  const history = paymentHistoryView(target);
+  const firstPayment = history.find((transaction) => transaction.id === "PAY-A");
+  const secondPayment = history.find((transaction) => transaction.id === "PAY-B");
+  const refund = history.find((transaction) => transaction.id === "REF-A");
+
+  assert.equal(firstPayment.method, "CARD");
+  assert.equal(firstPayment.provider, "MANUAL");
+  assert.equal(firstPayment.refundedVnd, 25000);
+  assert.equal(firstPayment.refundableVnd, 75000);
+  assert.equal(secondPayment.refundedVnd, 0);
+  assert.equal(secondPayment.refundableVnd, 100000);
+  assert.equal(refund.relatedPaymentId, "PAY-A");
+  assert.equal(refund.provider, "MANUAL");
+});
+
+test("cashier order payment UI exposes manual and demo methods for takeaway checks", () => {
+  const appSource = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+
+  assert.match(appSource, /const CASHIER_PAYMENT_METHODS/);
+  ["CASH", "CARD_EXTERNAL_TERMINAL", "BANK_TRANSFER", "VNPAY", "MOMO", "ZALOPAY"].forEach((method) => {
+    assert.match(appSource, new RegExp(`method: "${method}"`));
+  });
+  ["VNPAY \\(demo\\)", "MoMo \\(demo\\)", "ZaloPay \\(demo\\)"].forEach((label) => {
+    assert.match(appSource, new RegExp(label));
+  });
+  assert.match(appSource, /function renderOrderPaymentControls[\s\S]*renderPaymentMethodButtons\(\{ actionAttr: "data-pay"/);
+});
+
+test("cashier payment history renderer exposes payment and refund identities", () => {
+  const appSource = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+
+  assert.match(appSource, /function renderPaymentTransactionIdentity/);
+  assert.match(appSource, /escapeHtml\(transaction\.id/);
+  assert.match(appSource, /Against \$\{escapeHtml\(transaction\.relatedPaymentId/);
+  assert.match(appSource, /formatMoney\(transaction\.amountVnd\)/);
+  assert.match(appSource, /transaction\.refundedVnd \|\| 0/);
+  assert.match(appSource, /transaction\.refundableVnd \|\| 0/);
 });
 
 test("payment commands preserve DD-003 through DD-006 operational fields", () => {

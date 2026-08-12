@@ -89,6 +89,15 @@ let pendingVoidOrderId = "";
 let pendingSplitPlan = null;
 let cashierNotice = "";
 
+const CASHIER_PAYMENT_METHODS = Object.freeze([
+  { method: "CASH", label: "Cash", buttonClass: "primary" },
+  { method: "CARD_EXTERNAL_TERMINAL", label: "Card (manual)", buttonClass: "primary" },
+  { method: "BANK_TRANSFER", label: "Bank transfer (manual)", buttonClass: "ghost" },
+  { method: "VNPAY", label: "VNPAY (demo)", buttonClass: "ghost" },
+  { method: "MOMO", label: "MoMo (demo)", buttonClass: "ghost" },
+  { method: "ZALOPAY", label: "ZaloPay (demo)", buttonClass: "ghost" }
+]);
+
 const bus = "BroadcastChannel" in window ? new BroadcastChannel("deedou-pos") : null;
 if (bus) {
   bus.onmessage = () => {
@@ -618,7 +627,8 @@ function tablePaymentPanel(table, orders) {
   if (table.code === "TAKEAWAY") return "";
   const summary = paymentSummaryForOrders(orders);
   const splitPlan = pendingSplitPlan?.scope === "TABLE" && pendingSplitPlan.tableCode === table.code ? pendingSplitPlan : null;
-  const disabled = summary.outstandingVnd <= 0 ? "disabled" : "";
+  const paymentDisabled = summary.outstandingVnd <= 0;
+  const disabled = paymentDisabled ? "disabled" : "";
   return `
     <section class="table-payment-panel">
       <div class="order-head">
@@ -641,19 +651,27 @@ function tablePaymentPanel(table, orders) {
       </label>
       ${splitPlan ? renderSplitPlan(splitPlan) : ""}
       <div class="split-actions table-payment-actions">
-        <button class="ghost" data-table-prebill="${table.code}">Pre-bill</button>
-        <button class="primary" data-table-pay="${table.code}" data-method="CASH" ${disabled}>Cash</button>
-        <button class="primary" data-table-pay="${table.code}" data-method="CARD_EXTERNAL_TERMINAL" ${disabled}>Card</button>
-        <button class="ghost" data-table-pay="${table.code}" data-method="BANK_TRANSFER" ${disabled}>Bank</button>
-        <button class="ghost" data-table-pay="${table.code}" data-method="VNPAY" ${disabled}>VNPAY</button>
-        <button class="ghost" data-table-pay="${table.code}" data-method="MOMO" ${disabled}>MoMo</button>
-        <button class="ghost" data-table-pay="${table.code}" data-method="ZALOPAY" ${disabled}>ZaloPay</button>
-        <button class="ghost" data-table-split="${table.code}" ${disabled}>Split 2</button>
-        <button class="danger" data-table-void="${table.code}">Void bill</button>
+        <button class="ghost" data-table-prebill="${escapeAttr(table.code)}">Pre-bill</button>
+        ${renderPaymentMethodButtons({ actionAttr: "data-table-pay", targetId: table.code, disabled: paymentDisabled })}
+        <button class="ghost" data-table-split="${escapeAttr(table.code)}" ${disabled}>Split 2</button>
+        <button class="danger" data-table-void="${escapeAttr(table.code)}">Void bill</button>
       </div>
+      ${renderPaymentDemoNote()}
       ${orders.map(renderPaymentHistory).join("")}
     </section>
   `;
+}
+
+function renderPaymentMethodButtons({ actionAttr, targetId, disabled = false, compact = false } = {}) {
+  const disabledAttr = disabled ? "disabled" : "";
+  const compactClass = compact ? " compact" : "";
+  return CASHIER_PAYMENT_METHODS.map((item) => `
+    <button class="${item.buttonClass}${compactClass}" ${actionAttr}="${escapeAttr(targetId)}" data-method="${escapeAttr(item.method)}" ${disabledAttr}>${escapeHtml(item.label)}</button>
+  `).join("");
+}
+
+function renderPaymentDemoNote() {
+  return `<small class="muted payment-demo-note">VNPAY/MoMo/ZaloPay là thanh toán demo nội bộ, chưa gọi PSP thật.</small>`;
 }
 
 function renderSplitPlan(plan) {
@@ -706,10 +724,9 @@ function renderOrderPaymentControls(order) {
         <input data-payment-amount="${escapeAttr(key)}" value="${summary.outstandingVnd}" inputmode="numeric" />
       </label>
       <div class="split-actions compact-actions">
-        <button class="primary compact" data-pay="${escapeAttr(order.id)}" data-method="CASH">Cash</button>
-        <button class="primary compact" data-pay="${escapeAttr(order.id)}" data-method="CARD_EXTERNAL_TERMINAL">Card</button>
-        <button class="ghost compact" data-pay="${escapeAttr(order.id)}" data-method="BANK_TRANSFER">Bank</button>
+        ${renderPaymentMethodButtons({ actionAttr: "data-pay", targetId: order.id, compact: true })}
       </div>
+      ${renderPaymentDemoNote()}
     </div>
   `;
 }
@@ -732,7 +749,7 @@ function renderPaymentHistory(order, options = {}) {
         const refundKey = refundPaymentAmountKey(order.id, transaction.id);
         return `
           <div class="status-pill">
-            <span>${transaction.type} ${transaction.method} ${formatMoney(transaction.amountVnd)}${transaction.voided ? " - voided" : ""}${transaction.refundedVnd ? ` - refunded ${formatMoney(transaction.refundedVnd)}` : ""}</span>
+            ${renderPaymentTransactionIdentity(transaction)}
             <span class="split-actions compact-actions">
               ${canVoidPayment ? `<button class="ghost compact" data-payment-void="${escapeAttr(order.id)}" data-payment-id="${escapeAttr(transaction.id)}">Void payment</button>` : ""}
               ${canRefundPayment ? `
@@ -748,6 +765,43 @@ function renderPaymentHistory(order, options = {}) {
       }).join("")}
     </div>
   `;
+}
+
+function renderPaymentTransactionIdentity(transaction) {
+  const methodProvider = `${transaction.method || "-"} / ${transaction.provider || "MANUAL"}`;
+  if (transaction.type === "PAYMENT") {
+    return `
+      <span>
+        <strong>${escapeHtml(transaction.id)}</strong>
+        <span>${escapeHtml(methodProvider)}</span>
+        <span>Gốc ${formatMoney(transaction.amountVnd)}</span>
+        <span>Đã refund ${formatMoney(transaction.refundedVnd || 0)}</span>
+        <span>Còn refund ${formatMoney(transaction.refundableVnd || 0)}</span>
+        ${transaction.voided ? `<span>Voided</span>` : ""}
+      </span>
+    `;
+  }
+  if (transaction.type === "REFUND") {
+    return `
+      <span>
+        <strong>${escapeHtml(transaction.id)}</strong>
+        <span>REFUND ${formatMoney(transaction.amountVnd)}</span>
+        <span>Against ${escapeHtml(transaction.relatedPaymentId || "-")}</span>
+        <span>${escapeHtml(methodProvider)}</span>
+      </span>
+    `;
+  }
+  if (transaction.type === "PAYMENT_VOID") {
+    return `
+      <span>
+        <strong>${escapeHtml(transaction.id)}</strong>
+        <span>VOID ${formatMoney(transaction.amountVnd)}</span>
+        <span>Against ${escapeHtml(transaction.relatedPaymentId || "-")}</span>
+        <span>${escapeHtml(methodProvider)}</span>
+      </span>
+    `;
+  }
+  return `<span><strong>${escapeHtml(transaction.id || "-")}</strong> ${escapeHtml(transaction.type || "PAYMENT")} ${formatMoney(transaction.amountVnd)}</span>`;
 }
 
 function renderTableSessionRepairWarning(repair) {

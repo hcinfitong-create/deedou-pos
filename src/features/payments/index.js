@@ -371,9 +371,9 @@ function normalizePaymentTransaction(record = {}, context = {}) {
   const rawStatus = String(record.status || PAYMENT_TRANSACTION_STATUS).trim().toUpperCase();
   if (rawStatus && rawStatus !== PAYMENT_TRANSACTION_STATUS) return null;
 
-  const amountVnd = normalizeMoney(record.amountVnd ?? record.amount ?? record.value);
-  if (!amountVnd) return null;
   const type = normalizeTransactionType(record);
+  const amountVnd = normalizeTransactionAmount(record, type);
+  if (!amountVnd) return null;
 
   const id = normalizeId(record.id || `${type === PAYMENT_TRANSACTION_TYPES.REFUND ? "LEGACY-REF" : "LEGACY-PAY"}-${context.index + 1}`);
   const method = type === PAYMENT_TRANSACTION_TYPES.REFUND
@@ -403,6 +403,19 @@ function normalizeTransactionType(record = {}) {
   if (key === PAYMENT_TRANSACTION_TYPES.PAYMENT_VOID || method === PAYMENT_TRANSACTION_TYPES.PAYMENT_VOID) return PAYMENT_TRANSACTION_TYPES.PAYMENT_VOID;
   if (key === PAYMENT_TRANSACTION_TYPES.REFUND || method === PAYMENT_METHODS.REFUND) return PAYMENT_TRANSACTION_TYPES.REFUND;
   return PAYMENT_TRANSACTION_TYPES.PAYMENT;
+}
+
+function normalizeTransactionAmount(record = {}, type) {
+  const value = record.amountVnd ?? record.amount ?? record.value;
+  const positiveAmount = normalizeMoney(value);
+  if (positiveAmount) return positiveAmount;
+  if (type !== PAYMENT_TRANSACTION_TYPES.REFUND) return 0;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value < 0) return Math.abs(value);
+  if (typeof value === "string" && /^-[1-9]\d*$/.test(value.trim())) {
+    const amount = Number(value.trim());
+    return Number.isSafeInteger(amount) ? Math.abs(amount) : 0;
+  }
+  return 0;
 }
 
 function analyzeLedger(transactions = []) {
