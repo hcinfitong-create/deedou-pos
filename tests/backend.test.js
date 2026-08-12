@@ -22,6 +22,7 @@ const packageJson = readFileSync(new URL("../package.json", import.meta.url), "u
 const gitignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
 const ciWorkflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const supabaseConfig = readFileSync(new URL("../supabase/config.toml", import.meta.url), "utf8");
+const browserSmokeScript = readFileSync(new URL("../scripts/dd008b-browser-smoke.mjs", import.meta.url), "utf8");
 
 const exposedTables = Object.freeze([
   "locations",
@@ -535,6 +536,13 @@ test("DD-008B merge gates run on Node 22 and include exact-head browser smoke", 
   assert.match(ciWorkflow, /actions\/upload-artifact@v4/i);
   assert.match(ciWorkflow, /artifacts\/dd008b-browser-smoke\//i);
   assert.doesNotMatch(ciWorkflow, /SUPABASE_SERVICE_ROLE|PRODUCTION/i);
+});
+
+test("DD-008B browser smoke waits for auth gate binding before login submit", () => {
+  const loginHelper = browserSmokeScript.match(/async function loginThroughGate[\s\S]*?\n}/)?.[0] || "";
+
+  assert.match(loginHelper, /await waitForNotChecking\(page\);[\s\S]*await assertAppReady\(page, `login gate \$\{workstationMode\}`\);/);
+  assert.match(loginHelper, /await assertAppReady[\s\S]*button\[type="submit"\]'\)\.click\(\);/);
 });
 
 function functionSql(functionName) {

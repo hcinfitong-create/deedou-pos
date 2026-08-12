@@ -468,6 +468,8 @@ async function expectSignedOutGate(page, label) {
 
 async function loginThroughGate(page, user, locationId, workstationMode) {
   await page.locator("form[data-auth-login]").waitFor({ timeout: 20000 });
+  await waitForNotChecking(page);
+  await assertAppReady(page, `login gate ${workstationMode}`);
   await page.locator('form[data-auth-login] input[name="email"]').fill(user.email);
   await page.locator('form[data-auth-login] input[name="password"]').fill(user.password);
   await page.locator('form[data-auth-login] input[name="locationId"]').fill(locationId);
