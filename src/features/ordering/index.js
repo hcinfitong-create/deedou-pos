@@ -1,4 +1,4 @@
-import { createOrderLineOptionSnapshot, defaultConfiguredSelection } from "../product-options/index.js";
+import { createOrderLineOptionSnapshot, defaultConfiguredSelection, optionSummaryLines } from "../product-options/index.js";
 
 export function clampBillQty(value, maxQty) {
   const max = Math.max(0, Number(maxQty) || 0);
@@ -221,6 +221,8 @@ export function expandOrderLines(cartLines, productById) {
     const parentLineId = line.lineId || createOperationalLineId(item.id, cartIndex, "item");
     const configured = createOrderLineOptionSnapshot(item, line.selection || defaultConfiguredSelection(item));
     if (!configured.ok) return [];
+    const parentComboOptionSummaryVi = optionSummaryLines({ optionSnapshot: configured.optionSnapshot }, "vi");
+    const parentComboOptionSummaryEn = optionSummaryLines({ optionSnapshot: configured.optionSnapshot }, "en");
     const parent = {
       id: item.id,
       lineId: parentLineId,
@@ -266,6 +268,10 @@ export function expandOrderLines(cartLines, productById) {
       isBillable: false,
       isComponent: true,
       parentComboId: item.id,
+      parentComboNameVi: item.vi,
+      parentComboNameEn: item.en,
+      parentComboOptionSummaryVi,
+      parentComboOptionSummaryEn,
       ...normalizeOrderLineOperationalFields({
         ...part,
         lineId: `${parentLineId}:component-${index}`,

@@ -129,7 +129,7 @@ export function renderStationTicket(ticket) {
 }
 
 function renderStationLine(line) {
-  const summaries = optionSummaryLines(line, "vi");
+  const summaries = stationLineSummaryLines(line, "vi");
   return `
     <li>
       <strong>${line.qty} x ${escapeHtml(line.nameVi)}</strong> <span class="station">${escapeHtml(line.station)}</span>
@@ -137,6 +137,22 @@ function renderStationLine(line) {
       <br><span class="muted">${escapeHtml(line.nameEn)} - ${escapeHtml(normalizePrepStatus(line.prepStatus || line.status))}</span>
     </li>
   `;
+}
+
+function stationLineSummaryLines(line, lang) {
+  const ownSummaries = optionSummaryLines(line, lang);
+  const parentSummaries = lang === "en" ? line.parentComboOptionSummaryEn : line.parentComboOptionSummaryVi;
+  if (!Array.isArray(parentSummaries) || !parentSummaries.length) return ownSummaries;
+
+  const variantPrefix = lang === "en" ? "Variant: " : "Phiên bản: ";
+  const variantSummary = parentSummaries.find((summary) => summary.startsWith(variantPrefix));
+  const otherParentSummaries = parentSummaries.filter((summary) => summary !== variantSummary);
+  const parentName = (lang === "en" ? line.parentComboNameEn : line.parentComboNameVi) || line.parentComboId || "Combo";
+  const configuredParent = variantSummary
+    ? `${parentName} — ${variantSummary.slice(variantPrefix.length).trim()}`
+    : parentName;
+
+  return [configuredParent, ...otherParentSummaries, ...ownSummaries];
 }
 
 function stationTitle(stationGroup) {

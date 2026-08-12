@@ -131,6 +131,75 @@ test("invalid product option config rejects duplicate IDs and impossible bounds"
   assert.equal(result.errors.includes("DUPLICATE_MODIFIER_OPTION_ID:bad:same"), true);
 });
 
+test("required modifier groups keep effective min at least one when minSelect is zero", () => {
+  const product = tea({
+    modifierGroups: [{
+      id: "sugar",
+      vi: "Đường",
+      en: "Sugar",
+      required: true,
+      multiple: false,
+      minSelect: 0,
+      maxSelect: 1,
+      options: [
+        { id: "sugar-100", vi: "100% đường", en: "100% sugar" },
+        { id: "sugar-0", vi: "Không đường", en: "No sugar" }
+      ]
+    }]
+  });
+  const config = validateProductOptionConfig(product);
+  const empty = validateConfiguredSelection(product, { variantId: "regular", modifierSelections: {} });
+
+  assert.equal(config.ok, true);
+  assert.equal(config.config.modifierGroups[0].minSelect, 1);
+  assert.equal(empty.ok, false);
+  assert.equal(empty.errors.includes("MODIFIER_GROUP_MIN:sugar"), true);
+});
+
+test("product option config rejects malformed minSelect and maxSelect bounds", () => {
+  const malformedMin = validateProductOptionConfig(tea({
+    modifierGroups: [{
+      id: "bad-min",
+      vi: "Sai min",
+      en: "Bad min",
+      minSelect: "abc",
+      maxSelect: 1,
+      options: [{ id: "one", vi: "Một", en: "One" }]
+    }]
+  }));
+  const malformedMax = validateProductOptionConfig(tea({
+    modifierGroups: [{
+      id: "bad-max",
+      vi: "Sai max",
+      en: "Bad max",
+      minSelect: 0,
+      maxSelect: "abc",
+      options: [{ id: "one", vi: "Một", en: "One" }]
+    }]
+  }));
+
+  assert.equal(malformedMin.ok, false);
+  assert.equal(malformedMin.errors.includes("MODIFIER_GROUP_INVALID_MIN_SELECT:bad-min"), true);
+  assert.equal(malformedMax.ok, false);
+  assert.equal(malformedMax.errors.includes("MODIFIER_GROUP_INVALID_MAX_SELECT:bad-max"), true);
+});
+
+test("normal valid optional and required modifier groups still work", () => {
+  const product = tea();
+  const config = validateProductOptionConfig(product);
+  const selection = validateConfiguredSelection(product, {
+    variantId: "large",
+    modifierSelections: {
+      sugar: ["sugar-50"],
+      topping: ["aloe", "jelly"]
+    }
+  });
+
+  assert.equal(config.ok, true);
+  assert.equal(selection.ok, true);
+  assert.equal(selection.unitPrice, 79000);
+});
+
 test("product option config requires stable IDs and bilingual labels", () => {
   const result = validateProductOptionConfig({
     variants: [{ id: "", vi: "Ly", en: "" }],

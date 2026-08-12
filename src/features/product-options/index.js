@@ -11,6 +11,7 @@ export function validateProductOptionConfig(product = {}) {
   const config = normalizeProductOptions(product);
   const errors = [];
 
+  appendSelectBoundErrors(product.modifierGroups || product.modifiers || [], errors);
   appendDuplicateErrors(config.variants.map((variant) => variant.id), "DUPLICATE_VARIANT_ID", errors);
   config.variants.forEach((variant) => {
     if (!variant.id) errors.push("VARIANT_ID_REQUIRED");
@@ -233,10 +234,11 @@ function normalizeModifierGroups(groups = []) {
       priceDelta: normalizePriceDelta(option.priceDelta),
       available: option.available !== false
     }));
-    const explicitMin = normalizeSelectBound(group.minSelect);
-    const explicitMax = normalizeSelectBound(group.maxSelect);
+    const explicitMin = parseSelectBound(group.minSelect).value;
+    const explicitMax = parseSelectBound(group.maxSelect).value;
     const required = group.required === true || (explicitMin ?? 0) > 0;
-    const minSelect = explicitMin ?? (required ? 1 : 0);
+    const configuredMin = explicitMin ?? (required ? 1 : 0);
+    const minSelect = required ? Math.max(1, configuredMin) : configuredMin;
     const multiple = group.multiple ?? (explicitMax !== null ? explicitMax > 1 : false);
     const maxSelect = explicitMax ?? (multiple ? options.length : 1);
     return {
@@ -302,10 +304,23 @@ function appendDuplicateErrors(ids, code, errors) {
   });
 }
 
-function normalizeSelectBound(value) {
-  if (value === undefined || value === null || value === "") return null;
+function appendSelectBoundErrors(groups = [], errors = []) {
+  asArray(groups).forEach((group) => {
+    const groupId = toId(group.id) || "UNKNOWN";
+    const min = parseSelectBound(group.minSelect);
+    const max = parseSelectBound(group.maxSelect);
+    if (min.malformed) errors.push(`MODIFIER_GROUP_INVALID_MIN_SELECT:${groupId}`);
+    if (max.malformed) errors.push(`MODIFIER_GROUP_INVALID_MAX_SELECT:${groupId}`);
+  });
+}
+
+function parseSelectBound(value) {
+  if (value === undefined || value === null) return { value: null, malformed: false };
+  if (typeof value === "string" && value.trim() === "") return { value: null, malformed: false };
+  if (typeof value !== "number" && typeof value !== "string") return { value: null, malformed: true };
   const number = Number(value);
-  return Number.isFinite(number) ? Math.max(0, Math.round(number)) : 0;
+  if (!Number.isFinite(number)) return { value: null, malformed: true };
+  return { value: Math.max(0, Math.round(number)), malformed: false };
 }
 
 function normalizePriceDelta(value) {
