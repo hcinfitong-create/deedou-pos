@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
 
@@ -35,6 +35,11 @@ const deviceSecrets = {
   kitchen: secret("kitchen-device"),
   cashierB: secret("cashier-b-device")
 };
+const diagnosticSecrets = [
+  anonKey,
+  serviceRoleKey,
+  ...Object.values(deviceSecrets)
+];
 
 const adminClient = createClient(apiUrl, serviceRoleKey, {
   auth: {
@@ -45,9 +50,13 @@ const adminClient = createClient(apiUrl, serviceRoleKey, {
 
 await waitForAuthReady();
 
+const cashierUser = await createRuntimeUser("cashier");
+await printAuthStructuralDiagnostics(cashierUser, "post-create/pre-provisioning");
+await assertImmediatePostCreateLogin("cashier", cashierUser);
+
 const users = {
   owner: await createRuntimeUser("owner"),
-  cashier: await createRuntimeUser("cashier"),
+  cashier: cashierUser,
   kitchen: await createRuntimeUser("kitchen"),
   managerB: await createRuntimeUser("manager-b"),
   inactive: await createRuntimeUser("inactive"),
@@ -254,6 +263,7 @@ console.log("real password login/JWT, restore, refresh, local logout, server-iss
 async function createRuntimeUser(kind) {
   const email = `${runId}_${kind}@example.invalid`;
   const password = secret(`${kind}-password`);
+  diagnosticSecrets.push(password);
   const { data, error } = await retryAuthCall(() => adminClient.auth.admin.createUser({
     email,
     password,
@@ -266,10 +276,32 @@ async function createRuntimeUser(kind) {
 
 async function loginRuntimeUser(kind) {
   const user = users[kind];
+  const { client, error } = await signInRuntimeUser(user);
+  if (!error) return client;
+  await printAuthStructuralDiagnostics(user, `failed-login/${kind}`);
+  printGoTrueLogs();
+  throw new Error(`Real password login failed for ${kind}: ${error.message || "missing session"}`);
+}
+
+async function assertImmediatePostCreateLogin(kind, user) {
+  const { client, error } = await signInRuntimeUser(user);
+  if (error) {
+    console.error("DD-008B AUTH ISOLATION: immediate post-create login failed before DeeDou provisioning.");
+    console.error("DD-008B AUTH ISOLATION RESULT: failure is isolated to Supabase Auth/local schema/runtime user creation, not DeeDou RBAC provisioning.");
+    printGoTrueLogs();
+    throw new Error(`Immediate post-create password login failed for ${kind}: ${error.message || "missing session"}`);
+  }
+  await client.auth.signOut({ scope: "local" });
+  console.log("DD-008B AUTH ISOLATION: immediate post-create login passed before DeeDou provisioning.");
+}
+
+async function signInRuntimeUser(user) {
   const client = createRuntimeClient(user.storage);
   const { data, error } = await client.auth.signInWithPassword({ email: user.email, password: user.password });
-  if (error || !data.session?.access_token) throw new Error(`Real password login failed for ${kind}: ${error?.message || "missing session"}`);
-  return client;
+  return {
+    client,
+    error: error || (data.session?.access_token ? null : new Error("missing session"))
+  };
 }
 
 function createRuntimeClient(storage) {
@@ -343,12 +375,76 @@ function memoryStorage() {
   };
 }
 
+async function printAuthStructuralDiagnostics(user, label) {
+  const row = queryPsqlJson(`
+    select json_build_object(
+      'label', ${lit(label)},
+      'id', auth.users.id::text,
+      'email', auth.users.email,
+      'confirmation_token_is_null', auth.users.confirmation_token is null,
+      'recovery_token_is_null', auth.users.recovery_token is null,
+      'email_change_is_null', auth.users.email_change is null,
+      'email_change_token_new_is_null', auth.users.email_change_token_new is null,
+      'auth_identity_email_exists', exists (
+        select 1
+        from auth.identities
+        where auth.identities.user_id = auth.users.id
+          and auth.identities.provider = 'email'
+      )
+    )::text
+    from auth.users
+    where auth.users.id = ${lit(user.id)}::uuid;
+  `);
+  console.log(`DD-008B AUTH STRUCTURAL DIAGNOSTICS ${label}: ${JSON.stringify(row)}`);
+}
+
+function printGoTrueLogs() {
+  const containerName = findSupabaseAuthContainer();
+  if (!containerName) {
+    console.error("DD-008B GOTRUE LOGS: no supabase_auth_* container found.");
+    return;
+  }
+  const logs = spawnSync("docker", ["logs", containerName, "--tail", "200"], {
+    encoding: "utf8"
+  });
+  const text = sanitizeDiagnosticLogs(`${logs.stdout || ""}\n${logs.stderr || ""}`.trim());
+  console.error(`DD-008B GOTRUE LOGS BEGIN container=${containerName}`);
+  console.error(text || "[no logs returned]");
+  console.error("DD-008B GOTRUE LOGS END");
+}
+
+function findSupabaseAuthContainer() {
+  const result = spawnSync("docker", ["ps", "--format", "{{.Names}}"], {
+    encoding: "utf8"
+  });
+  if (result.status !== 0) return "";
+  return result.stdout.split(/\r?\n/).find((name) => name.includes("supabase_auth_")) || "";
+}
+
+function sanitizeDiagnosticLogs(text) {
+  let sanitized = text
+    .replace(/Bearer\s+eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "Bearer [JWT_REDACTED]")
+    .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[JWT_REDACTED]");
+  diagnosticSecrets.filter(Boolean).forEach((secretValue) => {
+    sanitized = sanitized.split(secretValue).join("[SECRET_REDACTED]");
+  });
+  return sanitized;
+}
+
 function runPsql(sql) {
   execFileSync("psql", [dbUrl, "-v", "ON_ERROR_STOP=1", "-f", "-"], {
     input: sql,
     encoding: "utf8",
     stdio: ["pipe", "pipe", "pipe"]
   });
+}
+
+function queryPsqlJson(sql) {
+  const output = execFileSync("psql", [dbUrl, "-v", "ON_ERROR_STOP=1", "-t", "-A", "-q", "-c", sql], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  }).trim();
+  return output ? JSON.parse(output.split(/\r?\n/).find(Boolean)) : null;
 }
 
 function parseEnvOutput(output) {
