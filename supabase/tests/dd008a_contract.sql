@@ -49,8 +49,8 @@ end $$;
 do $$
 begin
   begin
-    insert into public.table_sessions (id, location_id, physical_table_id, table_code, zone, status)
-    values ('review-mismatched-location', 'review-location-b', 'review-table-a01', 'A01', 'Beach', 'CLOSED');
+    insert into public.table_sessions (id, location_id, physical_table_id, table_code, zone, status, closed_at)
+    values ('review-mismatched-location', 'review-location-b', 'review-table-a01', 'A01', 'Beach', 'CLOSED', now());
     raise exception 'expected mismatched physical table location insert to fail';
   exception
     when foreign_key_violation then null;
