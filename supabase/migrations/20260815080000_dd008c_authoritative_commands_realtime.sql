@@ -1178,7 +1178,7 @@ begin
   update public.orders
   set total_vnd = v_total,
       station_status = '{}'::jsonb,
-      version = version + 1
+      version = public.orders.version + 1
   where public.orders.id = v_order_id;
 
   return v_order_id;
@@ -1272,7 +1272,7 @@ begin
     '',
     'order',
     v_order_id,
-    (select version from public.orders where id = v_order_id),
+    (select public.orders.version from public.orders where public.orders.id = v_order_id),
     jsonb_build_object('order', public.dd008c_order_payload(v_order_id, false), 'tableSession', public.dd008c_table_session_payload(v_session.id))
   );
 
@@ -1485,7 +1485,7 @@ begin
       return;
   end;
 
-  v_result := public.dd008c_result_json(true, 'OK', '', 'order', v_order_id, (select version from public.orders where id = v_order_id), jsonb_build_object('order', public.dd008c_order_payload(v_order_id, true)));
+  v_result := public.dd008c_result_json(true, 'OK', '', 'order', v_order_id, (select public.orders.version from public.orders where public.orders.id = v_order_id), jsonb_build_object('order', public.dd008c_order_payload(v_order_id, true)));
   insert into public.command_deduplication (location_id, command_key, command, actor_type, actor_id, request_hash, result_reference)
   values (p_location_id, v_key, 'create_staff_order', 'STAFF', v_authz.staff_profile_id, v_hash, v_result::text);
 
@@ -1562,7 +1562,7 @@ begin
   set status = v_next,
       accepted_at = case when v_next = 'ACCEPTED' and accepted_at is null then now() else accepted_at end,
       station_status = case when v_next = 'REJECTED' then '{}'::jsonb else station_status end,
-      version = version + 1
+      version = public.orders.version + 1
   where id = p_order_id
   returning * into v_order;
 
@@ -1712,7 +1712,7 @@ begin
   v_new_status := public.dd008c_refresh_order_status(p_order_id);
   perform public.dd008c_write_audit(p_location_id, 'STAFF', v_authz.staff_profile_id, v_authz.staff_profile_id, v_authz.device_id, 'update_kds_line_prep', 'order', p_order_id, 'OK', jsonb_build_object('prepStatus', v_next, 'lineIds', p_line_ids));
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'KDS_PREP', 'station', v_station));
-  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select version from public.orders where id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, false), 'status', v_new_status));
+  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, false), 'status', v_new_status));
   perform public.dd008c_store_command(p_location_id, 'update_kds_line_prep', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -1792,7 +1792,7 @@ begin
   v_new_status := public.dd008c_refresh_order_status(p_order_id);
   perform public.dd008c_write_audit(p_location_id, 'STAFF', v_authz.staff_profile_id, v_authz.staff_profile_id, v_authz.device_id, 'serve_order_line', 'order_line', v_line.line_id, 'OK');
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'LINE_SERVED'));
-  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select version from public.orders where id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true), 'status', v_new_status));
+  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true), 'status', v_new_status));
   perform public.dd008c_store_command(p_location_id, 'serve_order_line', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -1862,7 +1862,7 @@ begin
   end if;
   perform public.dd008c_refresh_order_status(p_order_id);
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'READY_LINES_SERVED'));
-  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select version from public.orders where id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
   perform public.dd008c_store_command(p_location_id, 'serve_all_ready', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -1924,9 +1924,9 @@ begin
   if not exists (select 1 from public.order_lines where order_id = p_order_id and line_id = p_family_line_id) then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'LINE_NOT_FOUND'); return; end if;
   if not public.dd008c_family_mutable(p_order_id, p_family_line_id) then return query select * from public.dd008c_failure('INVALID_STATE', 'FAMILY_PREP_STARTED'); return; end if;
   update public.order_lines set course = v_course where order_id = p_order_id and (line_id = p_family_line_id or parent_line_id = p_family_line_id);
-  update public.orders set version = version + 1 where id = p_order_id and location_id = p_location_id;
+  update public.orders set version = public.orders.version + 1 where id = p_order_id and location_id = p_location_id;
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'COURSE_ASSIGNED'));
-  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select version from public.orders where id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
   perform public.dd008c_store_command(p_location_id, 'assign_order_family_course', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -1964,9 +1964,9 @@ begin
   update public.order_lines
   set hold_state = 'HELD', held_at = now(), fired_at = null, queued_at = null, acknowledged_at = null, prep_started_at = null, ready_at = null, prep_status = 'QUEUED', item_status = 'QUEUED'
   where order_id = p_order_id and (line_id = p_family_line_id or parent_line_id = p_family_line_id);
-  update public.orders set version = version + 1 where id = p_order_id and location_id = p_location_id;
+  update public.orders set version = public.orders.version + 1 where id = p_order_id and location_id = p_location_id;
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'FAMILY_HELD'));
-  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select version from public.orders where id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
   perform public.dd008c_store_command(p_location_id, 'hold_order_family', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -2003,7 +2003,7 @@ begin
   if not exists (select 1 from public.order_lines where order_id = p_order_id and line_id = p_family_line_id) then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'LINE_NOT_FOUND'); return; end if;
   select bool_and(hold_state = 'FIRED') into v_already_fired from public.order_lines where order_id = p_order_id and (line_id = p_family_line_id or parent_line_id = p_family_line_id);
   if v_already_fired then
-    v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select version from public.orders where id = p_order_id), jsonb_build_object('noOp', true, 'reason', 'ALREADY_FIRED', 'order', public.dd008c_order_payload(p_order_id, true)));
+    v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('noOp', true, 'reason', 'ALREADY_FIRED', 'order', public.dd008c_order_payload(p_order_id, true)));
     perform public.dd008c_store_command(p_location_id, 'fire_order_family', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
     return query select * from public.dd008c_result_from_json(v_result);
     return;
@@ -2014,9 +2014,9 @@ begin
       fired_at = coalesce(fired_at, now()),
       queued_at = case when v_order_status in ('ACCEPTED', 'IN_PREPARATION', 'READY') and station_code <> 'COMBO' then coalesce(queued_at, now()) else queued_at end
   where order_id = p_order_id and (line_id = p_family_line_id or parent_line_id = p_family_line_id);
-  update public.orders set version = version + 1 where id = p_order_id and location_id = p_location_id;
+  update public.orders set version = public.orders.version + 1 where id = p_order_id and location_id = p_location_id;
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'FAMILY_FIRED'));
-  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select version from public.orders where id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
   perform public.dd008c_store_command(p_location_id, 'fire_order_family', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -2055,7 +2055,7 @@ begin
     select 1 from public.order_lines
     where order_id = p_order_id and course = v_course and hold_state = 'HELD'
   ) then
-    v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select version from public.orders where id = p_order_id), jsonb_build_object('noOp', true, 'reason', 'ALREADY_FIRED', 'order', public.dd008c_order_payload(p_order_id, true)));
+    v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('noOp', true, 'reason', 'ALREADY_FIRED', 'order', public.dd008c_order_payload(p_order_id, true)));
     perform public.dd008c_store_command(p_location_id, 'fire_order_course', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
     return query select * from public.dd008c_result_from_json(v_result);
     return;
@@ -2073,9 +2073,9 @@ begin
       fired_at = coalesce(fired_at, now()),
       queued_at = case when v_order_status in ('ACCEPTED', 'IN_PREPARATION', 'READY') and station_code <> 'COMBO' then coalesce(queued_at, now()) else queued_at end
   where order_id = p_order_id and course = v_course and hold_state = 'HELD';
-  update public.orders set version = version + 1 where id = p_order_id and location_id = p_location_id;
+  update public.orders set version = public.orders.version + 1 where id = p_order_id and location_id = p_location_id;
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'COURSE_FIRED'));
-  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select version from public.orders where id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
   perform public.dd008c_store_command(p_location_id, 'fire_order_course', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -2152,9 +2152,9 @@ begin
     return query select * from public.dd008c_failure('CONFLICT', 'DESTINATION_OCCUPIED');
     return;
   end if;
-  update public.table_sessions set physical_table_id = v_destination.id, table_code = v_destination.code, zone = v_destination.zone, version = version + 1 where id = p_table_session_id returning * into v_session;
-  update public.orders set physical_table_id = v_destination.id, table_code = v_destination.code, zone = v_destination.zone, version = version + 1 where table_session_id = p_table_session_id and location_id = p_location_id;
-  update public.service_requests set physical_table_id = v_destination.id, table_code = v_destination.code, zone = v_destination.zone, version = version + 1 where table_session_id = p_table_session_id and status = 'OPEN';
+  update public.table_sessions set physical_table_id = v_destination.id, table_code = v_destination.code, zone = v_destination.zone, version = public.table_sessions.version + 1 where id = p_table_session_id returning * into v_session;
+  update public.orders set physical_table_id = v_destination.id, table_code = v_destination.code, zone = v_destination.zone, version = public.orders.version + 1 where table_session_id = p_table_session_id and location_id = p_location_id;
+  update public.service_requests set physical_table_id = v_destination.id, table_code = v_destination.code, zone = v_destination.zone, version = public.service_requests.version + 1 where table_session_id = p_table_session_id and status = 'OPEN';
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'table_session', p_table_session_id, jsonb_build_object('reason', 'TABLE_TRANSFER'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'table_session', p_table_session_id, v_session.version, jsonb_build_object('tableSession', public.dd008c_table_session_payload(p_table_session_id)));
   perform public.dd008c_store_command(p_location_id, 'transfer_table_visit', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
@@ -2194,7 +2194,7 @@ begin
     return query select * from public.dd008c_failure('INVALID_STATE', 'ACTIVE_ORDERS');
     return;
   end if;
-  update public.table_sessions set status = 'CLOSED', closed_at = now(), version = version + 1 where id = p_table_session_id returning * into v_session;
+  update public.table_sessions set status = 'CLOSED', closed_at = now(), version = public.table_sessions.version + 1 where id = p_table_session_id returning * into v_session;
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'table_session', p_table_session_id, jsonb_build_object('reason', 'TABLE_CLOSE'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'table_session', p_table_session_id, v_session.version, jsonb_build_object('tableSession', public.dd008c_table_session_payload(p_table_session_id)));
   perform public.dd008c_store_command(p_location_id, 'close_table_visit', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
@@ -2252,7 +2252,7 @@ begin
   update public.service_requests
   set status = 'COMPLETED',
       completed_at = now(),
-      version = version + 1
+      version = public.service_requests.version + 1
   where id = p_request_id
   returning * into v_request;
   v_result := public.dd008c_result_json(true, 'OK', '', 'service_request', v_request.id, v_request.version, jsonb_build_object('id', v_request.id));
@@ -2323,7 +2323,7 @@ begin
   where public.order_lines.order_id = p_order_id;
   update public.orders
   set total_vnd = coalesce(v_total, 0),
-      version = version + 1
+      version = public.orders.version + 1
   where id = p_order_id
   returning * into v_order;
   perform public.dd008c_sync_payment_projection(p_order_id);
@@ -2390,7 +2390,7 @@ begin
   perform public.dd008c_sync_payment_projection(p_order_id);
   perform public.dd008c_write_audit(p_location_id, 'STAFF', v_authz.staff_profile_id, v_authz.staff_profile_id, v_authz.device_id, 'record_order_payment', 'payment', v_payment_id, 'OK');
   perform public.dd008c_emit_refresh(p_location_id, 'cashier', 'payment', v_payment_id, jsonb_build_object('reason', 'PAYMENT_RECORDED'));
-  v_result := public.dd008c_result_json(true, 'OK', '', 'payment', v_payment_id, (select version from public.orders where id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  v_result := public.dd008c_result_json(true, 'OK', '', 'payment', v_payment_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
   if v_key is not null then
     insert into public.command_deduplication (location_id, command_key, command, actor_type, actor_id, request_hash, result_reference)
     values (p_location_id, v_key, 'record_order_payment', 'STAFF', v_authz.staff_profile_id, v_hash, v_result::text);
@@ -2443,7 +2443,7 @@ begin
   values (v_void_id, p_location_id, p_order_id, 'PAYMENT_VOID', v_payment.method, v_payment.provider, v_payment.amount_vnd, p_payment_id, v_payment.tender_group_id, 'DD-008C authoritative payment void');
   perform public.dd008c_sync_payment_projection(p_order_id);
   perform public.dd008c_emit_refresh(p_location_id, 'cashier', 'payment', v_void_id, jsonb_build_object('reason', 'PAYMENT_VOID'));
-  v_result := public.dd008c_result_json(true, 'OK', '', 'payment', v_void_id, (select version from public.orders where id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  v_result := public.dd008c_result_json(true, 'OK', '', 'payment', v_void_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
   if v_key is not null then
     insert into public.command_deduplication (location_id, command_key, command, actor_type, actor_id, request_hash, result_reference)
     values (p_location_id, v_key, 'void_order_payment', 'STAFF', v_authz.staff_profile_id, v_hash, v_result::text);
@@ -2506,7 +2506,7 @@ begin
   values (v_refund_id, p_location_id, p_order_id, 'REFUND', 'REFUND', v_payment.provider, p_amount_vnd, p_payment_id, v_payment.tender_group_id, 'DD-008C authoritative targeted refund');
   perform public.dd008c_sync_payment_projection(p_order_id);
   perform public.dd008c_emit_refresh(p_location_id, 'cashier', 'payment', v_refund_id, jsonb_build_object('reason', 'PAYMENT_REFUND'));
-  v_result := public.dd008c_result_json(true, 'OK', '', 'payment', v_refund_id, (select version from public.orders where id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  v_result := public.dd008c_result_json(true, 'OK', '', 'payment', v_refund_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
   if v_key is not null then
     insert into public.command_deduplication (location_id, command_key, command, actor_type, actor_id, request_hash, result_reference)
     values (p_location_id, v_key, 'refund_order_payment', 'STAFF', v_authz.staff_profile_id, v_hash, v_result::text);
