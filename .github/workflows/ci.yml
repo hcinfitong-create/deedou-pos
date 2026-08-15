@@ -2,7 +2,7 @@ name: DeeDou CI
 
 on:
   push:
-    branches: [main, "fix/**", "feature/**"]
+    branches: [main, "fix/**", "feature/**", "feat/**"]
   pull_request:
     branches: [main]
 
@@ -16,8 +16,11 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
+
+      - name: Confirm Node
+        run: node --version
 
       - name: Install dependencies
         run: npm ci
@@ -38,8 +41,11 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
+
+      - name: Confirm Node
+        run: node --version
 
       - name: Install dependencies
         run: npm ci
@@ -62,6 +68,106 @@ jobs:
         run: |
           DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008a_contract.sql
+
+      - name: Run DD-008B auth and RBAC database contract
+        run: |
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008b_auth_rbac_contract.sql
+
+      - name: Stop Supabase local stack
+        if: always()
+        run: npx supabase stop
+
+  auth-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Confirm Node
+        run: node --version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Confirm pinned Supabase CLI
+        run: npx supabase --version
+
+      - name: Start Supabase local stack
+        run: npx supabase start
+
+      - name: Reset database from migrations and seed
+        run: npx supabase db reset
+
+      - name: Run DD-008B real Supabase Auth integration
+        env:
+          DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+        run: npm run dd008b:auth-integration
+
+      - name: Stop Supabase local stack
+        if: always()
+        run: npx supabase stop
+
+  browser-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Confirm Node
+        run: node --version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Confirm pinned Supabase CLI
+        run: npx supabase --version
+
+      - name: Start Supabase local stack
+        run: npx supabase start
+
+      - name: Reset database from migrations and seed
+        run: npx supabase db reset
+
+      - name: Run DD-008B exact-head browser smoke
+        env:
+          DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+        run: npm run dd008b:browser-smoke
+
+      - name: Upload DD-008B browser smoke failure screenshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dd008b-browser-smoke-failure
+          path: artifacts/dd008b-browser-smoke/
+          if-no-files-found: ignore
 
       - name: Stop Supabase local stack
         if: always()

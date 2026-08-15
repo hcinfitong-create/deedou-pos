@@ -82,7 +82,8 @@ No local app runtime storage needs migration because DD-008A does not make Supab
 
 ## Known Limitations
 
-- No staff login, role permissions, or PIN workflow.
+- Staff login/RBAC is introduced separately in DD-008B through `src/shared/auth` and database helpers.
+- No custom PIN workflow.
 - No authoritative order/payment commands.
 - No production realtime KDS.
 - No reconnect/refetch workflow beyond a basic probe helper.

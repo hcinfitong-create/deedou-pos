@@ -30,6 +30,7 @@ index.html
       -> features/table-session
       -> features/payments
       -> shared/backend (foundation only, not runtime-authoritative yet)
+      -> shared/auth (SUPABASE staff gate only)
 ```
 
 The current router is hash-based:
@@ -73,6 +74,15 @@ DD-008A adds a Supabase/PostgreSQL foundation without cutting production busines
 - Public menu access is location-scoped through narrow SQL functions and does not expose station routing or raw internal tables.
 - Raw operational, payment, audit, and idempotency tables do not grant broad anon/authenticated read or write access in DD-008A.
 - Payment transactions use restrictive order/location references so hard-deleting an order cannot cascade-delete ledger history.
+
+DD-008B adds staff authentication/RBAC on top of that foundation:
+
+- Supabase Auth email/password identifies a browser user through the `@supabase/supabase-js` managed lifecycle: sign-in, session restore, refresh, auth-state notifications, and local/current-session logout.
+- `staff_profiles`, location assignments, role assignments, permissions, and workstation devices decide effective access through database helpers that use `auth.uid()`.
+- Workstation credentials are server-generated, returned once, stored only as SHA-256 hashes, and enforced inside privileged RPCs rather than only in route gates.
+- Browser route gates ask server RPCs before rendering privileged routes in `SUPABASE` mode, but successful DD-008B auth currently renders fail-closed staff surfaces until DD-008C adds authoritative command RPCs.
+- Public customer QR/menu routes remain unauthenticated.
+- Business writes remain denied until a later command-boundary phase.
 
 Committed Supabase infrastructure lives under:
 
@@ -169,7 +179,9 @@ DD-006 adds `features/course-workflow` as the pure owner for restaurant course a
 
 DD-007 adds `features/payments` as the pure owner for append-only payment ledger normalization, partial/mixed tender summaries, split allocation plans, payment voids, targeted refunds, bill locks, and `paidVnd` projection. `app.js` still owns cashier DOM binding, prompts, audit logging, and persistence orchestration.
 
-DD-008A adds `shared/backend` plus Supabase migrations/seed as a foundation-only infrastructure module. It does not replace localStorage, add auth/RBAC UI, add realtime KDS, or make order/payment commands authoritative.
+DD-008A adds `shared/backend` plus Supabase migrations/seed as a foundation-only infrastructure module. It does not replace localStorage, add realtime KDS, or make order/payment commands authoritative.
+
+DD-008B adds `shared/auth` plus a new Supabase auth/RBAC migration, database contract, and real local Supabase Auth integration CI. It does not add custom PINs, service-role browser calls, public signup, authoritative business writes, realtime KDS, or localStorage removal.
 
 ## Current Known Coupling
 

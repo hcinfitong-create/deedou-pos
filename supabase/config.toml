@@ -20,7 +20,14 @@ enabled = true
 port = 54323
 
 [auth]
-enabled = false
+enabled = true
+site_url = "http://127.0.0.1:8099"
+additional_redirect_urls = ["http://127.0.0.1:8099"]
+enable_signup = false
+
+[auth.email]
+enable_signup = true
+enable_confirmations = false
 
 [edge_runtime]
 enabled = false

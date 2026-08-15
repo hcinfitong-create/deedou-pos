@@ -1,6 +1,21 @@
 import { COUNTER_DRAFT_KEY, COUNTER_SEARCH_KEY, PRODUCT_KEY, STATE_KEY, stationAliases, stations, tables } from "./src/shared/config/index.js";
 import { copy } from "./src/shared/i18n/index.js";
 import { escapeAttr, escapeHtml, formatMoney, normalizeSearch, slugify } from "./src/shared/utils/index.js";
+import { BACKEND_MODES, getBackendConfig } from "./src/shared/backend/index.js";
+import {
+  createInitialStaffAuthState,
+  createSupabasePasswordAuthApi,
+  DEFAULT_LOCATION_ID,
+  evaluateStaffRouteAccess,
+  getPreferredWorkstationMode,
+  getStaffRoutePolicy,
+  isStaffRoute,
+  readStoredDeviceCredential,
+  renderStaffAuthGate,
+  routeAuthorizationKey,
+  STAFF_LOCATION_KEY,
+  WORKSTATION_MODE_KEY
+} from "./src/shared/auth/index.js";
 import { categories, categoryAliases, compareMenuItems, defaultProducts, filterMenuItems, menuKinds } from "./src/features/customer-menu/index.js";
 import {
   applyOrderStatusTransition,
@@ -88,6 +103,11 @@ let counterSearch = localStorage.getItem(COUNTER_SEARCH_KEY) || "";
 let pendingVoidOrderId = "";
 let pendingSplitPlan = null;
 let cashierNotice = "";
+const backendConfig = getBackendConfig();
+const staffAuthApi = createSupabasePasswordAuthApi({ config: backendConfig, storage: localStorage, deviceStorage: localStorage });
+let staffAuthState = createInitialStaffAuthState({ config: backendConfig, localStorage });
+let pendingStaffAuthKey = "";
+let supabaseCommandNotice = "";
 
 const CASHIER_PAYMENT_METHODS = Object.freeze([
   { method: "CASH", label: "Cash", buttonClass: "primary" },
@@ -114,6 +134,10 @@ window.addEventListener("storage", () => {
   render();
 });
 document.addEventListener("click", handleCourseWorkflowClick);
+if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+  staffAuthApi.onAuthStateChange(syncStaffAuthSession);
+  restoreStaffAuthSession();
+}
 render();
 
 function loadState() {
@@ -138,7 +162,12 @@ function loadCounterDraft() {
 }
 
 function saveCounterDraft() {
+  if (blockSupabaseLocalCommand("COUNTER_DRAFT")) {
+    counterDraft = loadCounterDraft();
+    return false;
+  }
   localStorage.setItem(COUNTER_DRAFT_KEY, JSON.stringify(counterDraft));
+  return true;
 }
 
 function normalizeState(value) {
@@ -273,18 +302,34 @@ function normalizeProduct(item) {
 }
 
 function saveProducts() {
+  if (blockSupabaseLocalCommand("MENU_SAVE")) {
+    products = loadProducts();
+    return false;
+  }
   localStorage.setItem(PRODUCT_KEY, JSON.stringify(products));
   broadcast();
+  return true;
 }
 
 function saveState() {
+  if (blockSupabaseLocalCommand("STATE_SAVE")) {
+    state = loadState();
+    return false;
+  }
   refreshAllPaymentProjections();
   localStorage.setItem(STATE_KEY, JSON.stringify(state));
   broadcast();
+  return true;
 }
 
 function broadcast() {
   if (bus) bus.postMessage({ type: "sync", at: Date.now() });
+}
+
+function blockSupabaseLocalCommand(commandName = "LOCAL_COMMAND") {
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE) return false;
+  supabaseCommandNotice = `${commandName}: server command not available until DD-008C. Local demo storage was not mutated.`;
+  return true;
 }
 
 function route() {
@@ -298,7 +343,18 @@ function route() {
 
 function render() {
   const current = route();
-  document.getElementById("app").innerHTML = shell(current);
+  const staffAccess = evaluateCurrentStaffRoute(current.name);
+  document.getElementById("app").innerHTML = shell(current, staffAccess);
+  if (shouldRenderStaffAuthGate(current.name, staffAccess)) {
+    bindStaffAuthGate(current.name);
+    ensureStaffAuthorization(current.name);
+    return;
+  }
+  if (shouldRenderSupabaseReadOnly(current.name, staffAccess)) {
+    bindSupabaseReadOnlyRoute(current.name);
+    ensureStaffAuthorization(current.name);
+    return;
+  }
   if (current.name === "customer") bindCustomer(current.token);
   if (current.name === "staff") bindStaff();
   if (current.name === "cashier") bindCashier();
@@ -306,7 +362,7 @@ function render() {
   if (current.name === "admin") bindAdmin();
 }
 
-function shell(current) {
+function shell(current, staffAccess) {
   const c = copy[lang];
   const active = current.name;
   return `
@@ -326,21 +382,190 @@ function shell(current) {
           <button class="${active === "admin" ? "active" : ""}" data-route="#/admin">${c.admin}</button>
           <button data-lang="vi" class="${lang === "vi" ? "active" : ""}">VI</button>
           <button data-lang="en" class="${lang === "en" ? "active" : ""}">EN</button>
+          ${renderStaffAuthNav()}
         </nav>
       </header>
-      ${pageFor(active, current)}
+      ${pageFor(active, current, staffAccess)}
     </main>
   `;
 }
 
-function pageFor(active, current) {
+function pageFor(active, current, staffAccess) {
   if (active === "customer") return customerPage(current.token);
+  if (shouldRenderStaffAuthGate(active, staffAccess)) {
+    return renderStaffAuthGate({ routeName: active, authState: staffAuthState, access: staffAccess, config: backendConfig });
+  }
+  if (shouldRenderSupabaseReadOnly(active, staffAccess)) return supabaseReadOnlyPage(active);
   if (active === "cashier") return cashierPage();
   if (active === "staff") return staffPage();
   if (active === "bar") return renderStationPage({ orders: state.orders, stationGroup: "BAR", stations });
   if (active === "kitchen") return renderStationPage({ orders: state.orders, stationGroup: "KITCHEN", stations });
   if (active === "dessert") return renderStationPage({ orders: state.orders, stationGroup: "DESSERT", stations });
   return adminPage();
+}
+
+function evaluateCurrentStaffRoute(routeName) {
+  return evaluateStaffRouteAccess({ config: backendConfig, routeName, authState: staffAuthState });
+}
+
+function shouldRenderStaffAuthGate(routeName, staffAccess) {
+  return backendConfig.mode === BACKEND_MODES.SUPABASE && isStaffRoute(routeName) && staffAccess?.ok !== true;
+}
+
+function shouldRenderSupabaseReadOnly(routeName, staffAccess) {
+  return backendConfig.mode === BACKEND_MODES.SUPABASE && isStaffRoute(routeName) && staffAccess?.ok === true;
+}
+
+function renderStaffAuthNav() {
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE || !staffAuthState.session) return "";
+  const staffContext = staffAuthState.staffContext?.find((row) => row.locationId === staffAuthState.locationId) || staffAuthState.staffContext?.[0];
+  const label = staffContext?.displayName || staffAuthState.session.userEmail || "Staff";
+  const locationId = staffAuthState.locationId || DEFAULT_LOCATION_ID;
+  return `
+    <span class="station auth-session-pill">${escapeHtml(label)} · ${escapeHtml(locationId)}</span>
+    <button data-auth-logout>Logout</button>
+  `;
+}
+
+function ensureStaffAuthorization(routeName) {
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE || !isStaffRoute(routeName)) return;
+  if (!staffAuthState.session) return;
+  const policy = getStaffRoutePolicy(routeName);
+  const authKey = routeAuthorizationKey({ routeName, authState: staffAuthState, policy });
+  if (staffAuthState.status === "CHECKING" && pendingStaffAuthKey === authKey) return;
+  if (staffAuthState.checkedKey === authKey) return;
+  refreshStaffAuthorization(routeName, authKey);
+}
+
+async function refreshStaffAuthorization(routeName, authKey = "") {
+  const policy = getStaffRoutePolicy(routeName);
+  if (!policy || !staffAuthState.session) return;
+  const nextKey = authKey || routeAuthorizationKey({ routeName, authState: staffAuthState, policy });
+  pendingStaffAuthKey = nextKey;
+  staffAuthState = {
+    ...staffAuthState,
+    status: "CHECKING",
+    authorization: { ok: false, reason: "AUTH_LOADING", route: routeName },
+    error: ""
+  };
+  render();
+
+  try {
+    const [authorization, staffContext] = await Promise.all([
+      staffAuthApi.authorize({
+        locationId: staffAuthState.locationId,
+        permission: policy.permission,
+        workstationMode: policy.workstationMode,
+        routeName
+      }),
+      staffAuthApi.getStaffContext({
+        locationId: staffAuthState.locationId,
+        workstationMode: policy.workstationMode
+      })
+    ]);
+    if (pendingStaffAuthKey !== nextKey) return;
+    staffAuthState = {
+      ...staffAuthState,
+      status: authorization.ok ? "AUTHORIZED" : "DENIED",
+      authorization,
+      staffContext,
+      checkedKey: nextKey,
+      workstationMode: authorization.workstationMode || policy.workstationMode,
+      hasDeviceCredential: Boolean(readStoredDeviceCredential(localStorage)),
+      error: ""
+    };
+  } catch (error) {
+    if (pendingStaffAuthKey !== nextKey) return;
+    staffAuthState = {
+      ...staffAuthState,
+      status: "DENIED",
+      authorization: { ok: false, reason: "BACKEND_UNAVAILABLE", route: routeName },
+      checkedKey: nextKey,
+      error: error?.message || "Supabase Auth unavailable."
+    };
+  }
+  render();
+}
+
+async function restoreStaffAuthSession() {
+  try {
+    const restored = await staffAuthApi.restoreSession();
+    staffAuthState = {
+      ...staffAuthState,
+      status: restored.session ? "SIGNED_IN_STALE" : "SIGNED_OUT",
+      session: restored.session,
+      authorization: null,
+      staffContext: restored.session ? staffAuthState.staffContext : [],
+      hasDeviceCredential: Boolean(readStoredDeviceCredential(localStorage)),
+      checkedKey: "",
+      authVersion: (staffAuthState.authVersion || 0) + 1,
+      error: restored.ok === false ? restored.reason || "Supabase Auth unavailable." : ""
+    };
+  } catch (error) {
+    staffAuthState = {
+      ...staffAuthState,
+      status: "SIGNED_OUT",
+      session: null,
+      authorization: null,
+      staffContext: [],
+      hasDeviceCredential: Boolean(readStoredDeviceCredential(localStorage)),
+      error: error?.message || "Supabase Auth unavailable."
+    };
+  }
+  pendingStaffAuthKey = "";
+  render();
+}
+
+function syncStaffAuthSession({ session } = {}) {
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE) return;
+  staffAuthState = {
+    ...staffAuthState,
+    status: session ? "SIGNED_IN_STALE" : "SIGNED_OUT",
+    session,
+    authorization: null,
+    staffContext: session ? staffAuthState.staffContext : [],
+    hasDeviceCredential: Boolean(readStoredDeviceCredential(localStorage)),
+    checkedKey: "",
+    authVersion: (staffAuthState.authVersion || 0) + 1,
+    error: ""
+  };
+  pendingStaffAuthKey = "";
+  render();
+}
+
+function supabaseReadOnlyPage(routeName) {
+  const policy = getStaffRoutePolicy(routeName);
+  const staffContext = staffAuthState.staffContext?.find((row) => row.locationId === staffAuthState.locationId) || staffAuthState.staffContext?.[0];
+  return `
+    <section class="page admin-page">
+      <div class="panel section-pad auth-gate">
+        <div class="order-head">
+          <div>
+            <div class="kicker">SUPABASE MODE</div>
+            <h1>${escapeHtml(policy?.label || routeName)} đã xác thực</h1>
+            <p class="muted">DD-008B chỉ bật Auth/RBAC. Các lệnh order, payment, KDS, table, service, course, menu và admin sẽ fail-closed cho đến DD-008C.</p>
+          </div>
+          <button class="ghost" data-auth-logout>Logout</button>
+        </div>
+        <div class="auth-context">
+          <span class="station">${escapeHtml(staffContext?.displayName || staffAuthState.session?.userEmail || "Staff")}</span>
+          <span class="station">${escapeHtml(staffAuthState.locationId || DEFAULT_LOCATION_ID)}</span>
+          <span class="station">${escapeHtml(staffAuthState.authorization?.deviceId || "DEVICE_RESOLVED")}</span>
+          <span class="station">${escapeHtml(staffAuthState.authorization?.workstationMode || policy?.workstationMode || "")}</span>
+        </div>
+        ${supabaseCommandNotice ? `<p class="notice">${escapeHtml(supabaseCommandNotice)}</p>` : ""}
+        <button class="primary" data-supabase-command="DD008C_PENDING">Test server command availability</button>
+      </div>
+    </section>
+  `;
+}
+
+function bindSupabaseReadOnlyRoute() {
+  bindGlobal();
+  document.querySelectorAll("[data-supabase-command]").forEach((button) => button.addEventListener("click", () => {
+    blockSupabaseLocalCommand(button.dataset.supabaseCommand || "SUPABASE_COMMAND");
+    render();
+  }));
 }
 
 function customerPage(token) {
@@ -1353,6 +1578,90 @@ function bindAdminForm() {
   });
 }
 
+function bindStaffAuthGate(routeName) {
+  bindGlobal();
+  document.querySelector("[data-auth-login]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const email = String(formData.get("email") || "").trim();
+    const password = String(formData.get("password") || "");
+    const locationId = String(formData.get("locationId") || "").trim() || DEFAULT_LOCATION_ID;
+    const workstationMode = getPreferredWorkstationMode(routeName, String(formData.get("workstationMode") || ""));
+
+    localStorage.setItem(STAFF_LOCATION_KEY, locationId);
+    localStorage.setItem(WORKSTATION_MODE_KEY, workstationMode);
+
+    staffAuthState = {
+      ...staffAuthState,
+      status: "CHECKING",
+      locationId,
+      workstationMode,
+      hasDeviceCredential: Boolean(readStoredDeviceCredential(localStorage)),
+      authorization: { ok: false, reason: "AUTH_LOADING", route: routeName },
+      error: ""
+    };
+    pendingStaffAuthKey = "";
+    render();
+
+    try {
+      let session = staffAuthState.session;
+      if (!session || email || password) {
+        if (!email || !password) {
+          staffAuthState = {
+            ...staffAuthState,
+            status: "SIGNED_OUT",
+            authorization: { ok: false, reason: "SIGN_IN_REQUIRED", route: routeName },
+            error: "Email và password là bắt buộc để đăng nhập."
+          };
+          render();
+          return;
+        }
+        const signedIn = await staffAuthApi.signInWithPassword({ email, password });
+        if (!signedIn.ok) {
+          staffAuthState = {
+            ...staffAuthState,
+            status: "SIGNED_OUT",
+            session: null,
+            authorization: { ok: false, reason: "SIGN_IN_REQUIRED", route: routeName },
+            error: signedIn.reason || "Đăng nhập thất bại."
+          };
+          render();
+          return;
+        }
+        session = signedIn.session;
+      }
+
+      staffAuthState = {
+        ...staffAuthState,
+        session,
+        status: "SIGNED_IN_STALE",
+        hasDeviceCredential: Boolean(readStoredDeviceCredential(localStorage)),
+        checkedKey: "",
+        authorization: null,
+        error: ""
+      };
+      await refreshStaffAuthorization(routeName);
+    } catch (error) {
+      staffAuthState = {
+        ...staffAuthState,
+        status: "DENIED",
+        authorization: { ok: false, reason: "BACKEND_UNAVAILABLE", route: routeName },
+        error: error?.message || "Supabase Auth unavailable."
+      };
+      render();
+    }
+  });
+}
+
+async function logoutStaff() {
+  await staffAuthApi.logout();
+  staffAuthState = createInitialStaffAuthState({ config: backendConfig, localStorage });
+  staffAuthState.status = "SIGNED_OUT";
+  staffAuthState.hasDeviceCredential = Boolean(readStoredDeviceCredential(localStorage));
+  pendingStaffAuthKey = "";
+  render();
+}
+
 function bindGlobal() {
   document.querySelectorAll("[data-route]").forEach((button) => button.addEventListener("click", () => {
     location.hash = button.dataset.route;
@@ -1362,6 +1671,7 @@ function bindGlobal() {
     localStorage.setItem("deedou_lang", lang);
     render();
   }));
+  document.querySelectorAll("[data-auth-logout]").forEach((button) => button.addEventListener("click", logoutStaff));
 }
 
 function bindOptionPickers() {
