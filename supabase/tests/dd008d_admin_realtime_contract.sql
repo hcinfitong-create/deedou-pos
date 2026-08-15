@@ -66,11 +66,36 @@ set active = true,
 
 -- ADMIN_MENU has menu.manage but should not gain order visibility for connection health.
 do $$
+declare
+  v_menu_manage boolean;
+  v_orders_read boolean;
 begin
-  if not public.has_permission_for_staff('dd008d-staff-admin-realtime', 'deedou-demo', 'menu.manage') then
+  select exists (
+    select 1
+    from public.staff_role_assignments sra
+    join public.role_permissions rp on rp.role_id = sra.role_id
+    join public.permissions p on p.id = rp.permission_id
+    where sra.staff_profile_id = 'dd008d-staff-admin-realtime'
+      and sra.location_id = 'deedou-demo'
+      and sra.active = true
+      and p.permission_key = 'menu.manage'
+  ) into v_menu_manage;
+
+  select exists (
+    select 1
+    from public.staff_role_assignments sra
+    join public.role_permissions rp on rp.role_id = sra.role_id
+    join public.permissions p on p.id = rp.permission_id
+    where sra.staff_profile_id = 'dd008d-staff-admin-realtime'
+      and sra.location_id = 'deedou-demo'
+      and sra.active = true
+      and p.permission_key = 'orders.read'
+  ) into v_orders_read;
+
+  if v_menu_manage is distinct from true then
     raise exception 'ADMIN_MENU fixture missing menu.manage';
   end if;
-  if public.has_permission_for_staff('dd008d-staff-admin-realtime', 'deedou-demo', 'orders.read') then
+  if v_orders_read is true then
     raise exception 'ADMIN_MENU must not gain orders.read for admin realtime';
   end if;
 end $$;
