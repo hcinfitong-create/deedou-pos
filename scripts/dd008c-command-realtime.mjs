@@ -234,7 +234,7 @@ const transferConflicts = transferResults.filter((result) => result.ok === false
 assert(transferOk.length === 1 && transferConflicts.length === 1, "concurrent transfer should produce one success and one occupied conflict");
 assertOpenSessionCount(ids.transferDest, 1);
 
-await refresh.channel.unsubscribe();
+await refresh.unsubscribe();
 await command(publicClient, "create_service_request", {
   p_qr_token: qrToken,
   p_type: "REQUEST_BILL",
@@ -351,7 +351,7 @@ async function locationSnapshot(client, mode, deviceCredential) {
 
 async function subscribeRefreshHints(client) {
   const events = [];
-  const channel = client
+  const changesChannel = client
     .channel(`dd008c-refresh-${runId}`)
     .on("postgres_changes", {
       event: "INSERT",
@@ -361,7 +361,30 @@ async function subscribeRefreshHints(client) {
     }, (payload) => {
       events.push(payload);
     });
+  const broadcastChannel = client
+    .channel(`dd008c:${LOCATION_ID}`, { config: { private: true } })
+    .on("broadcast", { event: "refresh" }, (payload) => {
+      const eventPayload = payload?.payload || {};
+      events.push({
+        broadcast: true,
+        new: {
+          entity_id: eventPayload.entityId || "",
+          payload: eventPayload
+        }
+      });
+    });
 
+  await Promise.all([subscribeChannel(changesChannel, "DD-008C refresh rows"), subscribeChannel(broadcastChannel, "DD-008C refresh broadcast")]);
+
+  return {
+    events,
+    unsubscribe: async () => {
+      await Promise.allSettled([changesChannel.unsubscribe(), broadcastChannel.unsubscribe()]);
+    }
+  };
+}
+
+async function subscribeChannel(channel, label) {
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("timed out subscribing to DD-008C refresh hints")), 15000);
     channel.subscribe((status) => {
@@ -371,12 +394,10 @@ async function subscribeRefreshHints(client) {
       }
       if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
         clearTimeout(timeout);
-        reject(new Error(`refresh hint subscription failed with status ${status}`));
+        reject(new Error(`${label} subscription failed with status ${status}`));
       }
     });
   });
-
-  return { channel, events };
 }
 
 async function waitForRefresh(events, predicate, label) {

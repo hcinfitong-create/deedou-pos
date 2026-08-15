@@ -35,6 +35,22 @@ grant select on public.dd008c_refresh_hints to authenticated;
 
 do $$
 begin
+  execute $policy$
+    create policy dd008c_realtime_messages_staff_location_read
+    on realtime.messages
+    for select
+    to authenticated
+    using (
+      split_part(realtime.topic(), ':', 1) = 'dd008c'
+      and public.has_location_access(split_part(realtime.topic(), ':', 2))
+    )
+  $policy$;
+exception
+  when duplicate_object or undefined_schema or undefined_table or undefined_function then null;
+end $$;
+
+do $$
+begin
   alter publication supabase_realtime add table public.dd008c_refresh_hints;
 exception
   when duplicate_object then null;

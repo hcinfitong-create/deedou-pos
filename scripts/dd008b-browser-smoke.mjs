@@ -212,7 +212,7 @@ async function runSupabaseSmoke(activeBrowser, baseUrl, users, errorSink) {
     await withFailureDiagnostics(cashierPage, "SUPABASE cashier logout", errorSink, async () => {
       await cashierPage.goto(`${baseUrl}/index.html?v=dd008c-supabase#/cashier`, { waitUntil: "domcontentloaded" });
       await expectAuthoritativeAuthorized(cashierPage, "Cashier");
-      await cashierPage.locator("section [data-auth-logout]").click();
+      await cashierPage.locator("[data-auth-logout]").first().click();
       await expectSignedOutGate(cashierPage, "cashier logout");
     });
   } finally {
