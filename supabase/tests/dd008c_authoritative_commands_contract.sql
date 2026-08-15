@@ -248,7 +248,6 @@ set local request.jwt.claim.role = 'authenticated';
 do $$
 declare
   v_result record;
-  v_course text;
 begin
   select * into v_result
   from public.assign_order_family_course('deedou-demo', 'dd008c-order-course', 'fried-rice:1:item', '1', 'dd008c-course-assign-a', 'STAFF', 'dd008c-staff-device', 1)
@@ -263,14 +262,6 @@ begin
   if v_result.ok <> false or v_result.reason <> 'STALE_VERSION' then
     raise exception 'expected conflicting course assignment stale-version rejection, got %/%', v_result.category, v_result.reason;
   end if;
-
-  select course into v_course
-  from public.order_lines
-  where order_id = 'dd008c-order-course'
-    and line_id = 'fried-rice:1:item';
-  if v_course <> '1' then
-    raise exception 'stale course assignment overwrote course: %', v_course;
-  end if;
 end $$;
 
 reset role;
@@ -279,7 +270,16 @@ do $$
 declare
   v_status text;
   v_version integer;
+  v_course text;
 begin
+  select course into v_course
+  from public.order_lines
+  where order_id = 'dd008c-order-course'
+    and line_id = 'fried-rice:1:item';
+  if v_course <> '1' then
+    raise exception 'stale course assignment overwrote course: %', v_course;
+  end if;
+
   select status, version into v_status, v_version from public.orders where id = 'dd008c-order-skip';
   if v_status <> 'PENDING_ACCEPTANCE' or v_version <> 1 then
     raise exception 'invalid transition mutated order: %/%', v_status, v_version;
