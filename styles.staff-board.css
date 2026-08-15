@@ -1,0 +1,20 @@
+/* Staff order board needs card-sized tracks. Keep the five workflow columns horizontally scrollable instead of allowing grid items to overlap adjacent columns. */
+.staff-board {
+  grid-template-columns: repeat(5, minmax(300px, 1fr));
+}
+
+.staff-board .column,
+.staff-board .order-card,
+.staff-board .order-head > *,
+.staff-board .compact-items li,
+.staff-board .compact-items li > * {
+  min-width: 0;
+}
+
+.staff-board .order-card,
+.staff-board .order-head,
+.staff-board .item-list,
+.staff-board .course-controls,
+.staff-board .service-actions {
+  overflow-wrap: anywhere;
+}
