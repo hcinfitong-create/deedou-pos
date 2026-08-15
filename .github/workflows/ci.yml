@@ -31,6 +31,9 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: DD-008D production hardening gate
+        run: npm run dd008d:production-check
+
   backend-db:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -78,6 +81,11 @@ jobs:
         run: |
           DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008c_authoritative_commands_contract.sql
+
+      - name: Run DD-008D cutover and migration database contract
+        run: |
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008d_cutover_resilience_contract.sql
 
       - name: Stop Supabase local stack
         if: always()
