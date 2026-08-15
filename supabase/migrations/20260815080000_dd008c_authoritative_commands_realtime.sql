@@ -2187,7 +2187,7 @@ begin
     v_order.version,
     jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true))
   );
-  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order', 'order', p_order_id, v_result, jsonb_build_object('reason', v_reason));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order', 'order', p_order_id, v_result, jsonb_build_object('voidReason', v_reason));
   insert into public.command_deduplication (location_id, command_key, command, actor_type, actor_id, request_hash, result_reference)
   values (p_location_id, v_key, 'void_order', 'STAFF', v_authz.staff_profile_id, v_hash, v_result::text);
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'ORDER_VOIDED'));

@@ -438,7 +438,7 @@ begin
       and outcome = 'OK'
       and staff_id = 'dd008c-staff-cashier'
       and device_id = 'dd008c-dev-cashier'
-      and metadata->>'reason' = 'customer changed mind'
+      and metadata->>'voidReason' = 'customer changed mind'
   ) then
     raise exception 'expected successful void order audit metadata';
   end if;
