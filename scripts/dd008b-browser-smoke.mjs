@@ -401,7 +401,11 @@ async function runOperationalRealtimeE2E(activeBrowser, baseUrl, users, errorSin
         }
         await friedRiceAdd.click();
         await customerPage.locator("[data-submit]").first().click();
-        await waitForBodyIncludes(customerPage, "submit_qr_order: OK", "customer QR submit succeeded");
+        const customerPendingOrder = customerPage.locator(".status-strip .status-pill").first();
+        await customerPendingOrder.waitFor({ state: "visible", timeout: 30000 });
+        const pendingText = await customerPendingOrder.innerText();
+        assertContains(pendingText, "DeeDou đang kiểm tra order của bạn.", "customer QR authoritative pending order");
+        assertContains(pendingText, "99.000 đ", "customer QR authoritative total");
       });
 
       const staffCard = staffPage.locator(".order-card").filter({ hasText: note }).first();
@@ -640,7 +644,9 @@ function isRelevantNetworkUrl(rawUrl) {
       || path.includes("/auth/v1/")
       || path === "/rest/v1/rpc/authorize_staff_access"
       || path === "/rest/v1/rpc/get_my_staff_context"
-      || path === "/rest/v1/rpc/dd008c_issue_realtime_ticket";
+      || path === "/rest/v1/rpc/dd008c_issue_realtime_ticket"
+      || path === "/rest/v1/rpc/submit_qr_order"
+      || path === "/rest/v1/rpc/dd008c_get_public_table_snapshot";
   } catch {
     return false;
   }
