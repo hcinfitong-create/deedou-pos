@@ -1,5 +1,6 @@
 -- DD-008D least-privilege realtime scope for ADMIN_MENU surfaces.
 -- Admin menu users should not gain orders.read merely to obtain connection health.
+-- The admin audience is scoped to menu.manage so CASHIER/FLOOR devices cannot subscribe.
 
 create or replace function public.dd008c_refresh_permission_for_audience(p_audience text)
 returns text
@@ -11,7 +12,7 @@ as $$
   select case coalesce(nullif(btrim(p_audience), ''), 'ops')
     when 'cashier' then 'payments.read'
     when 'audit' then 'audit.read'
-    when 'admin' then 'menu.read'
+    when 'admin' then 'menu.manage'
     else 'orders.read'
   end
 $$;
