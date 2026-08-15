@@ -362,7 +362,7 @@ async function subscribeRefreshHints(client) {
       events.push(payload);
     });
   const broadcastChannel = client
-    .channel(`dd008c:${LOCATION_ID}`, { config: { private: true } })
+    .channel(`location:${LOCATION_ID}:ops`, { config: { private: true } })
     .on("broadcast", { event: "refresh" }, (payload) => {
       const eventPayload = payload?.payload || {};
       events.push({

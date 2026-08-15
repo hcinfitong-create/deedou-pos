@@ -41,7 +41,7 @@ begin
     for select
     to authenticated
     using (
-      split_part(realtime.topic(), ':', 1) = 'dd008c'
+      split_part(realtime.topic(), ':', 1) = 'location'
       and public.has_location_access(split_part(realtime.topic(), ':', 2))
     )
   $policy$;
