@@ -1,0 +1,130 @@
+.dd008d-connectivity {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 60;
+  width: min(310px, calc(100vw - 32px));
+  padding: 10px 12px;
+  border: 1px solid rgba(23, 43, 35, 0.16);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 30px rgba(24, 50, 40, 0.14);
+  backdrop-filter: blur(10px);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.dd008d-connectivity-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 3px;
+}
+
+.dd008d-connectivity strong,
+.dd008d-connectivity span,
+.dd008d-connectivity small {
+  overflow-wrap: anywhere;
+}
+
+.dd008d-connectivity small {
+  display: block;
+  color: var(--muted, #66746e);
+}
+
+.dd008d-state-online {
+  border-color: rgba(46, 125, 82, 0.35);
+}
+
+.dd008d-state-reconnecting,
+.dd008d-state-stale,
+.dd008d-state-degraded {
+  border-color: rgba(179, 119, 24, 0.4);
+}
+
+.dd008d-state-offline {
+  border-color: rgba(168, 64, 55, 0.45);
+}
+
+.dd008d-migration-panel {
+  margin-top: 16px;
+}
+
+.dd008d-migration-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.dd008d-migration-step {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid rgba(23, 43, 35, 0.12);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.dd008d-migration-step strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.dd008d-migration-step label {
+  display: grid;
+  gap: 5px;
+  margin: 8px 0;
+}
+
+.dd008d-migration-step input {
+  width: 100%;
+  min-width: 0;
+}
+
+.dd008d-migration-step button + button {
+  margin-left: 6px;
+}
+
+.dd008d-preview-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(223, 239, 229, 0.75);
+}
+
+.dd008d-preview-summary span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  font-size: 12px;
+}
+
+.dd008d-result {
+  max-height: 320px;
+  overflow: auto;
+  margin: 14px 0 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: #17221d;
+  color: #f4f7f5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .dd008d-migration-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dd008d-connectivity {
+    right: 10px;
+    bottom: 10px;
+    width: min(300px, calc(100vw - 20px));
+  }
+}
