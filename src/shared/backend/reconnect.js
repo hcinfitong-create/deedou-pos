@@ -137,21 +137,21 @@ function subscribePrivateChannel({ client, topic, audience, timeoutMs, onBroadca
     };
     const channel = client
       .channel(topic, { config: { private: true } })
-      .on("broadcast", { event: "refresh" }, (event) => onBroadcast?.({ ...event, audience }))
-      .subscribe((status, error) => {
-        if (error) {
-          finish(reject, new Error(safeReason(error, "REALTIME_SUBSCRIBE_ERROR")));
-          return;
-        }
-        if (status === "SUBSCRIBED") {
-          finish(resolve, channel);
-          return;
-        }
-        if (["CHANNEL_ERROR", "TIMED_OUT", "CLOSED"].includes(status)) {
-          finish(reject, new Error(`REALTIME_${status}`));
-        }
-      });
+      .on("broadcast", { event: "refresh" }, (event) => onBroadcast?.({ ...event, audience }));
     timer = setTimeout(() => finish(reject, new Error("REALTIME_SUBSCRIBE_TIMEOUT")), timeoutMs);
+    channel.subscribe((status, error) => {
+      if (error) {
+        finish(reject, new Error(safeReason(error, "REALTIME_SUBSCRIBE_ERROR")));
+        return;
+      }
+      if (status === "SUBSCRIBED") {
+        finish(resolve, channel);
+        return;
+      }
+      if (["CHANNEL_ERROR", "TIMED_OUT", "CLOSED"].includes(status)) {
+        finish(reject, new Error(`REALTIME_${status}`));
+      }
+    });
   });
 }
 
