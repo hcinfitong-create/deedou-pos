@@ -72,7 +72,7 @@ export function createLegacyMigrationApi(options = {}) {
 
   async function call(functionName, params) {
     if (config.mode !== BACKEND_MODES.SUPABASE) return failure("BACKEND_UNAVAILABLE", "SUPABASE_REQUIRED");
-    const client = authApi?.getClient?.();
+    const client = await authApi?.getClient?.();
     if (!client?.rpc) return failure("BACKEND_UNAVAILABLE", "SUPABASE_CLIENT_MISSING");
     const authState = authStateRef() || {};
     const locationId = normalizeText(authState.locationId || params.p_location_id);
