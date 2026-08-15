@@ -373,13 +373,33 @@ async function subscribeRefreshHints(client) {
         }
       });
     });
+  const cashierBroadcastChannel = client
+    .channel(`location:${LOCATION_ID}:cashier`, { config: { private: true } })
+    .on("broadcast", { event: "refresh" }, (payload) => {
+      const eventPayload = payload?.payload || {};
+      events.push({
+        broadcast: true,
+        new: {
+          entity_id: eventPayload.entityId || "",
+          payload: eventPayload
+        }
+      });
+    });
 
-  await Promise.all([subscribeChannel(changesChannel, "DD-008C refresh rows"), subscribeChannel(broadcastChannel, "DD-008C refresh broadcast")]);
+  await Promise.all([
+    subscribeChannel(changesChannel, "DD-008C refresh rows"),
+    subscribeChannel(broadcastChannel, "DD-008C ops refresh broadcast"),
+    subscribeChannel(cashierBroadcastChannel, "DD-008C cashier refresh broadcast")
+  ]);
 
   return {
     events,
     unsubscribe: async () => {
-      await Promise.allSettled([changesChannel.unsubscribe(), broadcastChannel.unsubscribe()]);
+      await Promise.allSettled([
+        changesChannel.unsubscribe(),
+        broadcastChannel.unsubscribe(),
+        cashierBroadcastChannel.unsubscribe()
+      ]);
     }
   };
 }

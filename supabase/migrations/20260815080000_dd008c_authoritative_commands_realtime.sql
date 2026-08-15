@@ -426,7 +426,7 @@ as $$
   ), false)
 $$;
 
-create or replace function public.dd008c_sync_payment_projection(p_order_id text)
+create or replace function public.dd008c_sync_payment_projection(p_order_id text, p_bump_version boolean default false)
 returns void
 language plpgsql
 volatile
@@ -462,7 +462,7 @@ begin
         when v_service_complete and coalesce(v_summary.payment_status, 'UNPAID') = 'PAID' and public.orders.paid_at is null then now()
         else public.orders.paid_at
       end,
-      version = public.orders.version + 1
+      version = case when p_bump_version then public.orders.version + 1 else public.orders.version end
   where public.orders.id = p_order_id;
 end
 $$;
@@ -522,7 +522,7 @@ begin
       served_at = case when v_next = 'SERVED' and public.orders.served_at is null then now() else public.orders.served_at end
   where public.orders.id = p_order_id;
 
-  perform public.dd008c_sync_payment_projection(p_order_id);
+  perform public.dd008c_sync_payment_projection(p_order_id, false);
   return v_next;
 end
 $$;
@@ -2358,7 +2358,7 @@ begin
       version = public.orders.version + 1
   where id = p_order_id
   returning * into v_order;
-  perform public.dd008c_sync_payment_projection(p_order_id);
+  perform public.dd008c_sync_payment_projection(p_order_id, false);
   v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, v_order.version, jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
   if v_key is not null then
     insert into public.command_deduplication (location_id, command_key, command, actor_type, actor_id, request_hash, result_reference)
@@ -2419,7 +2419,7 @@ begin
   v_provider := case when v_method in ('VNPAY', 'MOMO', 'ZALOPAY') then v_method else 'MANUAL' end;
   insert into public.payment_transactions (id, location_id, order_id, type, method, provider, amount_vnd, tender_group_id, note)
   values (v_payment_id, p_location_id, p_order_id, 'PAYMENT', v_method, v_provider, p_amount_vnd, coalesce(p_tender_group_id, ''), 'DD-008C authoritative payment');
-  perform public.dd008c_sync_payment_projection(p_order_id);
+  perform public.dd008c_sync_payment_projection(p_order_id, true);
   perform public.dd008c_write_audit(p_location_id, 'STAFF', v_authz.staff_profile_id, v_authz.staff_profile_id, v_authz.device_id, 'record_order_payment', 'payment', v_payment_id, 'OK');
   perform public.dd008c_emit_refresh(p_location_id, 'cashier', 'payment', v_payment_id, jsonb_build_object('reason', 'PAYMENT_RECORDED'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'payment', v_payment_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
@@ -2473,7 +2473,7 @@ begin
   if exists (select 1 from public.payment_transactions where related_payment_id = p_payment_id and type = 'REFUND') then return query select * from public.dd008c_failure('INVALID_STATE', 'PAYMENT_ALREADY_REFUNDED'); return; end if;
   insert into public.payment_transactions (id, location_id, order_id, type, method, provider, amount_vnd, related_payment_id, tender_group_id, note)
   values (v_void_id, p_location_id, p_order_id, 'PAYMENT_VOID', v_payment.method, v_payment.provider, v_payment.amount_vnd, p_payment_id, v_payment.tender_group_id, 'DD-008C authoritative payment void');
-  perform public.dd008c_sync_payment_projection(p_order_id);
+  perform public.dd008c_sync_payment_projection(p_order_id, true);
   perform public.dd008c_emit_refresh(p_location_id, 'cashier', 'payment', v_void_id, jsonb_build_object('reason', 'PAYMENT_VOID'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'payment', v_void_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
   if v_key is not null then
@@ -2536,7 +2536,7 @@ begin
   if p_amount_vnd > v_payment.amount_vnd - v_refunded then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'REFUND_EXCEEDS_REMAINING'); return; end if;
   insert into public.payment_transactions (id, location_id, order_id, type, method, provider, amount_vnd, related_payment_id, tender_group_id, note)
   values (v_refund_id, p_location_id, p_order_id, 'REFUND', 'REFUND', v_payment.provider, p_amount_vnd, p_payment_id, v_payment.tender_group_id, 'DD-008C authoritative targeted refund');
-  perform public.dd008c_sync_payment_projection(p_order_id);
+  perform public.dd008c_sync_payment_projection(p_order_id, true);
   perform public.dd008c_emit_refresh(p_location_id, 'cashier', 'payment', v_refund_id, jsonb_build_object('reason', 'PAYMENT_REFUND'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'payment', v_refund_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
   if v_key is not null then
@@ -2611,7 +2611,7 @@ begin
     if v_pay_amount > 0 then
       insert into public.payment_transactions (id, location_id, order_id, type, method, provider, amount_vnd, tender_group_id, note)
       values ('PAY-' || replace(extensions.gen_random_uuid()::text, '-', ''), p_location_id, v_order.id, 'PAYMENT', v_method, v_provider, v_pay_amount, v_group, 'DD-008C table tender');
-      perform public.dd008c_sync_payment_projection(v_order.id);
+      perform public.dd008c_sync_payment_projection(v_order.id, true);
       v_remaining := v_remaining - v_pay_amount;
     end if;
   end loop;
@@ -2638,7 +2638,7 @@ revoke all on function public.dd008c_emit_refresh(text, text, text, text, jsonb)
 revoke all on function public.dd008c_write_audit(text, text, text, text, text, text, text, text, text, jsonb) from public;
 revoke all on function public.dd008c_payment_status_for_order(text) from public;
 revoke all on function public.dd008c_is_order_service_complete(text) from public;
-revoke all on function public.dd008c_sync_payment_projection(text) from public;
+revoke all on function public.dd008c_sync_payment_projection(text, boolean) from public;
 revoke all on function public.dd008c_refresh_order_status(text) from public;
 revoke all on function public.dd008c_order_payload(text, boolean) from public;
 revoke all on function public.dd008c_table_session_payload(text) from public;

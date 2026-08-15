@@ -268,14 +268,21 @@ begin
     raise exception 'expected KDS skip rejected, got %/%', v_result.category, v_result.reason;
   end if;
 
-  perform public.update_kds_line_prep('deedou-demo', 'dd008c-order-pending', array['fried-rice:1:item'], 'ACKNOWLEDGED', 2, 'dd008c-kds-ack', 'KDS_KITCHEN', 'dd008c-kitchen-device');
-  perform public.update_kds_line_prep('deedou-demo', 'dd008c-order-pending', array['fried-rice:1:item'], 'PREPARING', 3, 'dd008c-kds-prep', 'KDS_KITCHEN', 'dd008c-kitchen-device');
-  perform public.update_kds_line_prep('deedou-demo', 'dd008c-order-pending', array['fried-rice:1:item'], 'PREPARING', 3, 'dd008c-kds-prep', 'KDS_KITCHEN', 'dd008c-kitchen-device');
-  perform public.update_kds_line_prep('deedou-demo', 'dd008c-order-pending', array['fried-rice:1:item'], 'READY', 4, 'dd008c-kds-ready', 'KDS_KITCHEN', 'dd008c-kitchen-device');
+  select * into v_result from public.update_kds_line_prep('deedou-demo', 'dd008c-order-pending', array['fried-rice:1:item'], 'ACKNOWLEDGED', 2, 'dd008c-kds-ack', 'KDS_KITCHEN', 'dd008c-kitchen-device') limit 1;
+  if v_result.ok <> true or v_result.version <> 3 then raise exception 'expected KDS ACK version 3, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
+  select * into v_result from public.update_kds_line_prep('deedou-demo', 'dd008c-order-pending', array['fried-rice:1:item'], 'PREPARING', 3, 'dd008c-kds-prep', 'KDS_KITCHEN', 'dd008c-kitchen-device') limit 1;
+  if v_result.ok <> true or v_result.version <> 4 then raise exception 'expected KDS PREPARING version 4, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
+  select * into v_result from public.update_kds_line_prep('deedou-demo', 'dd008c-order-pending', array['fried-rice:1:item'], 'PREPARING', 3, 'dd008c-kds-prep', 'KDS_KITCHEN', 'dd008c-kitchen-device') limit 1;
+  if v_result.ok <> true or v_result.version <> 4 then raise exception 'expected KDS PREPARING replay version 4, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
+  select * into v_result from public.update_kds_line_prep('deedou-demo', 'dd008c-order-pending', array['fried-rice:1:item'], 'READY', 4, 'dd008c-kds-ready', 'KDS_KITCHEN', 'dd008c-kitchen-device') limit 1;
+  if v_result.ok <> true or v_result.version <> 5 then raise exception 'expected KDS READY version 5, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
 
-  perform public.update_kds_line_prep('deedou-demo', 'dd008c-order-multi', array['fried-rice:1:item'], 'ACKNOWLEDGED', 1, 'dd008c-multi-hot-ack', 'KDS_KITCHEN', 'dd008c-kitchen-device');
-  perform public.update_kds_line_prep('deedou-demo', 'dd008c-order-multi', array['fried-rice:1:item'], 'PREPARING', 2, 'dd008c-multi-hot-prep', 'KDS_KITCHEN', 'dd008c-kitchen-device');
-  perform public.update_kds_line_prep('deedou-demo', 'dd008c-order-multi', array['fried-rice:1:item'], 'READY', 3, 'dd008c-multi-hot-ready', 'KDS_KITCHEN', 'dd008c-kitchen-device');
+  select * into v_result from public.update_kds_line_prep('deedou-demo', 'dd008c-order-multi', array['fried-rice:1:item'], 'ACKNOWLEDGED', 1, 'dd008c-multi-hot-ack', 'KDS_KITCHEN', 'dd008c-kitchen-device') limit 1;
+  if v_result.ok <> true or v_result.version <> 2 then raise exception 'expected multi hot ACK version 2, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
+  select * into v_result from public.update_kds_line_prep('deedou-demo', 'dd008c-order-multi', array['fried-rice:1:item'], 'PREPARING', 2, 'dd008c-multi-hot-prep', 'KDS_KITCHEN', 'dd008c-kitchen-device') limit 1;
+  if v_result.ok <> true or v_result.version <> 3 then raise exception 'expected multi hot PREPARING version 3, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
+  select * into v_result from public.update_kds_line_prep('deedou-demo', 'dd008c-order-multi', array['fried-rice:1:item'], 'READY', 3, 'dd008c-multi-hot-ready', 'KDS_KITCHEN', 'dd008c-kitchen-device') limit 1;
+  if v_result.ok <> true or v_result.version <> 4 then raise exception 'expected multi hot READY version 4, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
 end $$;
 
 reset role;
@@ -304,10 +311,15 @@ set local request.jwt.claim.sub = '20000000-0000-4000-8000-000000000004';
 set local request.jwt.claim.role = 'authenticated';
 
 do $$
+declare
+  v_result record;
 begin
-  perform public.update_kds_line_prep('deedou-demo', 'dd008c-order-multi', array['mango-tea:2:item'], 'ACKNOWLEDGED', 4, 'dd008c-multi-tea-ack', 'KDS_BAR', 'dd008c-bar-device');
-  perform public.update_kds_line_prep('deedou-demo', 'dd008c-order-multi', array['mango-tea:2:item'], 'PREPARING', 5, 'dd008c-multi-tea-prep', 'KDS_BAR', 'dd008c-bar-device');
-  perform public.update_kds_line_prep('deedou-demo', 'dd008c-order-multi', array['mango-tea:2:item'], 'READY', 6, 'dd008c-multi-tea-ready', 'KDS_BAR', 'dd008c-bar-device');
+  select * into v_result from public.update_kds_line_prep('deedou-demo', 'dd008c-order-multi', array['mango-tea:2:item'], 'ACKNOWLEDGED', 4, 'dd008c-multi-tea-ack', 'KDS_BAR', 'dd008c-bar-device') limit 1;
+  if v_result.ok <> true or v_result.version <> 5 then raise exception 'expected multi tea ACK version 5, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
+  select * into v_result from public.update_kds_line_prep('deedou-demo', 'dd008c-order-multi', array['mango-tea:2:item'], 'PREPARING', 5, 'dd008c-multi-tea-prep', 'KDS_BAR', 'dd008c-bar-device') limit 1;
+  if v_result.ok <> true or v_result.version <> 6 then raise exception 'expected multi tea PREPARING version 6, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
+  select * into v_result from public.update_kds_line_prep('deedou-demo', 'dd008c-order-multi', array['mango-tea:2:item'], 'READY', 6, 'dd008c-multi-tea-ready', 'KDS_BAR', 'dd008c-bar-device') limit 1;
+  if v_result.ok <> true or v_result.version <> 7 then raise exception 'expected multi tea READY version 7, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
 end $$;
 
 reset role;
