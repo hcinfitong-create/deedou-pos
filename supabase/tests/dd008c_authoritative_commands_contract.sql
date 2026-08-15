@@ -72,7 +72,8 @@ values
   ('dd008c-dev-cashier', 'deedou-demo', 'DD-008C Cashier', 'CASHIER', public.hash_device_credential('dd008c-cashier-device'), true, 'dd008c-staff-cashier'),
   ('dd008c-dev-staff', 'deedou-demo', 'DD-008C Floor Staff', 'STAFF', public.hash_device_credential('dd008c-staff-device'), true, 'dd008c-staff-floor'),
   ('dd008c-dev-kitchen', 'deedou-demo', 'DD-008C Kitchen KDS', 'KDS_KITCHEN', public.hash_device_credential('dd008c-kitchen-device'), true, 'dd008c-staff-kitchen'),
-  ('dd008c-dev-bar', 'deedou-demo', 'DD-008C Bar KDS', 'KDS_BAR', public.hash_device_credential('dd008c-bar-device'), true, 'dd008c-staff-bar')
+  ('dd008c-dev-bar', 'deedou-demo', 'DD-008C Bar KDS', 'KDS_BAR', public.hash_device_credential('dd008c-bar-device'), true, 'dd008c-staff-bar'),
+  ('dd008c-dev-revoked', 'deedou-demo', 'DD-008C Revoked Cashier', 'CASHIER', public.hash_device_credential('dd008c-revoked-device'), false, 'dd008c-staff-cashier')
 on conflict (id) do nothing;
 
 set local role anon;
@@ -839,6 +840,14 @@ set local request.jwt.claim.sub = '';
 
 do $$
 begin
+  perform public.dd008c_issue_realtime_ticket('deedou-demo', 'ops', '', '');
+  raise exception 'expected anon realtime ticket issue to be blocked';
+exception
+  when insufficient_privilege then null;
+end $$;
+
+do $$
+begin
   perform 1 from public.dd008c_refresh_hints limit 1;
   raise exception 'expected anon raw refresh hint read to be blocked';
 exception
@@ -854,12 +863,96 @@ set local request.jwt.claim.role = 'authenticated';
 do $$
 declare
   v_hint_count integer;
+  v_result record;
+  v_cashier_ticket text;
 begin
   select count(*) into v_hint_count
   from public.dd008c_refresh_hints
   where location_id = 'deedou-demo';
-  if v_hint_count = 0 then
-    raise exception 'expected authenticated location staff to see location-scoped refresh hints';
+  if v_hint_count <> 0 then
+    raise exception 'expected authenticated staff without realtime ticket to see no raw refresh hints, got %', v_hint_count;
+  end if;
+
+  select * into v_result
+  from public.dd008c_issue_realtime_ticket('deedou-demo', 'ops', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> true or v_result.payload->>'topic' !~ '^location:deedou-demo:ops:[0-9a-f-]{36}$' then
+    raise exception 'expected cashier ops realtime ticket, got %/%/%', v_result.category, v_result.reason, v_result.payload;
+  end if;
+  if (v_result.payload->>'topic') like '%dd008c-cashier-device%' then
+    raise exception 'realtime topic leaked device credential';
+  end if;
+
+  select * into v_result
+  from public.dd008c_issue_realtime_ticket('deedou-demo', 'cashier', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> true then
+    raise exception 'expected cashier payment realtime ticket, got %/%', v_result.category, v_result.reason;
+  end if;
+  v_cashier_ticket := v_result.entity_id;
+  if public.dd008c_refresh_audience_allowed('deedou-demo', 'cashier', v_cashier_ticket) <> true then
+    raise exception 'expected issued cashier ticket to satisfy realtime RLS helper';
+  end if;
+end $$;
+
+reset role;
+
+set local role authenticated;
+set local request.jwt.claim.sub = '20000000-0000-4000-8000-000000000005';
+set local request.jwt.claim.role = 'authenticated';
+
+do $$
+declare
+  v_result record;
+begin
+  select * into v_result
+  from public.dd008c_issue_realtime_ticket('deedou-demo', 'cashier', 'STAFF', 'dd008c-staff-device')
+  limit 1;
+  if v_result.ok <> false or v_result.reason <> 'DEVICE_MODE_DENIED' then
+    raise exception 'expected manager on STAFF workstation denied cashier realtime, got %/%', v_result.category, v_result.reason;
+  end if;
+end $$;
+
+reset role;
+
+set local role authenticated;
+set local request.jwt.claim.sub = '20000000-0000-4000-8000-000000000003';
+set local request.jwt.claim.role = 'authenticated';
+
+do $$
+declare
+  v_result record;
+begin
+  select * into v_result
+  from public.dd008c_issue_realtime_ticket('deedou-demo', 'cashier', 'KDS_KITCHEN', 'dd008c-kitchen-device')
+  limit 1;
+  if v_result.ok <> false then
+    raise exception 'expected KDS denied cashier realtime, got %/%', v_result.category, v_result.reason;
+  end if;
+end $$;
+
+reset role;
+
+set local role authenticated;
+set local request.jwt.claim.sub = '20000000-0000-4000-8000-000000000001';
+set local request.jwt.claim.role = 'authenticated';
+
+do $$
+declare
+  v_result record;
+begin
+  select * into v_result
+  from public.dd008c_issue_realtime_ticket('deedou-demo', 'ops', 'CASHIER', 'not-a-registered-device')
+  limit 1;
+  if v_result.ok <> false or v_result.reason <> 'DEVICE_UNREGISTERED' then
+    raise exception 'expected wrong device denied realtime, got %/%', v_result.category, v_result.reason;
+  end if;
+
+  select * into v_result
+  from public.dd008c_issue_realtime_ticket('deedou-demo', 'ops', 'CASHIER', 'dd008c-revoked-device')
+  limit 1;
+  if v_result.ok <> false or v_result.reason <> 'DEVICE_UNREGISTERED' then
+    raise exception 'expected revoked device denied realtime, got %/%', v_result.category, v_result.reason;
   end if;
 end $$;
 

@@ -25,9 +25,12 @@ const ids = {
   cashier: `${runId}_cashier`,
   staff: `${runId}_staff`,
   kitchen: `${runId}_kitchen`,
+  manager: `${runId}_manager`,
   cashierDevice: `${runId}_dev_cashier`,
   staffDevice: `${runId}_dev_staff`,
-  kitchenDevice: `${runId}_dev_kitchen`
+  kitchenDevice: `${runId}_dev_kitchen`,
+  managerStaffDevice: `${runId}_dev_manager_staff`,
+  revokedDevice: `${runId}_dev_revoked`
 };
 const codes = {
   qrTable: `Q${runId.slice(-5).toUpperCase()}`,
@@ -41,7 +44,9 @@ const qrToken = `${runId}_qr_token`;
 const deviceSecrets = {
   cashier: secret("cashier-device"),
   staff: secret("staff-device"),
-  kitchen: secret("kitchen-device")
+  kitchen: secret("kitchen-device"),
+  managerStaff: secret("manager-staff-device"),
+  revoked: secret("revoked-device")
 };
 
 const adminClient = createClient(apiUrl, serviceRoleKey, {
@@ -60,7 +65,8 @@ const publicClient = createClient(apiUrl, anonKey, {
 const users = {
   cashier: await createRuntimeUser("cashier"),
   staff: await createRuntimeUser("staff"),
-  kitchen: await createRuntimeUser("kitchen")
+  kitchen: await createRuntimeUser("kitchen"),
+  manager: await createRuntimeUser("manager")
 };
 
 provisionRuntimeData();
@@ -68,6 +74,13 @@ provisionRuntimeData();
 const cashierClient = await loginRuntimeUser("cashier");
 const staffClient = await loginRuntimeUser("staff");
 const kitchenClient = await loginRuntimeUser("kitchen");
+const managerClient = await loginRuntimeUser("manager");
+await assertRealtimeTicketTransportDenied(publicClient, "anon denied privileged realtime ticket");
+await assertRealtimeTicketDenied(managerClient, "cashier", "STAFF", deviceSecrets.managerStaff, "manager STAFF workstation denied cashier realtime");
+await assertRealtimeTicketDenied(kitchenClient, "cashier", "KDS_KITCHEN", deviceSecrets.kitchen, "KDS workstation denied cashier realtime");
+await assertRealtimeTicketDenied(cashierClient, "ops", "CASHIER", `${runId}_wrong_device`, "wrong device denied realtime ticket");
+await assertRealtimeTicketDenied(cashierClient, "ops", "CASHIER", deviceSecrets.revoked, "revoked device denied realtime ticket");
+await assertPrivateChannelDenied(managerClient, `location:${LOCATION_ID}:cashier:${randomUUID()}`, "manager STAFF forged cashier realtime subscription denied by RLS");
 const staffRefresh = await subscribeRefreshHints(staffClient, { label: "staff", audiences: ["ops"] });
 const cashierRefresh = await subscribeRefreshHints(cashierClient, { label: "cashier", audiences: ["ops", "cashier"] });
 await Promise.all([
@@ -367,28 +380,33 @@ insert into public.staff_profiles (id, auth_user_id, display_name, active)
 values
   (${lit(ids.cashier)}, ${lit(users.cashier.id)}::uuid, 'DD-008C Cashier', true),
   (${lit(ids.staff)}, ${lit(users.staff.id)}::uuid, 'DD-008C Floor Staff', true),
-  (${lit(ids.kitchen)}, ${lit(users.kitchen.id)}::uuid, 'DD-008C Kitchen', true)
+  (${lit(ids.kitchen)}, ${lit(users.kitchen.id)}::uuid, 'DD-008C Kitchen', true),
+  (${lit(ids.manager)}, ${lit(users.manager.id)}::uuid, 'DD-008C Manager', true)
 on conflict (id) do nothing;
 
 insert into public.staff_location_assignments (staff_profile_id, location_id, active)
 values
   (${lit(ids.cashier)}, ${lit(LOCATION_ID)}, true),
   (${lit(ids.staff)}, ${lit(LOCATION_ID)}, true),
-  (${lit(ids.kitchen)}, ${lit(LOCATION_ID)}, true)
+  (${lit(ids.kitchen)}, ${lit(LOCATION_ID)}, true),
+  (${lit(ids.manager)}, ${lit(LOCATION_ID)}, true)
 on conflict (staff_profile_id, location_id) do update set active = excluded.active;
 
 insert into public.staff_role_assignments (staff_profile_id, location_id, role_id, active)
 values
   (${lit(ids.cashier)}, ${lit(LOCATION_ID)}, 'CASHIER', true),
   (${lit(ids.staff)}, ${lit(LOCATION_ID)}, 'FLOOR_STAFF', true),
-  (${lit(ids.kitchen)}, ${lit(LOCATION_ID)}, 'KITCHEN', true)
+  (${lit(ids.kitchen)}, ${lit(LOCATION_ID)}, 'KITCHEN', true),
+  (${lit(ids.manager)}, ${lit(LOCATION_ID)}, 'MANAGER', true)
 on conflict (staff_profile_id, location_id, role_id) do update set active = excluded.active;
 
 insert into public.workstation_devices (id, location_id, label, mode, credential_hash, active, registered_by_staff_profile_id)
 values
   (${lit(ids.cashierDevice)}, ${lit(LOCATION_ID)}, 'DD-008C Cashier', 'CASHIER', public.hash_device_credential(${lit(deviceSecrets.cashier)}), true, ${lit(ids.cashier)}),
   (${lit(ids.staffDevice)}, ${lit(LOCATION_ID)}, 'DD-008C Floor Staff', 'STAFF', public.hash_device_credential(${lit(deviceSecrets.staff)}), true, ${lit(ids.staff)}),
-  (${lit(ids.kitchenDevice)}, ${lit(LOCATION_ID)}, 'DD-008C Kitchen KDS', 'KDS_KITCHEN', public.hash_device_credential(${lit(deviceSecrets.kitchen)}), true, ${lit(ids.kitchen)})
+  (${lit(ids.kitchenDevice)}, ${lit(LOCATION_ID)}, 'DD-008C Kitchen KDS', 'KDS_KITCHEN', public.hash_device_credential(${lit(deviceSecrets.kitchen)}), true, ${lit(ids.kitchen)}),
+  (${lit(ids.managerStaffDevice)}, ${lit(LOCATION_ID)}, 'DD-008C Manager Staff Mode', 'STAFF', public.hash_device_credential(${lit(deviceSecrets.managerStaff)}), true, ${lit(ids.manager)}),
+  (${lit(ids.revokedDevice)}, ${lit(LOCATION_ID)}, 'DD-008C Revoked', 'CASHIER', public.hash_device_credential(${lit(deviceSecrets.revoked)}), false, ${lit(ids.cashier)})
 on conflict (id) do nothing;
 
 commit;
@@ -439,9 +457,15 @@ async function locationSnapshot(client, mode, deviceCredential) {
 
 async function subscribeRefreshHints(client, { label = "client", audiences = ["ops"] } = {}) {
   const events = [];
-  const channels = audiences.map((audience) => client
-    .channel(`location:${LOCATION_ID}:${audience}`, { config: { private: true } })
-    .on("broadcast", { event: "refresh" }, (payload) => {
+  const channels = [];
+  for (const audience of audiences) {
+    const ticket = await issueRealtimeTicket(client, audience, label);
+    const topic = ticket.payload?.topic || "";
+    assert(topic.startsWith(`location:${LOCATION_ID}:${audience}:`), `${label} realtime topic is not location/audience scoped`);
+    assert(!topic.includes(deviceSecrets.cashier) && !topic.includes(deviceSecrets.staff) && !topic.includes(deviceSecrets.kitchen), `${label} realtime topic leaked a device credential`);
+    channels.push(client
+      .channel(topic, { config: { private: true } })
+      .on("broadcast", { event: "refresh" }, (payload) => {
       const eventPayload = payload?.payload || {};
       events.push({
         broadcast: true,
@@ -453,6 +477,7 @@ async function subscribeRefreshHints(client, { label = "client", audiences = ["o
         }
       });
     }));
+  }
 
   await Promise.all(channels.map((channel) => subscribeChannel(channel, `DD-008C ${label} private refresh broadcast`)));
 
@@ -462,6 +487,72 @@ async function subscribeRefreshHints(client, { label = "client", audiences = ["o
       await Promise.allSettled(channels.map((channel) => channel.unsubscribe()));
     }
   };
+}
+
+async function issueRealtimeTicket(client, audience, label) {
+  const result = await command(client, "dd008c_issue_realtime_ticket", {
+    p_location_id: LOCATION_ID,
+    p_audience: audience,
+    p_workstation_mode: modeForRealtimeLabel(label),
+    p_device_credential: credentialForRealtimeLabel(label)
+  });
+  assertCommand(result, true, "", `${label} issued ${audience} realtime ticket`);
+  return result;
+}
+
+async function assertRealtimeTicketDenied(client, audience, workstationMode, deviceCredential, label) {
+  const result = await command(client, "dd008c_issue_realtime_ticket", {
+    p_location_id: LOCATION_ID,
+    p_audience: audience,
+    p_workstation_mode: workstationMode,
+    p_device_credential: deviceCredential
+  });
+  assert(result.ok === false, `${label}: expected realtime ticket denied, got ${JSON.stringify(result)}`);
+}
+
+async function assertRealtimeTicketTransportDenied(client, label) {
+  const { data, error } = await client.rpc("dd008c_issue_realtime_ticket", {
+    p_location_id: LOCATION_ID,
+    p_audience: "ops",
+    p_workstation_mode: "",
+    p_device_credential: ""
+  });
+  assert(error || firstRow(data)?.ok === false, `${label}: expected realtime ticket transport/function denial`);
+}
+
+async function assertPrivateChannelDenied(client, topic, label) {
+  const channel = client.channel(topic, { config: { private: true } });
+  try {
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(`${label}: timed out waiting for private channel denial`)), 10000);
+      channel.subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          clearTimeout(timeout);
+          reject(new Error(`${label}: forged private channel unexpectedly subscribed`));
+        }
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+    });
+  } finally {
+    await channel.unsubscribe();
+  }
+}
+
+function modeForRealtimeLabel(label) {
+  if (label === "cashier") return "CASHIER";
+  if (label === "staff") return "STAFF";
+  if (label === "kitchen") return "KDS_KITCHEN";
+  return "";
+}
+
+function credentialForRealtimeLabel(label) {
+  if (label === "cashier") return deviceSecrets.cashier;
+  if (label === "staff") return deviceSecrets.staff;
+  if (label === "kitchen") return deviceSecrets.kitchen;
+  return "";
 }
 
 async function assertRefreshStreamReady(events, label) {

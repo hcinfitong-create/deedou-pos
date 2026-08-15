@@ -58,6 +58,18 @@ DD-008C command coverage includes:
 
 Realtime events are refresh hints only. Clients must refetch authoritative snapshots after hints.
 
+Private Realtime subscriptions are also server-authorized. The browser asks
+for a short-lived refresh ticket with its authenticated staff identity,
+location, registered device credential, and workstation mode. The server
+issues an opaque ticket topic only after the effective access intersection
+passes:
+
+`identity + role permission + location + registered device + workstation mode`.
+
+Realtime topics never contain device credentials, access tokens, refresh
+tokens, passwords, or payment data. Payment/audit refreshes use narrower
+audiences and still require authoritative refetch for data.
+
 ## Local Supabase
 
 DD-008A pins the Supabase CLI as a dev dependency when tooling is available. Run:

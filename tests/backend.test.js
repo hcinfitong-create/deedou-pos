@@ -656,6 +656,30 @@ test("DD-008C browser smoke covers Manager Location A allow and Location B deny"
   assert.match(browserSmokeScript, /SUPABASE manager Location B denied[\s\S]*user: users\.manager[\s\S]*locationId: ids\.locationB[\s\S]*workstationMode: "STAFF"[\s\S]*routeName: "staff"/);
 });
 
+test("DD-008C browser smoke covers separate-context operational realtime E2E", () => {
+  [
+    "runOperationalRealtimeE2E",
+    "SUPABASE E2E customer",
+    "SUPABASE E2E staff",
+    "SUPABASE E2E kitchen",
+    "SUPABASE E2E cashier",
+    "browser operational E2E",
+    "submit_qr_order: OK",
+    "data-status=\"ACCEPTED\"",
+    "clickStationAction(kitchenPage, note, \"ACKNOWLEDGED\")",
+    "clickStationAction(kitchenPage, note, \"PREPARING\")",
+    "clickStationAction(kitchenPage, note, \"READY\")",
+    "data-serve-line",
+    "data-table-pay=\"A01\"",
+    "publicClient.rpc(\"create_service_request\"",
+    "Staff reconnect operational E2E",
+    "activeRealtimeTicketCount",
+    "multi-context realtime customer QR"
+  ].forEach((evidence) => {
+    assert.match(browserSmokeScript, new RegExp(escapeRegExp(evidence), "i"));
+  });
+});
+
 test("DD-008C creates authoritative command RPCs with SECURITY DEFINER and empty search path", () => {
   [
     "submit_qr_order",
@@ -679,7 +703,8 @@ test("DD-008C creates authoritative command RPCs with SECURITY DEFINER and empty
     "record_order_payment",
     "void_order_payment",
     "refund_order_payment",
-    "record_table_tender"
+    "record_table_tender",
+    "dd008c_issue_realtime_ticket"
   ].forEach((functionName) => {
     const sql = authoritativeFunctionSql(functionName);
     assert.match(sql, /security definer/i, `${functionName} must be SECURITY DEFINER`);
@@ -704,7 +729,8 @@ test("DD-008C exposes only intended public and authenticated command grants", ()
     "record_order_payment",
     "void_order_payment",
     "refund_order_payment",
-    "record_table_tender"
+    "record_table_tender",
+    "dd008c_issue_realtime_ticket"
   ].forEach((functionName) => {
     assert.match(authoritativeMigrationSql, new RegExp(`grant execute on function public\\.${functionName}\\([\\s\\S]*?\\) to authenticated;`, "i"));
   });
@@ -765,15 +791,28 @@ test("DD-008C table tender validates outstanding balance before ledger inserts",
   assert.match(tableTender, /command_deduplication/i);
 });
 
-test("DD-008C realtime refresh hints are audience and capability scoped", () => {
+test("DD-008C realtime refresh is audience and workstation-device ticket scoped", () => {
+  const issueTicket = authoritativeFunctionSql("dd008c_issue_realtime_ticket");
+
   assert.match(authoritativeMigrationSql, /create table if not exists public\.dd008c_refresh_hints/i);
+  assert.match(authoritativeMigrationSql, /create table if not exists public\.dd008c_realtime_subscription_tickets/i);
   assert.match(authoritativeMigrationSql, /alter table public\.dd008c_refresh_hints enable row level security/i);
+  assert.match(authoritativeMigrationSql, /alter table public\.dd008c_realtime_subscription_tickets enable row level security/i);
   assert.match(authoritativeMigrationSql, /public\.dd008c_refresh_audience_allowed\(location_id, audience\)/i);
-  assert.match(authoritativeMigrationSql, /when 'cashier' then public\.has_permission\(p_location_id, 'payments\.read'\)/i);
-  assert.match(authoritativeMigrationSql, /realtime\.send\(v_payload, 'refresh', v_topic, true\)/i);
-  assert.match(authoritativeMigrationSql, /public\.dd008c_refresh_audience_allowed\(split_part\(realtime\.topic\(\), ':', 2\), split_part\(realtime\.topic\(\), ':', 3\)\)/i);
+  assert.match(authoritativeMigrationSql, /create or replace function public\.dd008c_refresh_audience_allowed\(\s*p_location_id text,\s*p_audience text,\s*p_ticket_id text/i);
+  assert.match(authoritativeMigrationSql, /public\.dd008c_refresh_permission_for_audience\(p_audience\)/i);
+  assert.match(issueTicket, /public\.authorize_staff_access\(p_location_id, v_permission, p_workstation_mode, p_device_credential\)/i);
+  assert.match(issueTicket, /'location:' \|\| p_location_id \|\| ':' \|\| v_audience \|\| ':' \|\| v_ticket_id::text/i);
+  assert.match(authoritativeMigrationSql, /public\.workstation_mode_allows_permission\(/i);
+  assert.match(authoritativeMigrationSql, /public\.workstation_devices\.active = true/i);
+  assert.match(authoritativeMigrationSql, /realtime\.send\(v_payload, 'refresh', v_ticket_topic, true\)/i);
+  assert.match(authoritativeMigrationSql, /public\.dd008c_refresh_audience_allowed\(\s*split_part\(realtime\.topic\(\), ':', 2\),\s*split_part\(realtime\.topic\(\), ':', 3\),\s*split_part\(realtime\.topic\(\), ':', 4\)/i);
+  assert.doesNotMatch(authoritativeMigrationSql, /realtime\.send\(v_payload, 'refresh', v_topic, true\)/i);
   assert.match(authoritativeMigrationSql, /alter publication supabase_realtime add table public\.dd008c_refresh_hints/i);
   assert.match(authoritativeMigrationSql, /public\.dd008c_emit_refresh/i);
+  assert.match(authoritativeContractSql, /manager on STAFF workstation denied cashier realtime/i);
+  assert.match(authoritativeContractSql, /expected KDS denied cashier realtime/i);
+  assert.match(authoritativeContractSql, /expected revoked device denied realtime/i);
 });
 
 test("DD-008C app reuses pending command-intent idempotency keys", () => {
@@ -823,7 +862,11 @@ test("DD-008C real integration script covers command concurrency and refresh con
     "cashierRefresh",
     "audiences: [\"ops\"]",
     "audiences: [\"ops\", \"cashier\"]",
-    "location:${LOCATION_ID}:${audience}",
+    "dd008c_issue_realtime_ticket",
+    "location:${LOCATION_ID}:${audience}:",
+    "manager STAFF workstation denied cashier realtime",
+    "forged cashier realtime subscription denied by RLS",
+    "revoked device denied realtime ticket",
     "private refresh broadcast",
     "SUBSCRIPTION_READY",
     "payload.events",

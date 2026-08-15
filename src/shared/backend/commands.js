@@ -58,6 +58,13 @@ export function createAuthoritativeBackendApi(options = {}) {
     return rpc("dd008c_get_public_table_snapshot", { p_qr_token: text(qrToken) });
   }
 
+  async function issueRealtimeTicket({ locationId, audience } = {}) {
+    return rpc("dd008c_issue_realtime_ticket", staffParams({
+      locationId,
+      params: { p_audience: text(audience || "ops") }
+    }));
+  }
+
   async function submitQrOrder({ qrToken, items, note, idempotencyKey } = {}) {
     return rpc("submit_qr_order", {
       p_qr_token: text(qrToken),
@@ -249,18 +256,29 @@ export function createAuthoritativeBackendApi(options = {}) {
     const subscriptions = [];
     let closed = false;
     getClient()
-      .then((client) => {
+      .then(async (client) => {
         if (closed || !client?.channel) return;
-        refreshAudiencesForLocation(locationId).forEach((audience) => {
+        for (const audience of refreshAudiencesForLocation(locationId)) {
+          const ticket = await issueRealtimeTicket({ locationId, audience });
+          if (closed) return;
+          if (!ticket.ok) {
+            if (audience === "ops") onError?.(new Error(ticket.reason || "REALTIME_TICKET_DENIED"));
+            continue;
+          }
+          const topic = text(ticket.payload?.topic);
+          if (!topic) {
+            onError?.(new Error("REALTIME_TICKET_TOPIC_MISSING"));
+            continue;
+          }
           const channel = client
-            .channel(`location:${text(locationId)}:${audience}`, { config: { private: true } })
+            .channel(topic, { config: { private: true } })
             .on("broadcast", { event: "refresh" }, (event) => onRefresh?.(normalizeRefreshBroadcast(event, audience)))
             .subscribe((status, error) => {
             if (error) onError?.(error);
             if (status === "CHANNEL_ERROR") onError?.(new Error("CHANNEL_ERROR"));
           });
           subscriptions.push(channel);
-        });
+        }
       })
       .catch((error) => onError?.(error));
     return {
@@ -277,10 +295,8 @@ export function createAuthoritativeBackendApi(options = {}) {
     const workstationMode = text(authState.authorization?.workstationMode || authState.workstationMode);
     const permissions = staffPermissionsForLocation(locationId);
     if (
-      workstationMode === "CASHIER"
-      || workstationMode === "ADMIN"
-      || permissions.includes("payments.read")
-      || permissions.includes("payments.record")
+      ["CASHIER", "ADMIN"].includes(workstationMode)
+      && (permissions.includes("payments.read") || permissions.includes("payments.record"))
     ) {
       audiences.push("cashier");
     }
@@ -298,6 +314,7 @@ export function createAuthoritativeBackendApi(options = {}) {
   return {
     isAvailable: config.mode === BACKEND_MODES.SUPABASE,
     config,
+    issueRealtimeTicket,
     fetchStaffSnapshot,
     fetchPublicTableSnapshot,
     submitQrOrder,

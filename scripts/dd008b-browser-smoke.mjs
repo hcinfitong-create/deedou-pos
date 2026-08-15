@@ -35,11 +35,13 @@ const ids = Object.freeze({
   locationB: `${runId}_loc_b`,
   owner: `${runId}_owner`,
   cashier: `${runId}_cashier`,
+  staff: `${runId}_staff`,
   kitchen: `${runId}_kitchen`,
   manager: `${runId}_manager`,
   inactive: `${runId}_inactive`,
   adminDevice: `${runId}_dev_admin`,
   cashierDevice: `${runId}_dev_cashier`,
+  staffDevice: `${runId}_dev_staff`,
   kitchenDevice: `${runId}_dev_kitchen`,
   managerDevice: `${runId}_dev_manager`,
   managerBDevice: `${runId}_dev_manager_b`,
@@ -49,6 +51,7 @@ const ids = Object.freeze({
 const deviceSecrets = Object.freeze({
   admin: secret("admin-device"),
   cashier: secret("cashier-device"),
+  staff: secret("staff-device"),
   kitchen: secret("kitchen-device"),
   manager: secret("manager-device"),
   managerB: secret("manager-b-device"),
@@ -62,6 +65,12 @@ const diagnosticSecrets = [
 ];
 
 const adminClient = createClient(apiUrl, serviceRoleKey, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false
+  }
+});
+const publicClient = createClient(apiUrl, anonKey, {
   auth: {
     persistSession: false,
     autoRefreshToken: false
@@ -88,6 +97,7 @@ try {
   console.log("SUPABASE browser: manager Location A staff allow, manager Location B denied");
   console.log("SUPABASE browser: cashier Location B denied, inactive denied, wrong/revoked workstation denied, local logout returned to sign-in gate");
   console.log("SUPABASE browser: authoritative route left legacy localStorage business state unchanged");
+  console.log("SUPABASE browser: multi-context realtime customer QR -> staff accept -> KDS prep/ready -> staff serve -> cashier partial/final payment -> staff reconnect convergence");
   console.log("zero app console errors");
 } catch (error) {
   printCollectedDiagnostics(consoleErrors);
@@ -101,6 +111,7 @@ async function provisionRuntimeFixture() {
   const users = {
     owner: await createRuntimeUser("owner"),
     cashier: await createRuntimeUser("cashier"),
+    staff: await createRuntimeUser("staff"),
     kitchen: await createRuntimeUser("kitchen"),
     manager: await createRuntimeUser("manager"),
     inactive: await createRuntimeUser("inactive")
@@ -117,6 +128,7 @@ insert into public.staff_profiles (id, auth_user_id, display_name, active)
 values
   (${lit(ids.owner)}, ${lit(users.owner.id)}::uuid, 'Browser Smoke Owner', true),
   (${lit(ids.cashier)}, ${lit(users.cashier.id)}::uuid, 'Browser Smoke Cashier', true),
+  (${lit(ids.staff)}, ${lit(users.staff.id)}::uuid, 'Browser Smoke Staff', true),
   (${lit(ids.kitchen)}, ${lit(users.kitchen.id)}::uuid, 'Browser Smoke Kitchen', true),
   (${lit(ids.manager)}, ${lit(users.manager.id)}::uuid, 'Browser Smoke Manager', true),
   (${lit(ids.inactive)}, ${lit(users.inactive.id)}::uuid, 'Browser Smoke Inactive', false)
@@ -126,6 +138,7 @@ insert into public.staff_location_assignments (staff_profile_id, location_id, ac
 values
   (${lit(ids.owner)}, ${lit(ids.locationA)}, true),
   (${lit(ids.cashier)}, ${lit(ids.locationA)}, true),
+  (${lit(ids.staff)}, ${lit(ids.locationA)}, true),
   (${lit(ids.kitchen)}, ${lit(ids.locationA)}, true),
   (${lit(ids.manager)}, ${lit(ids.locationA)}, true),
   (${lit(ids.inactive)}, ${lit(ids.locationA)}, true)
@@ -135,6 +148,7 @@ insert into public.staff_role_assignments (staff_profile_id, location_id, role_i
 values
   (${lit(ids.owner)}, ${lit(ids.locationA)}, 'OWNER', true),
   (${lit(ids.cashier)}, ${lit(ids.locationA)}, 'CASHIER', true),
+  (${lit(ids.staff)}, ${lit(ids.locationA)}, 'FLOOR_STAFF', true),
   (${lit(ids.kitchen)}, ${lit(ids.locationA)}, 'KITCHEN', true),
   (${lit(ids.manager)}, ${lit(ids.locationA)}, 'MANAGER', true),
   (${lit(ids.inactive)}, ${lit(ids.locationA)}, 'CASHIER', true)
@@ -144,6 +158,7 @@ insert into public.workstation_devices (id, location_id, label, mode, credential
 values
   (${lit(ids.adminDevice)}, ${lit(ids.locationA)}, 'Browser Smoke Admin', 'ADMIN', public.hash_device_credential(${lit(deviceSecrets.admin)}), true, ${lit(ids.owner)}),
   (${lit(ids.cashierDevice)}, ${lit(ids.locationA)}, 'Browser Smoke Cashier', 'CASHIER', public.hash_device_credential(${lit(deviceSecrets.cashier)}), true, ${lit(ids.owner)}),
+  (${lit(ids.staffDevice)}, ${lit(ids.locationA)}, 'Browser Smoke Staff', 'STAFF', public.hash_device_credential(${lit(deviceSecrets.staff)}), true, ${lit(ids.owner)}),
   (${lit(ids.kitchenDevice)}, ${lit(ids.locationA)}, 'Browser Smoke Kitchen', 'KDS_KITCHEN', public.hash_device_credential(${lit(deviceSecrets.kitchen)}), true, ${lit(ids.owner)}),
   (${lit(ids.managerDevice)}, ${lit(ids.locationA)}, 'Browser Smoke Manager Staff', 'STAFF', public.hash_device_credential(${lit(deviceSecrets.manager)}), true, ${lit(ids.owner)}),
   (${lit(ids.managerBDevice)}, ${lit(ids.locationB)}, 'Browser Smoke Manager B Staff', 'STAFF', public.hash_device_credential(${lit(deviceSecrets.managerB)}), true, ${lit(ids.owner)}),
@@ -313,6 +328,144 @@ async function runSupabaseSmoke(activeBrowser, baseUrl, users, errorSink) {
     routeName: "cashier",
     forbidden: ["Cashier POS"]
   });
+
+  await runOperationalRealtimeE2E(activeBrowser, baseUrl, users, errorSink);
+}
+
+async function runOperationalRealtimeE2E(activeBrowser, baseUrl, users, errorSink) {
+  const note = `DD-008C browser operational E2E ${runId}`;
+  const customerContext = await createSupabaseContext(activeBrowser, {
+    label: "SUPABASE E2E customer",
+    deviceCredential: "",
+    workstationMode: "",
+    locationId: ids.locationA
+  });
+  const staffContext = await createSupabaseContext(activeBrowser, {
+    label: "SUPABASE E2E staff",
+    deviceCredential: deviceSecrets.staff,
+    workstationMode: "STAFF",
+    locationId: ids.locationA
+  });
+  const kitchenContext = await createSupabaseContext(activeBrowser, {
+    label: "SUPABASE E2E kitchen",
+    deviceCredential: deviceSecrets.kitchen,
+    workstationMode: "KDS_KITCHEN",
+    locationId: ids.locationA
+  });
+  const cashierContext = await createSupabaseContext(activeBrowser, {
+    label: "SUPABASE E2E cashier",
+    deviceCredential: deviceSecrets.cashier,
+    workstationMode: "CASHIER",
+    locationId: ids.locationA
+  });
+
+  let staffClosedForReconnect = false;
+  try {
+    const customerPage = await newObservedPage(customerContext, "SUPABASE E2E customer", errorSink);
+    const staffPage = await newObservedPage(staffContext, "SUPABASE E2E staff", errorSink);
+    const kitchenPage = await newObservedPage(kitchenContext, "SUPABASE E2E kitchen", errorSink);
+    const cashierPage = await newObservedPage(cashierContext, "SUPABASE E2E cashier", errorSink);
+    const realtimeTicketBaseline = await activeRealtimeTicketCount();
+
+    await withFailureDiagnostics(staffPage, "SUPABASE operational realtime E2E", errorSink, async () => {
+      await staffPage.goto(`${baseUrl}/index.html?v=dd008c-operational-e2e#/staff`, { waitUntil: "domcontentloaded" });
+      await loginThroughGate(staffPage, users.staff, ids.locationA, "STAFF");
+      await expectAuthoritativeAuthorized(staffPage, "Staff operational E2E");
+
+      await kitchenPage.goto(`${baseUrl}/index.html?v=dd008c-operational-e2e#/kitchen`, { waitUntil: "domcontentloaded" });
+      await loginThroughGate(kitchenPage, users.kitchen, ids.locationA, "KDS_KITCHEN");
+      await expectAuthoritativeAuthorized(kitchenPage, "Kitchen operational E2E");
+
+      await cashierPage.goto(`${baseUrl}/index.html?v=dd008c-operational-e2e#/cashier`, { waitUntil: "domcontentloaded" });
+      await loginThroughGate(cashierPage, users.cashier, ids.locationA, "CASHIER");
+      await expectAuthoritativeAuthorized(cashierPage, "Cashier operational E2E");
+      await cashierPage.locator('[data-select-table="A01"]').click().catch(() => {});
+
+      await waitForCondition(
+        async () => await activeRealtimeTicketCount() >= realtimeTicketBaseline + 4,
+        "separate browser contexts issued ops/cashier realtime tickets"
+      );
+
+      await customerPage.goto(`${baseUrl}/index.html?v=dd008c-operational-e2e#/t/beach-a01-47VLmz`, { waitUntil: "domcontentloaded" });
+      await assertAppReady(customerPage, "SUPABASE E2E customer");
+      await customerPage.locator("#note").fill(note);
+      await customerPage.locator('[data-add="fried-rice"]').first().click();
+      await customerPage.locator("[data-submit]").first().click();
+      await waitForBodyIncludes(customerPage, "submit_qr_order: OK", "customer QR submit succeeded");
+
+      const staffCard = staffPage.locator(".order-card").filter({ hasText: note }).first();
+      await staffCard.waitFor({ timeout: 30000 });
+      const orderNoText = await staffCard.locator(".order-head strong").first().innerText();
+      const orderNo = orderNoText.split(" - ")[0].trim();
+      assert(orderNo, "operational E2E order number was not rendered on staff page");
+
+      await staffCard.locator('button[data-status="ACCEPTED"]').click();
+      const kitchenTicket = kitchenPage.locator(".ticket").filter({ hasText: note }).first();
+      await kitchenTicket.locator('[data-station-status="ACKNOWLEDGED"]').waitFor({ timeout: 30000 });
+      assertContains(await kitchenTicket.innerText(), "Immediate", "KDS ticket fired-course display");
+
+      await clickStationAction(kitchenPage, note, "ACKNOWLEDGED");
+      await waitForBodyIncludes(staffPage, "ACKNOWLEDGED", "staff sees KDS acknowledged update");
+      await clickStationAction(kitchenPage, note, "PREPARING");
+      await waitForBodyIncludes(staffPage, "PREPARING", "staff sees KDS preparing update");
+      await clickStationAction(kitchenPage, note, "READY");
+
+      const readyStaffCard = staffPage.locator(".order-card").filter({ hasText: note }).first();
+      await readyStaffCard.locator("[data-serve-line]").first().waitFor({ timeout: 30000 });
+      await readyStaffCard.locator("[data-serve-line]").first().click();
+
+      await waitForBodyIncludes(cashierPage, orderNo, "cashier sees served order after staff action");
+      await cashierPage.waitForFunction(() => document.body.innerText.includes("1/1 món"), null, { timeout: 30000 });
+
+      await cashierPage.locator('input[data-payment-amount="A01"]').fill("39000");
+      await cashierPage.locator('button[data-table-pay="A01"][data-method="CASH"]').click();
+      await waitForBodyIncludes(cashierPage, "60.000", "cashier sees partial payment outstanding");
+      assertNotContains(await bodyText(staffPage), "PAY-", "staff page should not expose cashier payment ledger");
+
+      await cashierPage.locator('input[data-payment-amount="A01"]').fill("60000");
+      await cashierPage.locator('button[data-table-pay="A01"][data-method="CASH"]').click();
+      await waitForBodyIncludes(cashierPage, "PAID", "cashier sees final payment");
+      await waitForBodyIncludes(staffPage, orderNo, "staff remains operational after cashier payment");
+
+      await staffContext.close();
+      staffClosedForReconnect = true;
+      const { data, error } = await publicClient.rpc("create_service_request", {
+        p_qr_token: "beach-a01-47VLmz",
+        p_type: "CALL_STAFF",
+        p_idempotency_key: `${runId}_browser_reconnect_request`
+      });
+      const requestResult = Array.isArray(data) ? data[0] : data;
+      if (error || requestResult?.ok !== true) {
+        throw new Error(`public service request for reconnect failed: ${error?.message || JSON.stringify(requestResult)}`);
+      }
+
+      const reconnectContext = await createSupabaseContext(activeBrowser, {
+        label: "SUPABASE E2E staff reconnect",
+        deviceCredential: deviceSecrets.staff,
+        workstationMode: "STAFF",
+        locationId: ids.locationA
+      });
+      try {
+        const reconnectPage = await newObservedPage(reconnectContext, "SUPABASE E2E staff reconnect", errorSink);
+        await reconnectPage.goto(`${baseUrl}/index.html?v=dd008c-operational-e2e#/staff`, { waitUntil: "domcontentloaded" });
+        await loginThroughGate(reconnectPage, users.staff, ids.locationA, "STAFF");
+        await expectAuthoritativeAuthorized(reconnectPage, "Staff reconnect operational E2E");
+        await waitForBodyIncludes(reconnectPage, "CALL STAFF - Table A01", "reconnected staff authoritative refetch converged");
+      } finally {
+        await reconnectContext.close();
+      }
+    });
+  } finally {
+    await customerContext.close();
+    if (!staffClosedForReconnect) await staffContext.close();
+    await kitchenContext.close();
+    await cashierContext.close();
+  }
+}
+
+async function clickStationAction(page, note, status) {
+  const ticket = page.locator(".ticket").filter({ hasText: note }).first();
+  await ticket.locator(`[data-station-status="${status}"]`).first().click();
 }
 
 async function verifyPublicQrSignedOut(activeBrowser, baseUrl, errorSink) {
@@ -475,7 +628,8 @@ function isRelevantNetworkUrl(rawUrl) {
     return (url.hostname === "cdn.jsdelivr.net" && path.includes("/@supabase/supabase-js@"))
       || path.includes("/auth/v1/")
       || path === "/rest/v1/rpc/authorize_staff_access"
-      || path === "/rest/v1/rpc/get_my_staff_context";
+      || path === "/rest/v1/rpc/get_my_staff_context"
+      || path === "/rest/v1/rpc/dd008c_issue_realtime_ticket";
   } catch {
     return false;
   }
@@ -575,6 +729,30 @@ async function assertAppReady(page, label) {
 async function bodyText(page) {
   await settle();
   return page.locator("body").innerText();
+}
+
+async function waitForBodyIncludes(page, expected, label, timeout = 30000) {
+  await page.waitForFunction((text) => document.body.innerText.includes(text), expected, { timeout });
+  assertContains(await bodyText(page), expected, label);
+}
+
+async function waitForCondition(predicate, label, timeout = 30000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeout) {
+    if (await predicate()) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+}
+
+async function activeRealtimeTicketCount() {
+  const { count, error } = await adminClient
+    .from("dd008c_realtime_subscription_tickets")
+    .select("id", { count: "exact", head: true })
+    .eq("location_id", ids.locationA)
+    .gt("expires_at", new Date().toISOString());
+  if (error) throw new Error(`Could not count active realtime tickets: ${error.message}`);
+  return count || 0;
 }
 
 async function startStaticServer(root) {

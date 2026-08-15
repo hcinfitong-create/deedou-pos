@@ -24,6 +24,42 @@ create table if not exists public.dd008c_refresh_hints (
 alter table public.dd008c_refresh_hints enable row level security;
 revoke all on public.dd008c_refresh_hints from anon, authenticated;
 
+create table if not exists public.dd008c_realtime_subscription_tickets (
+  id uuid primary key default gen_random_uuid(),
+  auth_user_id uuid not null,
+  staff_profile_id text not null references public.staff_profiles(id) on delete cascade,
+  location_id text not null references public.locations(id) on delete cascade,
+  audience text not null,
+  permission_key text not null,
+  device_id text not null references public.workstation_devices(id) on delete cascade,
+  workstation_mode text not null,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists dd008c_realtime_tickets_active_idx
+on public.dd008c_realtime_subscription_tickets(location_id, audience, expires_at);
+
+create index if not exists dd008c_realtime_tickets_auth_idx
+on public.dd008c_realtime_subscription_tickets(auth_user_id, location_id, audience);
+
+alter table public.dd008c_realtime_subscription_tickets enable row level security;
+revoke all on public.dd008c_realtime_subscription_tickets from anon, authenticated;
+
+create or replace function public.dd008c_refresh_permission_for_audience(p_audience text)
+returns text
+language sql
+immutable
+security definer
+set search_path = ''
+as $$
+  select case coalesce(nullif(btrim(p_audience), ''), 'ops')
+    when 'cashier' then 'payments.read'
+    when 'audit' then 'audit.read'
+    else 'orders.read'
+  end
+$$;
+
 create or replace function public.dd008c_refresh_audience_allowed(p_location_id text, p_audience text)
 returns boolean
 language sql
@@ -31,12 +67,56 @@ stable
 security definer
 set search_path = ''
 as $$
-  select public.has_location_access(p_location_id)
-    and case coalesce(nullif(btrim(p_audience), ''), 'ops')
-      when 'cashier' then public.has_permission(p_location_id, 'payments.read')
-      when 'audit' then public.has_permission(p_location_id, 'audit.read')
-      else public.has_permission(p_location_id, 'orders.read')
-    end
+  select false
+$$;
+
+create or replace function public.dd008c_refresh_audience_allowed(
+  p_location_id text,
+  p_audience text,
+  p_ticket_id text
+)
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_audience text := coalesce(nullif(btrim(p_audience), ''), 'ops');
+  v_ticket_id uuid;
+begin
+  if auth.uid() is null or coalesce(p_ticket_id, '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+    return false;
+  end if;
+  if v_audience not in ('ops', 'cashier', 'audit') then
+    return false;
+  end if;
+
+  v_ticket_id := p_ticket_id::uuid;
+
+  return exists (
+    select 1
+    from public.dd008c_realtime_subscription_tickets
+    join public.workstation_devices
+      on public.workstation_devices.id = public.dd008c_realtime_subscription_tickets.device_id
+     and public.workstation_devices.location_id = public.dd008c_realtime_subscription_tickets.location_id
+     and public.workstation_devices.mode = public.dd008c_realtime_subscription_tickets.workstation_mode
+     and public.workstation_devices.active = true
+    where public.dd008c_realtime_subscription_tickets.id = v_ticket_id
+      and public.dd008c_realtime_subscription_tickets.auth_user_id = auth.uid()
+      and public.dd008c_realtime_subscription_tickets.staff_profile_id = public.current_staff_id()
+      and public.dd008c_realtime_subscription_tickets.location_id = p_location_id
+      and public.dd008c_realtime_subscription_tickets.audience = v_audience
+      and public.dd008c_realtime_subscription_tickets.expires_at > now()
+      and public.is_active_staff() = true
+      and public.has_location_access(p_location_id) = true
+      and public.has_permission(p_location_id, public.dd008c_realtime_subscription_tickets.permission_key) = true
+      and public.workstation_mode_allows_permission(
+        public.dd008c_realtime_subscription_tickets.workstation_mode,
+        public.dd008c_realtime_subscription_tickets.permission_key
+      ) = true
+  );
+end
 $$;
 
 drop policy if exists dd008c_refresh_hints_staff_location_read on public.dd008c_refresh_hints;
@@ -47,7 +127,13 @@ to authenticated
 using (public.dd008c_refresh_audience_allowed(location_id, audience));
 
 grant select on public.dd008c_refresh_hints to authenticated;
-grant execute on function public.dd008c_refresh_audience_allowed(text, text) to authenticated;
+
+do $$
+begin
+  execute 'drop policy if exists dd008c_realtime_messages_staff_location_read on realtime.messages';
+exception
+  when invalid_schema_name or undefined_table then null;
+end $$;
 
 do $$
 begin
@@ -58,7 +144,11 @@ begin
     to authenticated
     using (
       split_part(realtime.topic(), ':', 1) = 'location'
-      and public.dd008c_refresh_audience_allowed(split_part(realtime.topic(), ':', 2), split_part(realtime.topic(), ':', 3))
+      and public.dd008c_refresh_audience_allowed(
+        split_part(realtime.topic(), ':', 2),
+        split_part(realtime.topic(), ':', 3),
+        split_part(realtime.topic(), ':', 4)
+      )
     )
   $policy$;
 exception
@@ -173,6 +263,99 @@ as $$
   select * from public.dd008c_result_from_json(
     public.dd008c_result_json(false, p_category, p_reason, p_entity_type, p_entity_id, null, p_payload)
   )
+$$;
+
+create or replace function public.dd008c_issue_realtime_ticket(
+  p_location_id text,
+  p_audience text default 'ops',
+  p_workstation_mode text default '',
+  p_device_credential text default ''
+)
+returns table (
+  ok boolean,
+  category text,
+  reason text,
+  entity_type text,
+  entity_id text,
+  version integer,
+  payload jsonb
+)
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_audience text := coalesce(nullif(btrim(p_audience), ''), 'ops');
+  v_permission text := public.dd008c_refresh_permission_for_audience(p_audience);
+  v_authz record;
+  v_ticket_id uuid := extensions.gen_random_uuid();
+  v_expires_at timestamptz := now() + interval '30 minutes';
+  v_topic text;
+begin
+  if v_audience not in ('ops', 'cashier', 'audit') then
+    return query select * from public.dd008c_failure(
+      'VALIDATION_ERROR',
+      'INVALID_REALTIME_AUDIENCE',
+      'realtime_subscription',
+      ''
+    );
+    return;
+  end if;
+
+  select *
+  into v_authz
+  from public.authorize_staff_access(p_location_id, v_permission, p_workstation_mode, p_device_credential)
+  limit 1;
+
+  if v_authz.ok is distinct from true then
+    return query select * from public.dd008c_failure(
+      case when coalesce(v_authz.reason, '') = 'SIGN_IN_REQUIRED' then 'UNAUTHENTICATED' else 'FORBIDDEN' end,
+      coalesce(v_authz.reason, 'PERMISSION_DENIED'),
+      'realtime_subscription',
+      ''
+    );
+    return;
+  end if;
+
+  insert into public.dd008c_realtime_subscription_tickets (
+    id,
+    auth_user_id,
+    staff_profile_id,
+    location_id,
+    audience,
+    permission_key,
+    device_id,
+    workstation_mode,
+    expires_at
+  )
+  values (
+    v_ticket_id,
+    auth.uid(),
+    v_authz.staff_profile_id,
+    p_location_id,
+    v_audience,
+    v_permission,
+    v_authz.device_id,
+    v_authz.workstation_mode,
+    v_expires_at
+  );
+
+  v_topic := 'location:' || p_location_id || ':' || v_audience || ':' || v_ticket_id::text;
+
+  return query select * from public.dd008c_success(
+    'realtime_subscription',
+    v_ticket_id::text,
+    null,
+    jsonb_build_object(
+      'locationId', p_location_id,
+      'audience', v_audience,
+      'topic', v_topic,
+      'expiresAt', v_expires_at,
+      'workstationMode', v_authz.workstation_mode
+    )
+  );
+end
 $$;
 
 create or replace function public.dd008c_hash_request(p_payload jsonb)
@@ -303,6 +486,7 @@ set search_path = ''
 as $$
 declare
   v_topic text := 'location:' || p_location_id || ':' || coalesce(nullif(btrim(p_audience), ''), 'ops');
+  v_ticket_topic text;
   v_payload jsonb := jsonb_build_object(
     'locationId', p_location_id,
     'audience', p_audience,
@@ -317,7 +501,25 @@ begin
   perform pg_notify('dd008c_refresh', v_payload::text);
 
   begin
-    perform realtime.send(v_payload, 'refresh', v_topic, true);
+    for v_ticket_topic in
+      select 'location:'
+        || public.dd008c_realtime_subscription_tickets.location_id
+        || ':'
+        || public.dd008c_realtime_subscription_tickets.audience
+        || ':'
+        || public.dd008c_realtime_subscription_tickets.id::text
+      from public.dd008c_realtime_subscription_tickets
+      join public.workstation_devices
+        on public.workstation_devices.id = public.dd008c_realtime_subscription_tickets.device_id
+       and public.workstation_devices.location_id = public.dd008c_realtime_subscription_tickets.location_id
+       and public.workstation_devices.mode = public.dd008c_realtime_subscription_tickets.workstation_mode
+       and public.workstation_devices.active = true
+      where public.dd008c_realtime_subscription_tickets.location_id = p_location_id
+        and public.dd008c_realtime_subscription_tickets.audience = coalesce(nullif(btrim(p_audience), ''), 'ops')
+        and public.dd008c_realtime_subscription_tickets.expires_at > now()
+    loop
+      perform realtime.send(v_payload, 'refresh', v_ticket_topic, true);
+    end loop;
   exception
     when undefined_function or invalid_schema_name then null;
   end;
@@ -2783,7 +2985,10 @@ revoke all on function public.dd008c_emit_refresh(text, text, text, text, jsonb)
 revoke all on function public.dd008c_write_audit(text, text, text, text, text, text, text, text, text, jsonb) from public;
 revoke all on function public.dd008c_audit_staff_result(text, text, text, text, text, text, jsonb, jsonb) from public;
 revoke all on function public.dd008c_audited_failure(text, text, text, text, text, text, text, text, jsonb) from public;
+revoke all on function public.dd008c_refresh_permission_for_audience(text) from public;
 revoke all on function public.dd008c_refresh_audience_allowed(text, text) from public;
+revoke all on function public.dd008c_refresh_audience_allowed(text, text, text) from public;
+revoke all on function public.dd008c_issue_realtime_ticket(text, text, text, text) from public;
 revoke all on function public.dd008c_payment_status_for_order(text) from public;
 revoke all on function public.dd008c_is_order_service_complete(text) from public;
 revoke all on function public.dd008c_sync_payment_projection(text, boolean) from public;
@@ -2823,6 +3028,8 @@ grant execute on function public.submit_qr_order(text, jsonb, text, text) to ano
 grant execute on function public.create_service_request(text, text, text) to anon, authenticated;
 grant execute on function public.dd008c_get_public_table_snapshot(text) to anon, authenticated;
 
+grant execute on function public.dd008c_issue_realtime_ticket(text, text, text, text) to authenticated;
+grant execute on function public.dd008c_refresh_audience_allowed(text, text, text) to authenticated;
 grant execute on function public.dd008c_get_location_snapshot(text, text, text) to authenticated;
 grant execute on function public.create_staff_order(text, jsonb, text, text, text, text, text, text) to authenticated;
 grant execute on function public.set_order_status(text, text, text, integer, text, text, text) to authenticated;
