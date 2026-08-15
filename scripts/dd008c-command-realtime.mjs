@@ -18,6 +18,7 @@ const runId = `dd008c_${Date.now()}_${randomUUID().slice(0, 8)}`.replace(/-/g, "
 const ids = {
   qrTable: `${runId}_table_qr`,
   openTable: `${runId}_table_open`,
+  paymentRaceTable: `${runId}_table_payment_race`,
   transferA: `${runId}_table_transfer_a`,
   transferB: `${runId}_table_transfer_b`,
   transferDest: `${runId}_table_transfer_dest`,
@@ -31,6 +32,7 @@ const ids = {
 const codes = {
   qrTable: `Q${runId.slice(-5).toUpperCase()}`,
   openTable: `O${runId.slice(-5).toUpperCase()}`,
+  paymentRaceTable: `R${runId.slice(-5).toUpperCase()}`,
   transferA: `A${runId.slice(-5).toUpperCase()}`,
   transferB: `B${runId.slice(-5).toUpperCase()}`,
   transferDest: `C${runId.slice(-5).toUpperCase()}`
@@ -66,8 +68,12 @@ provisionRuntimeData();
 const cashierClient = await loginRuntimeUser("cashier");
 const staffClient = await loginRuntimeUser("staff");
 const kitchenClient = await loginRuntimeUser("kitchen");
-const refresh = await subscribeRefreshHints(staffClient);
-await assertRefreshStreamReady(refresh.events);
+const staffRefresh = await subscribeRefreshHints(staffClient, { label: "staff", audiences: ["ops"] });
+const cashierRefresh = await subscribeRefreshHints(cashierClient, { label: "cashier", audiences: ["ops", "cashier"] });
+await Promise.all([
+  assertRefreshStreamReady(staffRefresh.events, "staff ops"),
+  assertRefreshStreamReady(cashierRefresh.events, "cashier ops/cashier")
+]);
 
 const concurrentOrders = await Promise.all([
   command(publicClient, "submit_qr_order", {
@@ -86,11 +92,16 @@ const concurrentOrders = await Promise.all([
 assert(concurrentOrders[0].ok === true && concurrentOrders[1].ok === true, "same QR idempotency key should replay successfully");
 assert(concurrentOrders[0].entity_id === concurrentOrders[1].entity_id, "same QR idempotency key returned different orders");
 const orderId = concurrentOrders[0].entity_id;
-await waitForRefresh(refresh.events, (event) => refreshEntityId(event) === orderId, "customer submit refresh hint");
+await Promise.all([
+  waitForRefresh(staffRefresh.events, (event) => refreshEntityId(event) === orderId, "staff customer submit refresh hint"),
+  waitForRefresh(cashierRefresh.events, (event) => refreshEntityId(event) === orderId, "cashier customer submit refresh hint")
+]);
 assertDedupCount("submit_qr_order", `${runId}_qr_same_key`, 1);
 
 let snapshot = await locationSnapshot(staffClient, "STAFF", deviceSecrets.staff);
 assert(snapshot.orders.some((order) => order.id === orderId), "staff snapshot did not include submitted order after refresh/refetch");
+let cashierSnapshot = await locationSnapshot(cashierClient, "CASHIER", deviceSecrets.cashier);
+assert(cashierSnapshot.orders.some((order) => order.id === orderId), "cashier snapshot did not converge to submitted order after independent refresh/refetch");
 
 const accepted = await command(staffClient, "set_order_status", {
   p_location_id: LOCATION_ID,
@@ -117,6 +128,32 @@ assertOrderField(orderId, "status", "ACCEPTED", "stale command mutated order sta
 
 const lineId = "fried-rice:1:item";
 let version = accepted.version;
+const courseConflicts = await Promise.all([
+  command(staffClient, "assign_order_family_course", {
+    p_location_id: LOCATION_ID,
+    p_order_id: orderId,
+    p_family_line_id: lineId,
+    p_course: "1",
+    p_idempotency_key: `${runId}_course_conflict_a`,
+    p_workstation_mode: "STAFF",
+    p_device_credential: deviceSecrets.staff,
+    p_expected_version: version
+  }),
+  command(staffClient, "assign_order_family_course", {
+    p_location_id: LOCATION_ID,
+    p_order_id: orderId,
+    p_family_line_id: lineId,
+    p_course: "2",
+    p_idempotency_key: `${runId}_course_conflict_b`,
+    p_workstation_mode: "STAFF",
+    p_device_credential: deviceSecrets.staff,
+    p_expected_version: version
+  })
+]);
+const courseSuccesses = courseConflicts.filter((result) => result.ok === true);
+const courseStale = courseConflicts.filter((result) => result.ok === false && result.reason === "STALE_VERSION");
+assert(courseSuccesses.length === 1 && courseStale.length === 1, "conflicting course assignments should produce one success and one stale-version conflict");
+version = courseSuccesses[0].version;
 for (const nextPrepStatus of ["ACKNOWLEDGED", "PREPARING", "READY"]) {
   const result = await command(kitchenClient, "update_kds_line_prep", {
     p_location_id: LOCATION_ID,
@@ -174,7 +211,52 @@ assert(concurrentPayments[0].ok === true && concurrentPayments[1].ok === true, "
 assert(concurrentPayments[0].entity_id === concurrentPayments[1].entity_id, "same payment idempotency key returned different payments");
 assertDedupCount("record_order_payment", `${runId}_payment_same_key`, 1);
 assertPaymentCount(orderId, 1);
-await waitForRefresh(refresh.events, (event) => refreshReason(event) === "PAYMENT_RECORDED", "payment refresh hint");
+await waitForRefresh(cashierRefresh.events, (event) => refreshReason(event) === "PAYMENT_RECORDED", "cashier payment refresh hint");
+assertNoRefreshReason(staffRefresh.events, "PAYMENT_RECORDED", "staff ops subscriber should not receive cashier payment refresh");
+cashierSnapshot = await locationSnapshot(cashierClient, "CASHIER", deviceSecrets.cashier);
+snapshot = await locationSnapshot(staffClient, "STAFF", deviceSecrets.staff);
+assert(cashierSnapshot.orders.some((order) => order.id === orderId && Array.isArray(order.payments) && order.payments.length === 1), "cashier authoritative refetch did not include payment detail");
+assert(snapshot.orders.some((order) => order.id === orderId && (!Array.isArray(order.payments) || order.payments.length === 0)), "staff authoritative refetch leaked cashier payment detail");
+
+const raceOrder = await command(cashierClient, "create_staff_order", {
+  p_location_id: LOCATION_ID,
+  p_items: [{ productId: "fried-rice", qty: 1 }],
+  p_table_code: codes.paymentRaceTable,
+  p_fulfillment_type: "DINE_IN",
+  p_note: "DD-008C table tender/direct payment race",
+  p_idempotency_key: `${runId}_payment_race_order`,
+  p_workstation_mode: "CASHIER",
+  p_device_credential: deviceSecrets.cashier
+});
+assertCommand(raceOrder, true, "", "payment race staff order");
+const raceSummary = orderLedgerSummary(raceOrder.entity_id);
+const paymentRace = await Promise.all([
+  command(cashierClient, "record_table_tender", {
+    p_location_id: LOCATION_ID,
+    p_table_session_id: raceSummary.tableSessionId,
+    p_method: "CASH",
+    p_amount_vnd: raceSummary.totalVnd,
+    p_idempotency_key: `${runId}_payment_race_table`,
+    p_workstation_mode: "CASHIER",
+    p_device_credential: deviceSecrets.cashier
+  }),
+  command(cashierClient, "record_order_payment", {
+    p_location_id: LOCATION_ID,
+    p_order_id: raceOrder.entity_id,
+    p_method: "CARD_EXTERNAL_TERMINAL",
+    p_amount_vnd: raceSummary.totalVnd,
+    p_tender_group_id: "",
+    p_idempotency_key: `${runId}_payment_race_direct`,
+    p_workstation_mode: "CASHIER",
+    p_device_credential: deviceSecrets.cashier
+  })
+]);
+const paymentRaceSuccesses = paymentRace.filter((result) => result.ok === true);
+const paymentRaceFailures = paymentRace.filter((result) => result.ok === false && ["PAYMENT_EXCEEDS_OUTSTANDING", "TENDER_EXCEEDS_OUTSTANDING", "NO_OUTSTANDING_BALANCE"].includes(result.reason));
+assert(paymentRaceSuccesses.length === 1 && paymentRaceFailures.length === 1, "table tender vs direct payment should serialize to one success and one outstanding-balance failure");
+const settledRaceSummary = orderLedgerSummary(raceOrder.entity_id);
+assert(settledRaceSummary.paymentCount === 1, `payment race created ${settledRaceSummary.paymentCount} payment rows, expected 1`);
+assert(settledRaceSummary.effectivePaidVnd === settledRaceSummary.totalVnd, "payment race did not settle exactly one order total");
 
 const opened = await Promise.all([
   command(cashierClient, "open_table_visit", {
@@ -235,7 +317,7 @@ const transferConflicts = transferResults.filter((result) => result.ok === false
 assert(transferOk.length === 1 && transferConflicts.length === 1, "concurrent transfer should produce one success and one occupied conflict");
 assertOpenSessionCount(ids.transferDest, 1);
 
-await refresh.unsubscribe();
+await Promise.allSettled([staffRefresh.unsubscribe(), cashierRefresh.unsubscribe()]);
 await command(publicClient, "create_service_request", {
   p_qr_token: qrToken,
   p_type: "REQUEST_BILL",
@@ -248,8 +330,8 @@ assert(
 );
 
 console.log("DD-008C command/realtime integration passed");
-console.log("concurrency: QR idempotency, payment idempotency, one-open-table, transfer conflict, stale version");
-console.log("realtime: staff refresh hint received and reconnect/refetch convergence verified");
+console.log("concurrency: QR idempotency, payment idempotency, course conflict, table tender/direct payment race, one-open-table, transfer conflict, stale version");
+console.log("realtime: two independent private broadcast subscribers and authoritative refetch convergence verified");
 console.log("security: commands used real anon/authenticated Supabase clients and server-side workstation credentials");
 
 async function createRuntimeUser(kind) {
@@ -275,9 +357,10 @@ insert into public.physical_tables (id, location_id, code, zone, qr_token, displ
 values
   (${lit(ids.qrTable)}, ${lit(LOCATION_ID)}, ${lit(codes.qrTable)}, 'DD-008C', ${lit(qrToken)}, 8101),
   (${lit(ids.openTable)}, ${lit(LOCATION_ID)}, ${lit(codes.openTable)}, 'DD-008C', ${lit(`${runId}_open_token`)}, 8102),
-  (${lit(ids.transferA)}, ${lit(LOCATION_ID)}, ${lit(codes.transferA)}, 'DD-008C', ${lit(`${runId}_transfer_a_token`)}, 8103),
-  (${lit(ids.transferB)}, ${lit(LOCATION_ID)}, ${lit(codes.transferB)}, 'DD-008C', ${lit(`${runId}_transfer_b_token`)}, 8104),
-  (${lit(ids.transferDest)}, ${lit(LOCATION_ID)}, ${lit(codes.transferDest)}, 'DD-008C', ${lit(`${runId}_transfer_dest_token`)}, 8105)
+  (${lit(ids.paymentRaceTable)}, ${lit(LOCATION_ID)}, ${lit(codes.paymentRaceTable)}, 'DD-008C', ${lit(`${runId}_payment_race_token`)}, 8103),
+  (${lit(ids.transferA)}, ${lit(LOCATION_ID)}, ${lit(codes.transferA)}, 'DD-008C', ${lit(`${runId}_transfer_a_token`)}, 8104),
+  (${lit(ids.transferB)}, ${lit(LOCATION_ID)}, ${lit(codes.transferB)}, 'DD-008C', ${lit(`${runId}_transfer_b_token`)}, 8105),
+  (${lit(ids.transferDest)}, ${lit(LOCATION_ID)}, ${lit(codes.transferDest)}, 'DD-008C', ${lit(`${runId}_transfer_dest_token`)}, 8106)
 on conflict (id) do nothing;
 
 insert into public.staff_profiles (id, auth_user_id, display_name, active)
@@ -354,62 +437,34 @@ async function locationSnapshot(client, mode, deviceCredential) {
   };
 }
 
-async function subscribeRefreshHints(client) {
+async function subscribeRefreshHints(client, { label = "client", audiences = ["ops"] } = {}) {
   const events = [];
-  const changesChannel = client
-    .channel(`dd008c-refresh-${runId}`)
-    .on("postgres_changes", {
-      event: "INSERT",
-      schema: "public",
-      table: "dd008c_refresh_hints",
-      filter: `location_id=eq.${LOCATION_ID}`
-    }, (payload) => {
-      events.push(payload);
-    });
-  const broadcastChannel = client
-    .channel(`location:${LOCATION_ID}:ops`, { config: { private: true } })
+  const channels = audiences.map((audience) => client
+    .channel(`location:${LOCATION_ID}:${audience}`, { config: { private: true } })
     .on("broadcast", { event: "refresh" }, (payload) => {
       const eventPayload = payload?.payload || {};
       events.push({
         broadcast: true,
+        audience,
         new: {
+          audience,
           entity_id: eventPayload.entityId || "",
           payload: eventPayload
         }
       });
-    });
-  const cashierBroadcastChannel = client
-    .channel(`location:${LOCATION_ID}:cashier`, { config: { private: true } })
-    .on("broadcast", { event: "refresh" }, (payload) => {
-      const eventPayload = payload?.payload || {};
-      events.push({
-        broadcast: true,
-        new: {
-          entity_id: eventPayload.entityId || "",
-          payload: eventPayload
-        }
-      });
-    });
+    }));
 
-  await Promise.all([
-    subscribeChannel(changesChannel, "DD-008C refresh rows"),
-    subscribeChannel(broadcastChannel, "DD-008C ops refresh broadcast"),
-    subscribeChannel(cashierBroadcastChannel, "DD-008C cashier refresh broadcast")
-  ]);
+  await Promise.all(channels.map((channel) => subscribeChannel(channel, `DD-008C ${label} private refresh broadcast`)));
 
   return {
     events,
     unsubscribe: async () => {
-      await Promise.allSettled([
-        changesChannel.unsubscribe(),
-        broadcastChannel.unsubscribe(),
-        cashierBroadcastChannel.unsubscribe()
-      ]);
+      await Promise.allSettled(channels.map((channel) => channel.unsubscribe()));
     }
   };
 }
 
-async function assertRefreshStreamReady(events) {
+async function assertRefreshStreamReady(events, label) {
   const probeId = `${runId}_refresh_probe`;
   runPsql(`
 select public.dd008c_emit_refresh(
@@ -423,7 +478,7 @@ select public.dd008c_emit_refresh(
   await waitForRefresh(
     events,
     (event) => refreshEntityId(event) === probeId && refreshReason(event) === "SUBSCRIPTION_READY",
-    "refresh subscription readiness"
+    `${label} refresh subscription readiness`
   );
 }
 
@@ -485,6 +540,29 @@ function assertPaymentCount(orderId, expectedCount) {
       and type = 'PAYMENT';
   `);
   assert(row.count === expectedCount, `payment count ${row.count}, expected ${expectedCount}`);
+}
+
+function assertNoRefreshReason(events, reason, label) {
+  assert(!events.some((event) => refreshReason(event) === reason), label);
+}
+
+function orderLedgerSummary(orderId) {
+  return queryPsqlJson(`
+    select json_build_object(
+      'tableSessionId', public.orders.table_session_id,
+      'totalVnd', public.orders.total_vnd,
+      'effectivePaidVnd', payment_status.effective_paid_vnd,
+      'paymentCount', (
+        select count(*)
+        from public.payment_transactions
+        where public.payment_transactions.order_id = public.orders.id
+          and public.payment_transactions.type = 'PAYMENT'
+      )
+    )::text
+    from public.orders
+    cross join lateral public.dd008c_payment_status_for_order(public.orders.id) as payment_status
+    where public.orders.id = ${lit(orderId)};
+  `);
 }
 
 function assertOpenSessionCount(physicalTableId, expectedCount) {

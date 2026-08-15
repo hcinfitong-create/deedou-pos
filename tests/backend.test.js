@@ -754,6 +754,8 @@ test("DD-008C table tender validates outstanding balance before ledger inserts",
   const tableTender = authoritativeFunctionSql("record_table_tender");
 
   assert.match(tableTender, /select \* into v_session from public\.table_sessions/i);
+  assert.match(tableTender, /for update/i);
+  assert.match(tableTender, /order by public\.orders\.created_at, public\.orders\.id[\s\S]*for update/i);
   assert.match(tableTender, /NO_OUTSTANDING_BALANCE/i);
   assert.match(tableTender, /TENDER_EXCEEDS_OUTSTANDING/i);
   assert.ok(
@@ -763,12 +765,25 @@ test("DD-008C table tender validates outstanding balance before ledger inserts",
   assert.match(tableTender, /command_deduplication/i);
 });
 
-test("DD-008C realtime refresh hints are location-scoped and selectable only through staff access", () => {
+test("DD-008C realtime refresh hints are audience and capability scoped", () => {
   assert.match(authoritativeMigrationSql, /create table if not exists public\.dd008c_refresh_hints/i);
   assert.match(authoritativeMigrationSql, /alter table public\.dd008c_refresh_hints enable row level security/i);
-  assert.match(authoritativeMigrationSql, /using \(public\.has_location_access\(location_id\)\)/i);
+  assert.match(authoritativeMigrationSql, /public\.dd008c_refresh_audience_allowed\(location_id, audience\)/i);
+  assert.match(authoritativeMigrationSql, /when 'cashier' then public\.has_permission\(p_location_id, 'payments\.read'\)/i);
+  assert.match(authoritativeMigrationSql, /realtime\.send\(v_payload, 'refresh', v_topic, true\)/i);
+  assert.match(authoritativeMigrationSql, /public\.dd008c_refresh_audience_allowed\(split_part\(realtime\.topic\(\), ':', 2\), split_part\(realtime\.topic\(\), ':', 3\)\)/i);
   assert.match(authoritativeMigrationSql, /alter publication supabase_realtime add table public\.dd008c_refresh_hints/i);
   assert.match(authoritativeMigrationSql, /public\.dd008c_emit_refresh/i);
+});
+
+test("DD-008C app reuses pending command-intent idempotency keys", () => {
+  assert.match(appSource, /SUPABASE_COMMAND_INTENTS_KEY/);
+  assert.match(appSource, /function pendingCommandKey/);
+  assert.match(appSource, /function clearPendingCommandKey/);
+  assert.match(appSource, /function isTerminalCommandResult/);
+  assert.match(appSource, /operation\(idempotencyKey\)/);
+  assert.match(appSource, /tenderGroupIdForCommand\(idempotencyKey\)/);
+  assert.doesNotMatch(appSource, /idempotencyKey:\s*nextCommandKey\(/);
 });
 
 test("CI executes the DD-008C authoritative command contract against the real local database", () => {
@@ -797,12 +812,19 @@ test("DD-008C real integration script covers command concurrency and refresh con
     "Promise.all",
     "submit_qr_order",
     "record_order_payment",
+    "assign_order_family_course",
+    "record_table_tender",
     "open_table_visit",
     "transfer_table_visit",
     "STALE_VERSION",
-    "postgres_changes",
-    "dd008c_refresh_hints",
-    "dd008c_emit_refresh",
+    "course conflict",
+    "payment race",
+    "staffRefresh",
+    "cashierRefresh",
+    "audiences: [\"ops\"]",
+    "audiences: [\"ops\", \"cashier\"]",
+    "location:${LOCATION_ID}:${audience}",
+    "private refresh broadcast",
     "SUBSCRIPTION_READY",
     "payload.events",
     "create_service_request",

@@ -24,14 +24,30 @@ create table if not exists public.dd008c_refresh_hints (
 alter table public.dd008c_refresh_hints enable row level security;
 revoke all on public.dd008c_refresh_hints from anon, authenticated;
 
+create or replace function public.dd008c_refresh_audience_allowed(p_location_id text, p_audience text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select public.has_location_access(p_location_id)
+    and case coalesce(nullif(btrim(p_audience), ''), 'ops')
+      when 'cashier' then public.has_permission(p_location_id, 'payments.read')
+      when 'audit' then public.has_permission(p_location_id, 'audit.read')
+      else public.has_permission(p_location_id, 'orders.read')
+    end
+$$;
+
 drop policy if exists dd008c_refresh_hints_staff_location_read on public.dd008c_refresh_hints;
 create policy dd008c_refresh_hints_staff_location_read
 on public.dd008c_refresh_hints
 for select
 to authenticated
-using (public.has_location_access(location_id));
+using (public.dd008c_refresh_audience_allowed(location_id, audience));
 
 grant select on public.dd008c_refresh_hints to authenticated;
+grant execute on function public.dd008c_refresh_audience_allowed(text, text) to authenticated;
 
 do $$
 begin
@@ -42,7 +58,7 @@ begin
     to authenticated
     using (
       split_part(realtime.topic(), ':', 1) = 'location'
-      and public.has_location_access(split_part(realtime.topic(), ':', 2))
+      and public.dd008c_refresh_audience_allowed(split_part(realtime.topic(), ':', 2), split_part(realtime.topic(), ':', 3))
     )
   $policy$;
 exception
@@ -350,6 +366,75 @@ as $$
     coalesce(p_outcome, ''),
     coalesce(p_metadata, '{}'::jsonb)
   )
+$$;
+
+create or replace function public.dd008c_audit_staff_result(
+  p_location_id text,
+  p_staff_id text,
+  p_device_id text,
+  p_command text,
+  p_target_type text,
+  p_target_id text,
+  p_result jsonb,
+  p_metadata jsonb default '{}'::jsonb
+)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_ok boolean := coalesce((p_result->>'ok')::boolean, false);
+  v_category text := coalesce(p_result->>'category', case when v_ok then 'OK' else 'VALIDATION_ERROR' end);
+  v_reason text := coalesce(p_result->>'reason', '');
+  v_outcome text;
+begin
+  v_outcome := case
+    when v_ok then coalesce(nullif(v_reason, ''), 'OK')
+    else v_category
+  end;
+
+  perform public.dd008c_write_audit(
+    p_location_id,
+    'STAFF',
+    coalesce(p_staff_id, ''),
+    coalesce(p_staff_id, ''),
+    coalesce(p_device_id, ''),
+    p_command,
+    p_target_type,
+    coalesce(p_target_id, ''),
+    v_outcome,
+    coalesce(p_metadata, '{}'::jsonb)
+      || jsonb_build_object('category', v_category, 'reason', v_reason)
+  );
+end
+$$;
+
+create or replace function public.dd008c_audited_failure(
+  p_location_id text,
+  p_staff_id text,
+  p_device_id text,
+  p_command text,
+  p_target_type text,
+  p_target_id text,
+  p_category text,
+  p_reason text,
+  p_metadata jsonb default '{}'::jsonb
+)
+returns table (ok boolean, category text, reason text, entity_type text, entity_id text, version integer, payload jsonb)
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_result jsonb;
+begin
+  v_result := public.dd008c_result_json(false, p_category, p_reason, p_target_type, coalesce(p_target_id, ''), null, '{}'::jsonb);
+  perform public.dd008c_audit_staff_result(p_location_id, p_staff_id, p_device_id, p_command, p_target_type, p_target_id, v_result, p_metadata);
+  return query select * from public.dd008c_result_from_json(v_result);
+end
 $$;
 
 create or replace function public.dd008c_payment_status_for_order(p_order_id text)
@@ -1781,7 +1866,7 @@ declare
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'service.serve', p_workstation_mode, p_device_credential) limit 1;
   if v_authz.ok is distinct from true then
-    return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED'));
+    return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'serve_all_ready', 'order', p_order_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED'));
     return;
   end if;
   v_replay := public.dd008c_replay_command(p_location_id, 'serve_order_line', p_idempotency_key, v_hash);
@@ -1903,6 +1988,7 @@ begin
   perform public.dd008c_refresh_order_status(p_order_id);
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'READY_LINES_SERVED'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'serve_all_ready', 'order', p_order_id, v_result);
   perform public.dd008c_store_command(p_location_id, 'serve_all_ready', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -1938,7 +2024,8 @@ create or replace function public.assign_order_family_course(
   p_course text,
   p_idempotency_key text default '',
   p_workstation_mode text default '',
-  p_device_credential text default ''
+  p_device_credential text default '',
+  p_expected_version integer default null
 )
 returns table (ok boolean, category text, reason text, entity_type text, entity_id text, version integer, payload jsonb)
 language plpgsql
@@ -1950,23 +2037,25 @@ declare
   v_authz record;
   v_order public.orders;
   v_course text := nullif(btrim(coalesce(p_course, '')), '');
-  v_hash text := public.dd008c_hash_request(jsonb_build_object('locationId', p_location_id, 'orderId', p_order_id, 'familyLineId', p_family_line_id, 'course', nullif(btrim(coalesce(p_course, '')), '')));
+  v_hash text := public.dd008c_hash_request(jsonb_build_object('locationId', p_location_id, 'orderId', p_order_id, 'familyLineId', p_family_line_id, 'course', nullif(btrim(coalesce(p_course, '')), ''), 'expectedVersion', p_expected_version));
   v_replay jsonb;
   v_result jsonb;
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'course.manage', p_workstation_mode, p_device_credential) limit 1;
-  if v_authz.ok is distinct from true then return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_authz.ok is distinct from true then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'assign_order_family_course', 'order', p_order_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
   v_replay := public.dd008c_replay_command(p_location_id, 'assign_order_family_course', p_idempotency_key, v_hash);
   if v_replay is not null then return query select * from public.dd008c_result_from_json(v_replay); return; end if;
   if v_course is not null and v_course !~ '^[1-9][0-9]*$' then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'INVALID_COURSE'); return; end if;
   select * into v_order from public.orders where id = p_order_id and location_id = p_location_id for update;
   if v_order.id is null then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'ORDER_NOT_FOUND'); return; end if;
+  if p_expected_version is not null and v_order.version <> p_expected_version then return query select * from public.dd008c_failure('CONFLICT', 'STALE_VERSION', 'order', p_order_id, jsonb_build_object('currentVersion', v_order.version)); return; end if;
   if not exists (select 1 from public.order_lines where order_id = p_order_id and line_id = p_family_line_id) then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'LINE_NOT_FOUND'); return; end if;
   if not public.dd008c_family_mutable(p_order_id, p_family_line_id) then return query select * from public.dd008c_failure('INVALID_STATE', 'FAMILY_PREP_STARTED'); return; end if;
   update public.order_lines set course = v_course where order_id = p_order_id and (line_id = p_family_line_id or parent_line_id = p_family_line_id);
   update public.orders set version = public.orders.version + 1 where id = p_order_id and location_id = p_location_id;
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'COURSE_ASSIGNED'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'assign_order_family_course', 'order', p_order_id, v_result, jsonb_build_object('familyLineId', p_family_line_id, 'course', v_course));
   perform public.dd008c_store_command(p_location_id, 'assign_order_family_course', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -1978,7 +2067,8 @@ create or replace function public.hold_order_family(
   p_family_line_id text,
   p_idempotency_key text default '',
   p_workstation_mode text default '',
-  p_device_credential text default ''
+  p_device_credential text default '',
+  p_expected_version integer default null
 )
 returns table (ok boolean, category text, reason text, entity_type text, entity_id text, version integer, payload jsonb)
 language plpgsql
@@ -1989,16 +2079,17 @@ as $$
 declare
   v_authz record;
   v_order public.orders;
-  v_hash text := public.dd008c_hash_request(jsonb_build_object('locationId', p_location_id, 'orderId', p_order_id, 'familyLineId', p_family_line_id));
+  v_hash text := public.dd008c_hash_request(jsonb_build_object('locationId', p_location_id, 'orderId', p_order_id, 'familyLineId', p_family_line_id, 'expectedVersion', p_expected_version));
   v_replay jsonb;
   v_result jsonb;
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'course.manage', p_workstation_mode, p_device_credential) limit 1;
-  if v_authz.ok is distinct from true then return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_authz.ok is distinct from true then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'hold_order_family', 'order', p_order_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
   v_replay := public.dd008c_replay_command(p_location_id, 'hold_order_family', p_idempotency_key, v_hash);
   if v_replay is not null then return query select * from public.dd008c_result_from_json(v_replay); return; end if;
   select * into v_order from public.orders where id = p_order_id and location_id = p_location_id for update;
   if v_order.id is null then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'ORDER_NOT_FOUND'); return; end if;
+  if p_expected_version is not null and v_order.version <> p_expected_version then return query select * from public.dd008c_failure('CONFLICT', 'STALE_VERSION', 'order', p_order_id, jsonb_build_object('currentVersion', v_order.version)); return; end if;
   if not exists (select 1 from public.order_lines where order_id = p_order_id and line_id = p_family_line_id) then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'LINE_NOT_FOUND'); return; end if;
   if not public.dd008c_family_mutable(p_order_id, p_family_line_id) then return query select * from public.dd008c_failure('INVALID_STATE', 'FAMILY_PREP_STARTED'); return; end if;
   update public.order_lines
@@ -2007,6 +2098,7 @@ begin
   update public.orders set version = public.orders.version + 1 where id = p_order_id and location_id = p_location_id;
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'FAMILY_HELD'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'hold_order_family', 'order', p_order_id, v_result, jsonb_build_object('familyLineId', p_family_line_id));
   perform public.dd008c_store_command(p_location_id, 'hold_order_family', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -2018,7 +2110,8 @@ create or replace function public.fire_order_family(
   p_family_line_id text,
   p_idempotency_key text default '',
   p_workstation_mode text default '',
-  p_device_credential text default ''
+  p_device_credential text default '',
+  p_expected_version integer default null
 )
 returns table (ok boolean, category text, reason text, entity_type text, entity_id text, version integer, payload jsonb)
 language plpgsql
@@ -2028,22 +2121,24 @@ set search_path = ''
 as $$
 declare
   v_authz record;
-  v_order_status text;
+  v_order public.orders;
   v_already_fired boolean;
-  v_hash text := public.dd008c_hash_request(jsonb_build_object('locationId', p_location_id, 'orderId', p_order_id, 'familyLineId', p_family_line_id));
+  v_hash text := public.dd008c_hash_request(jsonb_build_object('locationId', p_location_id, 'orderId', p_order_id, 'familyLineId', p_family_line_id, 'expectedVersion', p_expected_version));
   v_replay jsonb;
   v_result jsonb;
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'course.manage', p_workstation_mode, p_device_credential) limit 1;
-  if v_authz.ok is distinct from true then return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_authz.ok is distinct from true then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'fire_order_family', 'order', p_order_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
   v_replay := public.dd008c_replay_command(p_location_id, 'fire_order_family', p_idempotency_key, v_hash);
   if v_replay is not null then return query select * from public.dd008c_result_from_json(v_replay); return; end if;
-  select status into v_order_status from public.orders where id = p_order_id and location_id = p_location_id for update;
-  if v_order_status is null then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'ORDER_NOT_FOUND'); return; end if;
+  select * into v_order from public.orders where id = p_order_id and location_id = p_location_id for update;
+  if v_order.id is null then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'ORDER_NOT_FOUND'); return; end if;
+  if p_expected_version is not null and v_order.version <> p_expected_version then return query select * from public.dd008c_failure('CONFLICT', 'STALE_VERSION', 'order', p_order_id, jsonb_build_object('currentVersion', v_order.version)); return; end if;
   if not exists (select 1 from public.order_lines where order_id = p_order_id and line_id = p_family_line_id) then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'LINE_NOT_FOUND'); return; end if;
   select bool_and(hold_state = 'FIRED') into v_already_fired from public.order_lines where order_id = p_order_id and (line_id = p_family_line_id or parent_line_id = p_family_line_id);
   if v_already_fired then
-    v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('noOp', true, 'reason', 'ALREADY_FIRED', 'order', public.dd008c_order_payload(p_order_id, true)));
+    v_result := public.dd008c_result_json(true, 'OK', 'ALREADY_FIRED', 'order', p_order_id, v_order.version, jsonb_build_object('noOp', true, 'reason', 'ALREADY_FIRED', 'order', public.dd008c_order_payload(p_order_id, true)));
+    perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'fire_order_family', 'order', p_order_id, v_result, jsonb_build_object('familyLineId', p_family_line_id));
     perform public.dd008c_store_command(p_location_id, 'fire_order_family', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
     return query select * from public.dd008c_result_from_json(v_result);
     return;
@@ -2052,11 +2147,12 @@ begin
   update public.order_lines
   set hold_state = 'FIRED',
       fired_at = coalesce(fired_at, now()),
-      queued_at = case when v_order_status in ('ACCEPTED', 'IN_PREPARATION', 'READY') and station_code <> 'COMBO' then coalesce(queued_at, now()) else queued_at end
+      queued_at = case when v_order.status in ('ACCEPTED', 'IN_PREPARATION', 'READY') and station_code <> 'COMBO' then coalesce(queued_at, now()) else queued_at end
   where order_id = p_order_id and (line_id = p_family_line_id or parent_line_id = p_family_line_id);
   update public.orders set version = public.orders.version + 1 where id = p_order_id and location_id = p_location_id;
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'FAMILY_FIRED'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'fire_order_family', 'order', p_order_id, v_result, jsonb_build_object('familyLineId', p_family_line_id));
   perform public.dd008c_store_command(p_location_id, 'fire_order_family', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -2068,7 +2164,8 @@ create or replace function public.fire_order_course(
   p_course text,
   p_idempotency_key text default '',
   p_workstation_mode text default '',
-  p_device_credential text default ''
+  p_device_credential text default '',
+  p_expected_version integer default null
 )
 returns table (ok boolean, category text, reason text, entity_type text, entity_id text, version integer, payload jsonb)
 language plpgsql
@@ -2079,23 +2176,25 @@ as $$
 declare
   v_authz record;
   v_course text := btrim(coalesce(p_course, ''));
-  v_order_status text;
-  v_hash text := public.dd008c_hash_request(jsonb_build_object('locationId', p_location_id, 'orderId', p_order_id, 'course', btrim(coalesce(p_course, ''))));
+  v_order public.orders;
+  v_hash text := public.dd008c_hash_request(jsonb_build_object('locationId', p_location_id, 'orderId', p_order_id, 'course', btrim(coalesce(p_course, '')), 'expectedVersion', p_expected_version));
   v_replay jsonb;
   v_result jsonb;
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'course.manage', p_workstation_mode, p_device_credential) limit 1;
-  if v_authz.ok is distinct from true then return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_authz.ok is distinct from true then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'fire_order_course', 'order', p_order_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
   v_replay := public.dd008c_replay_command(p_location_id, 'fire_order_course', p_idempotency_key, v_hash);
   if v_replay is not null then return query select * from public.dd008c_result_from_json(v_replay); return; end if;
   if v_course !~ '^[1-9][0-9]*$' then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'COURSE_REQUIRED'); return; end if;
-  select status into v_order_status from public.orders where id = p_order_id and location_id = p_location_id for update;
-  if v_order_status is null then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'ORDER_NOT_FOUND'); return; end if;
+  select * into v_order from public.orders where id = p_order_id and location_id = p_location_id for update;
+  if v_order.id is null then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'ORDER_NOT_FOUND'); return; end if;
+  if p_expected_version is not null and v_order.version <> p_expected_version then return query select * from public.dd008c_failure('CONFLICT', 'STALE_VERSION', 'order', p_order_id, jsonb_build_object('currentVersion', v_order.version)); return; end if;
   if not exists (
     select 1 from public.order_lines
     where order_id = p_order_id and course = v_course and hold_state = 'HELD'
   ) then
-    v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('noOp', true, 'reason', 'ALREADY_FIRED', 'order', public.dd008c_order_payload(p_order_id, true)));
+    v_result := public.dd008c_result_json(true, 'OK', 'ALREADY_FIRED', 'order', p_order_id, v_order.version, jsonb_build_object('noOp', true, 'reason', 'ALREADY_FIRED', 'order', public.dd008c_order_payload(p_order_id, true)));
+    perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'fire_order_course', 'order', p_order_id, v_result, jsonb_build_object('course', v_course));
     perform public.dd008c_store_command(p_location_id, 'fire_order_course', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
     return query select * from public.dd008c_result_from_json(v_result);
     return;
@@ -2111,11 +2210,12 @@ begin
   update public.order_lines
   set hold_state = 'FIRED',
       fired_at = coalesce(fired_at, now()),
-      queued_at = case when v_order_status in ('ACCEPTED', 'IN_PREPARATION', 'READY') and station_code <> 'COMBO' then coalesce(queued_at, now()) else queued_at end
+      queued_at = case when v_order.status in ('ACCEPTED', 'IN_PREPARATION', 'READY') and station_code <> 'COMBO' then coalesce(queued_at, now()) else queued_at end
   where order_id = p_order_id and course = v_course and hold_state = 'HELD';
   update public.orders set version = public.orders.version + 1 where id = p_order_id and location_id = p_location_id;
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'COURSE_FIRED'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'fire_order_course', 'order', p_order_id, v_result, jsonb_build_object('course', v_course));
   perform public.dd008c_store_command(p_location_id, 'fire_order_course', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -2143,7 +2243,7 @@ declare
   v_result jsonb;
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'tables.manage_session', p_workstation_mode, p_device_credential) limit 1;
-  if v_authz.ok is distinct from true then return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_authz.ok is distinct from true then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'open_table_visit', 'table', p_table_code, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
   v_replay := public.dd008c_replay_command(p_location_id, 'open_table_visit', p_idempotency_key, v_hash);
   if v_replay is not null then return query select * from public.dd008c_result_from_json(v_replay); return; end if;
   select * into v_table from public.physical_tables where location_id = p_location_id and code = p_table_code and is_active = true limit 1;
@@ -2151,6 +2251,7 @@ begin
   v_session := public.dd008c_open_or_reuse_table_session(p_location_id, v_table.id, 'STAFF');
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'table_session', v_session.id, jsonb_build_object('reason', 'TABLE_OPEN'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'table_session', v_session.id, v_session.version, jsonb_build_object('tableSession', public.dd008c_table_session_payload(v_session.id)));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'open_table_visit', 'table_session', v_session.id, v_result, jsonb_build_object('tableCode', p_table_code));
   perform public.dd008c_store_command(p_location_id, 'open_table_visit', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -2180,7 +2281,7 @@ declare
   v_result jsonb;
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'tables.manage_session', p_workstation_mode, p_device_credential) limit 1;
-  if v_authz.ok is distinct from true then return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_authz.ok is distinct from true then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'transfer_table_visit', 'table_session', p_table_session_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
   v_replay := public.dd008c_replay_command(p_location_id, 'transfer_table_visit', p_idempotency_key, v_hash);
   if v_replay is not null then return query select * from public.dd008c_result_from_json(v_replay); return; end if;
   select * into v_session from public.table_sessions where id = p_table_session_id and location_id = p_location_id for update;
@@ -2209,6 +2310,7 @@ begin
   update public.service_requests set physical_table_id = v_destination.id, table_code = v_destination.code, zone = v_destination.zone, version = public.service_requests.version + 1 where table_session_id = p_table_session_id and status = 'OPEN';
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'table_session', p_table_session_id, jsonb_build_object('reason', 'TABLE_TRANSFER'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'table_session', p_table_session_id, v_session.version, jsonb_build_object('tableSession', public.dd008c_table_session_payload(p_table_session_id)));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'transfer_table_visit', 'table_session', p_table_session_id, v_result, jsonb_build_object('toTableCode', p_to_table_code));
   perform public.dd008c_store_command(p_location_id, 'transfer_table_visit', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -2236,7 +2338,7 @@ declare
   v_result jsonb;
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'tables.manage_session', p_workstation_mode, p_device_credential) limit 1;
-  if v_authz.ok is distinct from true then return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_authz.ok is distinct from true then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'close_table_visit', 'table_session', p_table_session_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
   v_replay := public.dd008c_replay_command(p_location_id, 'close_table_visit', p_idempotency_key, v_hash);
   if v_replay is not null then return query select * from public.dd008c_result_from_json(v_replay); return; end if;
   select * into v_session from public.table_sessions where id = p_table_session_id and location_id = p_location_id for update;
@@ -2249,6 +2351,7 @@ begin
   update public.table_sessions set status = 'CLOSED', closed_at = now(), version = public.table_sessions.version + 1 where id = p_table_session_id returning * into v_session;
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'table_session', p_table_session_id, jsonb_build_object('reason', 'TABLE_CLOSE'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'table_session', p_table_session_id, v_session.version, jsonb_build_object('tableSession', public.dd008c_table_session_payload(p_table_session_id)));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'close_table_visit', 'table_session', p_table_session_id, v_result);
   perform public.dd008c_store_command(p_location_id, 'close_table_visit', p_idempotency_key, 'STAFF', v_authz.staff_profile_id, v_hash, v_result);
   return query select * from public.dd008c_result_from_json(v_result);
 end
@@ -2277,7 +2380,8 @@ declare
   v_result jsonb;
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'service_requests.complete', p_workstation_mode, p_device_credential) limit 1;
-  if v_authz.ok is distinct from true then return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_authz.ok is distinct from true then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'complete_service_request', 'service_request', p_request_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_key is null then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'complete_service_request', 'service_request', p_request_id, 'VALIDATION_ERROR', 'IDEMPOTENCY_KEY_REQUIRED'); return; end if;
   if v_key is not null then
     perform pg_advisory_xact_lock(hashtext('complete_service_request:' || p_location_id || ':' || v_key));
     select * into v_existing from public.command_deduplication
@@ -2294,6 +2398,7 @@ begin
   if p_expected_version is not null and v_request.version <> p_expected_version then return query select * from public.dd008c_failure('CONFLICT', 'STALE_VERSION'); return; end if;
   if v_request.status <> 'OPEN' then
     v_result := public.dd008c_result_json(true, 'OK', 'ALREADY_COMPLETED', 'service_request', v_request.id, v_request.version, jsonb_build_object('id', v_request.id));
+    perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'complete_service_request', 'service_request', v_request.id, v_result);
     if v_key is not null then
       insert into public.command_deduplication (location_id, command_key, command, actor_type, actor_id, request_hash, result_reference)
       values (p_location_id, v_key, 'complete_service_request', 'STAFF', v_authz.staff_profile_id, v_hash, v_result::text);
@@ -2308,6 +2413,7 @@ begin
   where id = p_request_id
   returning * into v_request;
   v_result := public.dd008c_result_json(true, 'OK', '', 'service_request', v_request.id, v_request.version, jsonb_build_object('id', v_request.id));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'complete_service_request', 'service_request', v_request.id, v_result);
   if v_key is not null then
     insert into public.command_deduplication (location_id, command_key, command, actor_type, actor_id, request_hash, result_reference)
     values (p_location_id, v_key, 'complete_service_request', 'STAFF', v_authz.staff_profile_id, v_hash, v_result::text);
@@ -2344,7 +2450,8 @@ declare
   v_result jsonb;
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'payments.record', p_workstation_mode, p_device_credential) limit 1;
-  if v_authz.ok is distinct from true then return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_authz.ok is distinct from true then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'update_order_line_bill_qty', 'order', p_order_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_key is null then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'update_order_line_bill_qty', 'order', p_order_id, 'VALIDATION_ERROR', 'IDEMPOTENCY_KEY_REQUIRED'); return; end if;
   if p_bill_qty is null or p_bill_qty < 0 then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'INVALID_BILL_QTY'); return; end if;
   if v_key is not null then
     perform pg_advisory_xact_lock(hashtext('update_order_line_bill_qty:' || p_location_id || ':' || v_key));
@@ -2380,6 +2487,7 @@ begin
   returning * into v_order;
   perform public.dd008c_sync_payment_projection(p_order_id, false);
   v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, v_order.version, jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'update_order_line_bill_qty', 'order_line', p_line_id, v_result, jsonb_build_object('orderId', p_order_id, 'billQty', p_bill_qty));
   if v_key is not null then
     insert into public.command_deduplication (location_id, command_key, command, actor_type, actor_id, request_hash, result_reference)
     values (p_location_id, v_key, 'update_order_line_bill_qty', 'STAFF', v_authz.staff_profile_id, v_hash, v_result::text);
@@ -2418,24 +2526,25 @@ declare
   v_result jsonb;
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'payments.record', p_workstation_mode, p_device_credential) limit 1;
-  if v_authz.ok is distinct from true then return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
-  if p_amount_vnd is null or p_amount_vnd <= 0 then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'INVALID_PAYMENT_AMOUNT'); return; end if;
+  if v_authz.ok is distinct from true then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_order_payment', 'order', p_order_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_key is null then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_order_payment', 'order', p_order_id, 'VALIDATION_ERROR', 'IDEMPOTENCY_KEY_REQUIRED'); return; end if;
+  if p_amount_vnd is null or p_amount_vnd <= 0 then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_order_payment', 'order', p_order_id, 'VALIDATION_ERROR', 'INVALID_PAYMENT_AMOUNT'); return; end if;
   if v_key is not null then
     perform pg_advisory_xact_lock(hashtext('record_order_payment:' || p_location_id || ':' || v_key));
     select * into v_existing from public.command_deduplication
     where location_id = p_location_id and command_key = v_key and command = 'record_order_payment'
     for update;
     if v_existing.id is not null then
-      if v_existing.request_hash <> v_hash then return query select * from public.dd008c_failure('CONFLICT', 'IDEMPOTENCY_KEY_REUSED'); return; end if;
+      if v_existing.request_hash <> v_hash then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_order_payment', 'order', p_order_id, 'CONFLICT', 'IDEMPOTENCY_KEY_REUSED'); return; end if;
       return query select * from public.dd008c_result_from_json(v_existing.result_reference::jsonb);
       return;
     end if;
   end if;
   select * into v_order from public.orders where id = p_order_id and location_id = p_location_id for update;
-  if v_order.id is null then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'ORDER_NOT_FOUND'); return; end if;
-  if v_order.status in ('REJECTED', 'VOIDED', 'REFUNDED', 'PARTIALLY_REFUNDED') then return query select * from public.dd008c_failure('INVALID_STATE', 'ORDER_TERMINAL'); return; end if;
+  if v_order.id is null then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_order_payment', 'order', p_order_id, 'VALIDATION_ERROR', 'ORDER_NOT_FOUND'); return; end if;
+  if v_order.status in ('REJECTED', 'VOIDED', 'REFUNDED', 'PARTIALLY_REFUNDED') then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_order_payment', 'order', p_order_id, 'INVALID_STATE', 'ORDER_TERMINAL'); return; end if;
   select * into v_summary from public.dd008c_payment_status_for_order(p_order_id) limit 1;
-  if p_amount_vnd > greatest(0, v_order.total_vnd - v_summary.effective_paid_vnd) then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'PAYMENT_EXCEEDS_OUTSTANDING'); return; end if;
+  if p_amount_vnd > greatest(0, v_order.total_vnd - v_summary.effective_paid_vnd) then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_order_payment', 'order', p_order_id, 'VALIDATION_ERROR', 'PAYMENT_EXCEEDS_OUTSTANDING', jsonb_build_object('amountVnd', p_amount_vnd)); return; end if;
   v_provider := case when v_method in ('VNPAY', 'MOMO', 'ZALOPAY') then v_method else 'MANUAL' end;
   insert into public.payment_transactions (id, location_id, order_id, type, method, provider, amount_vnd, tender_group_id, note)
   values (v_payment_id, p_location_id, p_order_id, 'PAYMENT', v_method, v_provider, p_amount_vnd, coalesce(p_tender_group_id, ''), 'DD-008C authoritative payment');
@@ -2467,6 +2576,7 @@ set search_path = ''
 as $$
 declare
   v_authz record;
+  v_order public.orders;
   v_payment public.payment_transactions;
   v_void_id text := 'VOID-' || replace(extensions.gen_random_uuid()::text, '-', '');
   v_key text := nullif(btrim(coalesce(p_idempotency_key, '')), '');
@@ -2475,27 +2585,31 @@ declare
   v_result jsonb;
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'payments.void', p_workstation_mode, p_device_credential) limit 1;
-  if v_authz.ok is distinct from true then return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_authz.ok is distinct from true then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order_payment', 'payment', p_payment_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_key is null then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order_payment', 'payment', p_payment_id, 'VALIDATION_ERROR', 'IDEMPOTENCY_KEY_REQUIRED'); return; end if;
   if v_key is not null then
     perform pg_advisory_xact_lock(hashtext('void_order_payment:' || p_location_id || ':' || v_key));
     select * into v_existing from public.command_deduplication
     where location_id = p_location_id and command_key = v_key and command = 'void_order_payment'
     for update;
     if v_existing.id is not null then
-      if v_existing.request_hash <> v_hash then return query select * from public.dd008c_failure('CONFLICT', 'IDEMPOTENCY_KEY_REUSED'); return; end if;
+      if v_existing.request_hash <> v_hash then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order_payment', 'payment', p_payment_id, 'CONFLICT', 'IDEMPOTENCY_KEY_REUSED'); return; end if;
       return query select * from public.dd008c_result_from_json(v_existing.result_reference::jsonb);
       return;
     end if;
   end if;
+  select * into v_order from public.orders where id = p_order_id and location_id = p_location_id for update;
+  if v_order.id is null then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order_payment', 'order', p_order_id, 'VALIDATION_ERROR', 'ORDER_NOT_FOUND'); return; end if;
   select * into v_payment from public.payment_transactions where id = p_payment_id and order_id = p_order_id and location_id = p_location_id and type = 'PAYMENT' for update;
-  if v_payment.id is null then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'PAYMENT_NOT_FOUND'); return; end if;
-  if exists (select 1 from public.payment_transactions where related_payment_id = p_payment_id and type = 'PAYMENT_VOID') then return query select * from public.dd008c_failure('INVALID_STATE', 'PAYMENT_ALREADY_VOIDED'); return; end if;
-  if exists (select 1 from public.payment_transactions where related_payment_id = p_payment_id and type = 'REFUND') then return query select * from public.dd008c_failure('INVALID_STATE', 'PAYMENT_ALREADY_REFUNDED'); return; end if;
+  if v_payment.id is null then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order_payment', 'payment', p_payment_id, 'VALIDATION_ERROR', 'PAYMENT_NOT_FOUND'); return; end if;
+  if exists (select 1 from public.payment_transactions where related_payment_id = p_payment_id and type = 'PAYMENT_VOID') then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order_payment', 'payment', p_payment_id, 'INVALID_STATE', 'PAYMENT_ALREADY_VOIDED'); return; end if;
+  if exists (select 1 from public.payment_transactions where related_payment_id = p_payment_id and type = 'REFUND') then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order_payment', 'payment', p_payment_id, 'INVALID_STATE', 'PAYMENT_ALREADY_REFUNDED'); return; end if;
   insert into public.payment_transactions (id, location_id, order_id, type, method, provider, amount_vnd, related_payment_id, tender_group_id, note)
   values (v_void_id, p_location_id, p_order_id, 'PAYMENT_VOID', v_payment.method, v_payment.provider, v_payment.amount_vnd, p_payment_id, v_payment.tender_group_id, 'DD-008C authoritative payment void');
   perform public.dd008c_sync_payment_projection(p_order_id, true);
   perform public.dd008c_emit_refresh(p_location_id, 'cashier', 'payment', v_void_id, jsonb_build_object('reason', 'PAYMENT_VOID'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'payment', v_void_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order_payment', 'payment', v_void_id, v_result, jsonb_build_object('relatedPaymentId', p_payment_id));
   if v_key is not null then
     insert into public.command_deduplication (location_id, command_key, command, actor_type, actor_id, request_hash, result_reference)
     values (p_location_id, v_key, 'void_order_payment', 'STAFF', v_authz.staff_profile_id, v_hash, v_result::text);
@@ -2532,33 +2646,35 @@ declare
   v_result jsonb;
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'payments.refund', p_workstation_mode, p_device_credential) limit 1;
-  if v_authz.ok is distinct from true then return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
-  if p_amount_vnd is null or p_amount_vnd <= 0 then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'INVALID_REFUND_AMOUNT'); return; end if;
+  if v_authz.ok is distinct from true then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'refund_order_payment', 'payment', p_payment_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_key is null then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'refund_order_payment', 'payment', p_payment_id, 'VALIDATION_ERROR', 'IDEMPOTENCY_KEY_REQUIRED'); return; end if;
+  if p_amount_vnd is null or p_amount_vnd <= 0 then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'refund_order_payment', 'payment', p_payment_id, 'VALIDATION_ERROR', 'INVALID_REFUND_AMOUNT'); return; end if;
   if v_key is not null then
     perform pg_advisory_xact_lock(hashtext('refund_order_payment:' || p_location_id || ':' || v_key));
     select * into v_existing from public.command_deduplication
     where location_id = p_location_id and command_key = v_key and command = 'refund_order_payment'
     for update;
     if v_existing.id is not null then
-      if v_existing.request_hash <> v_hash then return query select * from public.dd008c_failure('CONFLICT', 'IDEMPOTENCY_KEY_REUSED'); return; end if;
+      if v_existing.request_hash <> v_hash then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'refund_order_payment', 'payment', p_payment_id, 'CONFLICT', 'IDEMPOTENCY_KEY_REUSED'); return; end if;
       return query select * from public.dd008c_result_from_json(v_existing.result_reference::jsonb);
       return;
     end if;
   end if;
   select * into v_order from public.orders where id = p_order_id and location_id = p_location_id for update;
-  if v_order.id is null then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'ORDER_NOT_FOUND'); return; end if;
+  if v_order.id is null then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'refund_order_payment', 'order', p_order_id, 'VALIDATION_ERROR', 'ORDER_NOT_FOUND'); return; end if;
   select * into v_summary from public.dd008c_payment_status_for_order(p_order_id) limit 1;
-  if v_summary.effective_paid_vnd < v_order.total_vnd or v_order.total_vnd <= 0 then return query select * from public.dd008c_failure('INVALID_STATE', 'BILL_NOT_SETTLED'); return; end if;
+  if v_summary.effective_paid_vnd < v_order.total_vnd or v_order.total_vnd <= 0 then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'refund_order_payment', 'order', p_order_id, 'INVALID_STATE', 'BILL_NOT_SETTLED'); return; end if;
   select * into v_payment from public.payment_transactions where id = p_payment_id and order_id = p_order_id and location_id = p_location_id and type = 'PAYMENT' for update;
-  if v_payment.id is null then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'PAYMENT_NOT_FOUND'); return; end if;
-  if exists (select 1 from public.payment_transactions where related_payment_id = p_payment_id and type = 'PAYMENT_VOID') then return query select * from public.dd008c_failure('INVALID_STATE', 'PAYMENT_VOIDED'); return; end if;
+  if v_payment.id is null then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'refund_order_payment', 'payment', p_payment_id, 'VALIDATION_ERROR', 'PAYMENT_NOT_FOUND'); return; end if;
+  if exists (select 1 from public.payment_transactions where related_payment_id = p_payment_id and type = 'PAYMENT_VOID') then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'refund_order_payment', 'payment', p_payment_id, 'INVALID_STATE', 'PAYMENT_VOIDED'); return; end if;
   select coalesce(sum(amount_vnd), 0) into v_refunded from public.payment_transactions where related_payment_id = p_payment_id and type = 'REFUND';
-  if p_amount_vnd > v_payment.amount_vnd - v_refunded then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'REFUND_EXCEEDS_REMAINING'); return; end if;
+  if p_amount_vnd > v_payment.amount_vnd - v_refunded then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'refund_order_payment', 'payment', p_payment_id, 'VALIDATION_ERROR', 'REFUND_EXCEEDS_REMAINING', jsonb_build_object('amountVnd', p_amount_vnd)); return; end if;
   insert into public.payment_transactions (id, location_id, order_id, type, method, provider, amount_vnd, related_payment_id, tender_group_id, note)
   values (v_refund_id, p_location_id, p_order_id, 'REFUND', 'REFUND', v_payment.provider, p_amount_vnd, p_payment_id, v_payment.tender_group_id, 'DD-008C authoritative targeted refund');
   perform public.dd008c_sync_payment_projection(p_order_id, true);
   perform public.dd008c_emit_refresh(p_location_id, 'cashier', 'payment', v_refund_id, jsonb_build_object('reason', 'PAYMENT_REFUND'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'payment', v_refund_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'refund_order_payment', 'payment', v_refund_id, v_result, jsonb_build_object('relatedPaymentId', p_payment_id, 'amountVnd', p_amount_vnd));
   if v_key is not null then
     insert into public.command_deduplication (location_id, command_key, command, actor_type, actor_id, request_hash, result_reference)
     values (p_location_id, v_key, 'refund_order_payment', 'STAFF', v_authz.staff_profile_id, v_hash, v_result::text);
@@ -2599,21 +2715,29 @@ declare
   v_result jsonb;
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'payments.record', p_workstation_mode, p_device_credential) limit 1;
-  if v_authz.ok is distinct from true then return query select * from public.dd008c_failure('FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
-  if p_amount_vnd is null or p_amount_vnd <= 0 then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'INVALID_TENDER_AMOUNT'); return; end if;
+  if v_authz.ok is distinct from true then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_table_tender', 'table_session', p_table_session_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED')); return; end if;
+  if v_key is null then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_table_tender', 'table_session', p_table_session_id, 'VALIDATION_ERROR', 'IDEMPOTENCY_KEY_REQUIRED'); return; end if;
+  if p_amount_vnd is null or p_amount_vnd <= 0 then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_table_tender', 'table_session', p_table_session_id, 'VALIDATION_ERROR', 'INVALID_TENDER_AMOUNT'); return; end if;
   if v_key is not null then
     perform pg_advisory_xact_lock(hashtext('record_table_tender:' || p_location_id || ':' || v_key));
     select * into v_existing from public.command_deduplication
     where location_id = p_location_id and command_key = v_key and command = 'record_table_tender'
     for update;
     if v_existing.id is not null then
-      if v_existing.request_hash <> v_hash then return query select * from public.dd008c_failure('CONFLICT', 'IDEMPOTENCY_KEY_REUSED'); return; end if;
+      if v_existing.request_hash <> v_hash then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_table_tender', 'table_session', p_table_session_id, 'CONFLICT', 'IDEMPOTENCY_KEY_REUSED'); return; end if;
       return query select * from public.dd008c_result_from_json(v_existing.result_reference::jsonb);
       return;
     end if;
   end if;
   select * into v_session from public.table_sessions where id = p_table_session_id and location_id = p_location_id for update;
-  if v_session.id is null or v_session.status <> 'OPEN' then return query select * from public.dd008c_failure('INVALID_STATE', 'SESSION_NOT_OPEN'); return; end if;
+  if v_session.id is null or v_session.status <> 'OPEN' then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_table_tender', 'table_session', p_table_session_id, 'INVALID_STATE', 'SESSION_NOT_OPEN'); return; end if;
+  perform 1
+  from public.orders
+  where public.orders.table_session_id = p_table_session_id
+    and public.orders.location_id = p_location_id
+    and public.orders.status not in ('REJECTED', 'VOIDED', 'REFUNDED', 'PARTIALLY_REFUNDED')
+  order by public.orders.created_at, public.orders.id
+  for update;
   select coalesce(sum(greatest(0, public.orders.total_vnd - payment_status.effective_paid_vnd)), 0)::integer
   into v_outstanding
   from public.orders
@@ -2621,9 +2745,9 @@ begin
   where public.orders.table_session_id = p_table_session_id
     and public.orders.location_id = p_location_id
     and public.orders.status not in ('REJECTED', 'VOIDED', 'REFUNDED', 'PARTIALLY_REFUNDED');
-  if v_outstanding <= 0 then return query select * from public.dd008c_failure('INVALID_STATE', 'NO_OUTSTANDING_BALANCE'); return; end if;
-  if p_amount_vnd > v_outstanding then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'TENDER_EXCEEDS_OUTSTANDING'); return; end if;
-  for v_order in select * from public.orders where table_session_id = p_table_session_id and location_id = p_location_id order by created_at, id
+  if v_outstanding <= 0 then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_table_tender', 'table_session', p_table_session_id, 'INVALID_STATE', 'NO_OUTSTANDING_BALANCE'); return; end if;
+  if p_amount_vnd > v_outstanding then return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_table_tender', 'table_session', p_table_session_id, 'VALIDATION_ERROR', 'TENDER_EXCEEDS_OUTSTANDING', jsonb_build_object('amountVnd', p_amount_vnd)); return; end if;
+  for v_order in select * from public.orders where table_session_id = p_table_session_id and location_id = p_location_id and status not in ('REJECTED', 'VOIDED', 'REFUNDED', 'PARTIALLY_REFUNDED') order by created_at, id
   loop
     exit when v_remaining <= 0;
     select * into v_summary from public.dd008c_payment_status_for_order(v_order.id) limit 1;
@@ -2635,9 +2759,10 @@ begin
       v_remaining := v_remaining - v_pay_amount;
     end if;
   end loop;
-  if v_remaining > 0 then return query select * from public.dd008c_failure('VALIDATION_ERROR', 'TENDER_EXCEEDS_OUTSTANDING'); return; end if;
+  if v_remaining > 0 then raise exception 'TENDER_ALLOCATION_INVARIANT'; end if;
   perform public.dd008c_emit_refresh(p_location_id, 'cashier', 'table_session', p_table_session_id, jsonb_build_object('reason', 'TABLE_TENDER'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'table_session', p_table_session_id, v_session.version, jsonb_build_object('tenderGroupId', v_group));
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'record_table_tender', 'table_session', p_table_session_id, v_result, jsonb_build_object('tenderGroupId', v_group, 'amountVnd', p_amount_vnd));
   if v_key is not null then
     insert into public.command_deduplication (location_id, command_key, command, actor_type, actor_id, request_hash, result_reference)
     values (p_location_id, v_key, 'record_table_tender', 'STAFF', v_authz.staff_profile_id, v_hash, v_result::text);
@@ -2656,6 +2781,9 @@ revoke all on function public.dd008c_store_command(text, text, text, text, text,
 revoke all on function public.dd008c_normalize_positive_integer(jsonb) from public;
 revoke all on function public.dd008c_emit_refresh(text, text, text, text, jsonb) from public;
 revoke all on function public.dd008c_write_audit(text, text, text, text, text, text, text, text, text, jsonb) from public;
+revoke all on function public.dd008c_audit_staff_result(text, text, text, text, text, text, jsonb, jsonb) from public;
+revoke all on function public.dd008c_audited_failure(text, text, text, text, text, text, text, text, jsonb) from public;
+revoke all on function public.dd008c_refresh_audience_allowed(text, text) from public;
 revoke all on function public.dd008c_payment_status_for_order(text) from public;
 revoke all on function public.dd008c_is_order_service_complete(text) from public;
 revoke all on function public.dd008c_sync_payment_projection(text, boolean) from public;
@@ -2677,10 +2805,10 @@ revoke all on function public.set_order_status(text, text, text, integer, text, 
 revoke all on function public.update_kds_line_prep(text, text, text[], text, integer, text, text, text) from public;
 revoke all on function public.serve_order_line(text, text, text, integer, integer, text, text, text) from public;
 revoke all on function public.serve_all_ready(text, text, integer, text, text, text) from public;
-revoke all on function public.assign_order_family_course(text, text, text, text, text, text, text) from public;
-revoke all on function public.hold_order_family(text, text, text, text, text, text) from public;
-revoke all on function public.fire_order_family(text, text, text, text, text, text) from public;
-revoke all on function public.fire_order_course(text, text, text, text, text, text) from public;
+revoke all on function public.assign_order_family_course(text, text, text, text, text, text, text, integer) from public;
+revoke all on function public.hold_order_family(text, text, text, text, text, text, integer) from public;
+revoke all on function public.fire_order_family(text, text, text, text, text, text, integer) from public;
+revoke all on function public.fire_order_course(text, text, text, text, text, text, integer) from public;
 revoke all on function public.open_table_visit(text, text, text, text, text) from public;
 revoke all on function public.transfer_table_visit(text, text, text, integer, text, text, text) from public;
 revoke all on function public.close_table_visit(text, text, integer, text, text, text) from public;
@@ -2701,10 +2829,10 @@ grant execute on function public.set_order_status(text, text, text, integer, tex
 grant execute on function public.update_kds_line_prep(text, text, text[], text, integer, text, text, text) to authenticated;
 grant execute on function public.serve_order_line(text, text, text, integer, integer, text, text, text) to authenticated;
 grant execute on function public.serve_all_ready(text, text, integer, text, text, text) to authenticated;
-grant execute on function public.assign_order_family_course(text, text, text, text, text, text, text) to authenticated;
-grant execute on function public.hold_order_family(text, text, text, text, text, text) to authenticated;
-grant execute on function public.fire_order_family(text, text, text, text, text, text) to authenticated;
-grant execute on function public.fire_order_course(text, text, text, text, text, text) to authenticated;
+grant execute on function public.assign_order_family_course(text, text, text, text, text, text, text, integer) to authenticated;
+grant execute on function public.hold_order_family(text, text, text, text, text, text, integer) to authenticated;
+grant execute on function public.fire_order_family(text, text, text, text, text, text, integer) to authenticated;
+grant execute on function public.fire_order_course(text, text, text, text, text, text, integer) to authenticated;
 grant execute on function public.open_table_visit(text, text, text, text, text) to authenticated;
 grant execute on function public.transfer_table_visit(text, text, text, integer, text, text, text) to authenticated;
 grant execute on function public.close_table_visit(text, text, integer, text, text, text) to authenticated;

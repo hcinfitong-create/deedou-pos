@@ -134,6 +134,7 @@ const CASHIER_PAYMENT_METHODS = Object.freeze([
   { method: "MOMO", label: "MoMo (demo)", buttonClass: "ghost" },
   { method: "ZALOPAY", label: "ZaloPay (demo)", buttonClass: "ghost" }
 ]);
+const SUPABASE_COMMAND_INTENTS_KEY = "deedou_supabase_command_intents";
 
 const bus = "BroadcastChannel" in window ? new BroadcastChannel("deedou-pos") : null;
 if (bus) {
@@ -346,10 +347,13 @@ function commandFailureMessage(result = {}) {
   return [result.category || "BACKEND_UNAVAILABLE", result.reason || "COMMAND_FAILED"].filter(Boolean).join(": ");
 }
 
-async function runSupabaseAuthoritativeCommand(commandName, operation) {
+async function runSupabaseAuthoritativeCommand(commandName, operation, options = {}) {
   if (backendConfig.mode !== BACKEND_MODES.SUPABASE) return false;
+  const intent = options.intent || null;
+  const idempotencyKey = intent ? pendingCommandKey(commandName, intent) : nextCommandKey(commandName);
   try {
-    const result = await operation();
+    const result = await operation(idempotencyKey);
+    if (intent && isTerminalCommandResult(result)) clearPendingCommandKey(commandName, intent);
     if (!result?.ok) {
       supabaseCommandNotice = `${commandName}: ${commandFailureMessage(result)}`;
       render();
@@ -369,6 +373,59 @@ async function runSupabaseAuthoritativeCommand(commandName, operation) {
 function nextCommandKey(prefix) {
   const suffix = crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
   return `${prefix}-${suffix}`;
+}
+
+function pendingCommandKey(commandName, intent) {
+  const intents = loadCommandIntents();
+  const fingerprint = commandIntentFingerprint(commandName, intent);
+  if (!intents[fingerprint]) {
+    intents[fingerprint] = nextCommandKey(commandName);
+    saveCommandIntents(intents);
+  }
+  return intents[fingerprint];
+}
+
+function clearPendingCommandKey(commandName, intent) {
+  const intents = loadCommandIntents();
+  const fingerprint = commandIntentFingerprint(commandName, intent);
+  if (!intents[fingerprint]) return;
+  delete intents[fingerprint];
+  saveCommandIntents(intents);
+}
+
+function isTerminalCommandResult(result) {
+  return !!result && result.category !== "BACKEND_UNAVAILABLE";
+}
+
+function commandIntentFingerprint(commandName, intent) {
+  return `${commandName}:${JSON.stringify(stableCommandValue(intent))}`;
+}
+
+function stableCommandValue(value) {
+  if (Array.isArray(value)) return value.map(stableCommandValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.keys(value).sort().reduce((result, key) => {
+    result[key] = stableCommandValue(value[key]);
+    return result;
+  }, {});
+}
+
+function loadCommandIntents() {
+  try {
+    const saved = localStorage.getItem(SUPABASE_COMMAND_INTENTS_KEY);
+    const parsed = saved ? JSON.parse(saved) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCommandIntents(intents) {
+  try {
+    localStorage.setItem(SUPABASE_COMMAND_INTENTS_KEY, JSON.stringify(intents));
+  } catch {
+    // A lost local cache should not block the authoritative command.
+  }
 }
 
 function cartLinesForCommand(lines = []) {
@@ -1922,12 +1979,16 @@ async function submitOrder(token) {
   if (!canSubmitCart(state.cart, productById)) return;
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
     const note = document.getElementById("note")?.value || "";
+    const items = cartLinesForCommand(state.cart);
+    const intent = { token, items, note };
+    const idempotencyKey = pendingCommandKey("submit_qr_order", intent);
     const result = await authoritativeBackendApi.submitQrOrder({
       qrToken: token,
-      items: cartLinesForCommand(state.cart),
+      items,
       note,
-      idempotencyKey: nextCommandKey("qr-order")
+      idempotencyKey
     });
+    if (isTerminalCommandResult(result)) clearPendingCommandKey("submit_qr_order", intent);
     if (!result.ok) {
       supabaseCommandNotice = `submit_qr_order: ${commandFailureMessage(result)}`;
     } else {
@@ -1995,11 +2056,14 @@ async function submitOrder(token) {
 
 async function serviceRequest(token, type) {
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const intent = { token, type };
+    const idempotencyKey = pendingCommandKey("create_service_request", intent);
     const result = await authoritativeBackendApi.createServiceRequest({
       qrToken: token,
       type,
-      idempotencyKey: nextCommandKey("service-request")
+      idempotencyKey
     });
+    if (isTerminalCommandResult(result)) clearPendingCommandKey("create_service_request", intent);
     supabaseCommandNotice = result.ok ? "create_service_request: OK" : `create_service_request: ${commandFailureMessage(result)}`;
     if (result.ok) await ensureSupabasePublicTableState(token, { force: true });
     render();
@@ -2018,11 +2082,12 @@ async function resolveServiceRequest(eventId) {
   const event = state.events.find((item) => item.id === eventId);
   if (!event) return;
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    await runSupabaseAuthoritativeCommand("complete_service_request", () => authoritativeBackendApi.completeServiceRequest({
+    const expectedVersion = Number.isSafeInteger(Number(event.version)) ? Number(event.version) : null;
+    await runSupabaseAuthoritativeCommand("complete_service_request", (idempotencyKey) => authoritativeBackendApi.completeServiceRequest({
       requestId: eventId,
-      expectedVersion: Number.isSafeInteger(Number(event.version)) ? Number(event.version) : null,
-      idempotencyKey: nextCommandKey("service-request-complete")
-    }));
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { eventId, expectedVersion } });
     return;
   }
   event.done = true;
@@ -2033,10 +2098,10 @@ async function resolveServiceRequest(eventId) {
 
 async function openTableSession(tableCode) {
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    await runSupabaseAuthoritativeCommand("open_table_visit", () => authoritativeBackendApi.openTableVisit({
+    await runSupabaseAuthoritativeCommand("open_table_visit", (idempotencyKey) => authoritativeBackendApi.openTableVisit({
       tableCode,
-      idempotencyKey: nextCommandKey("open-table")
-    }));
+      idempotencyKey
+    }), { intent: { tableCode } });
     return;
   }
   if (blockUnsafeTableSessionMutation("TABLE_SESSION_OPEN_BLOCKED", tableCode)) return;
@@ -2059,11 +2124,12 @@ async function openTableSession(tableCode) {
 async function closeActiveTableSession(sessionId) {
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
     const session = state.tableSessions.find((item) => item.id === sessionId);
-    await runSupabaseAuthoritativeCommand("close_table_visit", () => authoritativeBackendApi.closeTableVisit({
+    const expectedVersion = session?.version;
+    await runSupabaseAuthoritativeCommand("close_table_visit", (idempotencyKey) => authoritativeBackendApi.closeTableVisit({
       tableSessionId: sessionId,
-      expectedVersion: session?.version,
-      idempotencyKey: nextCommandKey("close-table")
-    }));
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { sessionId, expectedVersion } });
     return;
   }
   if (blockUnsafeTableSessionMutation("TABLE_SESSION_CLOSE_BLOCKED", sessionId)) return;
@@ -2091,12 +2157,13 @@ async function closeActiveTableSession(sessionId) {
 async function transferActiveTableSession(sessionId, toTableCode) {
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
     const session = state.tableSessions.find((item) => item.id === sessionId);
-    await runSupabaseAuthoritativeCommand("transfer_table_visit", () => authoritativeBackendApi.transferTableVisit({
+    const expectedVersion = session?.version;
+    await runSupabaseAuthoritativeCommand("transfer_table_visit", (idempotencyKey) => authoritativeBackendApi.transferTableVisit({
       tableSessionId: sessionId,
       toTableCode,
-      expectedVersion: session?.version,
-      idempotencyKey: nextCommandKey("transfer-table")
-    }));
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { sessionId, toTableCode, expectedVersion } });
     return;
   }
   if (blockUnsafeTableSessionMutation("TABLE_SESSION_TRANSFER_BLOCKED", `${sessionId} -> ${toTableCode}`)) return;
@@ -2162,13 +2229,19 @@ async function submitCounterOrder() {
   const table = tables.find((item) => item.code === tableCode);
   const isTakeaway = tableCode === "TAKEAWAY";
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const fulfillmentType = isTakeaway ? FULFILLMENT_TYPES.TAKEAWAY : FULFILLMENT_TYPES.DINE_IN;
+    const items = cartLinesForCommand(counterDraft.items);
+    const note = counterDraft.note || (isTakeaway ? "Counter takeaway order" : "Counter order");
+    const intent = { tableCode: isTakeaway ? "" : tableCode, fulfillmentType, items, note };
+    const idempotencyKey = pendingCommandKey("create_staff_order", intent);
     const result = await authoritativeBackendApi.createStaffOrder({
       tableCode: isTakeaway ? "" : tableCode,
-      fulfillmentType: isTakeaway ? FULFILLMENT_TYPES.TAKEAWAY : FULFILLMENT_TYPES.DINE_IN,
-      items: cartLinesForCommand(counterDraft.items),
-      note: counterDraft.note || (isTakeaway ? "Counter takeaway order" : "Counter order"),
-      idempotencyKey: nextCommandKey("counter-order")
+      fulfillmentType,
+      items,
+      note,
+      idempotencyKey
     });
+    if (isTerminalCommandResult(result)) clearPendingCommandKey("create_staff_order", intent);
     if (!result.ok) {
       supabaseCommandNotice = `create_staff_order: ${commandFailureMessage(result)}`;
       render();
@@ -2258,13 +2331,14 @@ function adjustBillQty(orderId, lineIndex, delta) {
   const nextQty = clampBillQty(oldQty + delta, line.qty);
   if (nextQty === oldQty) return;
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    runSupabaseAuthoritativeCommand("update_order_line_bill_qty", () => authoritativeBackendApi.updateOrderLineBillQty({
+    const expectedVersion = expectedOrderVersion(order);
+    runSupabaseAuthoritativeCommand("update_order_line_bill_qty", (idempotencyKey) => authoritativeBackendApi.updateOrderLineBillQty({
       orderId,
       lineId: line.lineId,
       billQty: nextQty,
-      expectedVersion: expectedOrderVersion(order),
-      idempotencyKey: nextCommandKey("bill-qty")
-    }));
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, lineId: line.lineId, billQty: nextQty, expectedVersion } });
     return;
   }
   line.billQty = nextQty;
@@ -2323,6 +2397,10 @@ function refundPaymentAmountKey(orderId, paymentId) {
 
 function nextTenderGroupId(scope) {
   return `TG-${String(scope || "ORDER").replace(/[^A-Za-z0-9]/g, "")}-${Date.now().toString(36).toUpperCase()}`;
+}
+
+function tenderGroupIdForCommand(idempotencyKey) {
+  return `TG-${String(idempotencyKey || "ORDER").replace(/[^A-Za-z0-9]/g, "").slice(-32).toUpperCase()}`;
 }
 
 function nextPaymentId(prefix, order, suffix = "") {
@@ -2406,12 +2484,12 @@ async function payTable(tableCode, method) {
       render();
       return;
     }
-    await runSupabaseAuthoritativeCommand("record_table_tender", () => authoritativeBackendApi.recordTableTender({
+    await runSupabaseAuthoritativeCommand("record_table_tender", (idempotencyKey) => authoritativeBackendApi.recordTableTender({
       tableSessionId: session.id,
       method,
       amountVnd: amount,
-      idempotencyKey: nextCommandKey("table-tender")
-    }));
+      idempotencyKey
+    }), { intent: { tableSessionId: session.id, method, amountVnd: amount } });
     pendingSplitPlan = null;
     return;
   }
@@ -2480,23 +2558,23 @@ async function paySplitShare(shareNo, method) {
   const note = `Split share ${share.shareNo}`;
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
     const handled = pendingSplitPlan.scope === "ORDER"
-      ? await runSupabaseAuthoritativeCommand("record_order_payment", () => authoritativeBackendApi.recordOrderPayment({
+      ? await runSupabaseAuthoritativeCommand("record_order_payment", (idempotencyKey) => authoritativeBackendApi.recordOrderPayment({
         orderId: pendingSplitPlan.orderId,
         method,
         amountVnd: share.amountVnd,
         tenderGroupId: pendingSplitPlan.tenderGroupId,
-        idempotencyKey: nextCommandKey("split-order-payment")
-      }))
-      : await runSupabaseAuthoritativeCommand("record_table_tender", () => {
+        idempotencyKey
+      }), { intent: { splitPlan: pendingSplitPlan.tenderGroupId, shareNo: share.shareNo, method, amountVnd: share.amountVnd } })
+      : await runSupabaseAuthoritativeCommand("record_table_tender", (idempotencyKey) => {
         const session = activeTableSessionForCode(pendingSplitPlan.tableCode);
         if (!session) return Promise.resolve({ ok: false, category: "INVALID_STATE", reason: "SESSION_NOT_OPEN" });
         return authoritativeBackendApi.recordTableTender({
           tableSessionId: session.id,
           method,
           amountVnd: share.amountVnd,
-          idempotencyKey: nextCommandKey("split-table-tender")
+          idempotencyKey
         });
-      });
+      }, { intent: { splitPlan: pendingSplitPlan.tenderGroupId, tableCode: pendingSplitPlan.tableCode, shareNo: share.shareNo, method, amountVnd: share.amountVnd } });
     if (handled) {
       share.paid = true;
       share.method = method;
@@ -2593,13 +2671,13 @@ async function payOrder(orderId, method) {
     return;
   }
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    await runSupabaseAuthoritativeCommand("record_order_payment", () => authoritativeBackendApi.recordOrderPayment({
+    await runSupabaseAuthoritativeCommand("record_order_payment", (idempotencyKey) => authoritativeBackendApi.recordOrderPayment({
       orderId,
       method,
       amountVnd: amount,
-      tenderGroupId: nextTenderGroupId(order.id),
-      idempotencyKey: nextCommandKey("order-payment")
-    }));
+      tenderGroupId: tenderGroupIdForCommand(idempotencyKey),
+      idempotencyKey
+    }), { intent: { orderId, method, amountVnd: amount } });
     return;
   }
   const result = applyOrderPayment(order, method, amount, { note: "Order payment" });
@@ -2688,12 +2766,13 @@ async function voidOrder(orderId, reason = "") {
   const voidReason = reason.trim() || "Thu ngân hủy lượt gọi";
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
     pendingVoidOrderId = "";
-    await runSupabaseAuthoritativeCommand("set_order_status", () => authoritativeBackendApi.setOrderStatus({
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("set_order_status", (idempotencyKey) => authoritativeBackendApi.setOrderStatus({
       orderId,
       status: "VOIDED",
-      expectedVersion: expectedOrderVersion(order),
-      idempotencyKey: nextCommandKey("void-order")
-    }));
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, status: "VOIDED", expectedVersion } });
     return;
   }
   order.status = "VOIDED";
@@ -2711,11 +2790,11 @@ async function voidPayment(orderId, paymentId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    await runSupabaseAuthoritativeCommand("void_order_payment", () => authoritativeBackendApi.voidOrderPayment({
+    await runSupabaseAuthoritativeCommand("void_order_payment", (idempotencyKey) => authoritativeBackendApi.voidOrderPayment({
       orderId,
       paymentId,
-      idempotencyKey: nextCommandKey("void-payment")
-    }));
+      idempotencyKey
+    }), { intent: { orderId, paymentId } });
     return;
   }
   const result = recordPaymentVoid(order, {
@@ -2747,12 +2826,12 @@ async function refundPayment(orderId, paymentId) {
     return;
   }
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    await runSupabaseAuthoritativeCommand("refund_order_payment", () => authoritativeBackendApi.refundOrderPayment({
+    await runSupabaseAuthoritativeCommand("refund_order_payment", (idempotencyKey) => authoritativeBackendApi.refundOrderPayment({
       orderId,
       paymentId,
       amountVnd: amount,
-      idempotencyKey: nextCommandKey("refund-payment")
-    }));
+      idempotencyKey
+    }), { intent: { orderId, paymentId, amountVnd: amount } });
     return;
   }
   const result = recordRefund(order, {
@@ -2785,12 +2864,13 @@ async function updateOrderStatus(orderId, status) {
     return;
   }
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    await runSupabaseAuthoritativeCommand("set_order_status", () => authoritativeBackendApi.setOrderStatus({
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("set_order_status", (idempotencyKey) => authoritativeBackendApi.setOrderStatus({
       orderId,
       status,
-      expectedVersion: expectedOrderVersion(order),
-      idempotencyKey: nextCommandKey("order-status")
-    }));
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, status, expectedVersion } });
     return;
   }
   const transition = applyOrderStatusTransition(order, status);
@@ -2806,13 +2886,14 @@ async function serveReadyLine(orderId, lineId, qty) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    await runSupabaseAuthoritativeCommand("serve_order_line", () => authoritativeBackendApi.serveOrderLine({
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("serve_order_line", (idempotencyKey) => authoritativeBackendApi.serveOrderLine({
       orderId,
       lineId,
       qty: Number(qty || 1),
-      expectedVersion: expectedOrderVersion(order),
-      idempotencyKey: nextCommandKey("serve-line")
-    }));
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, lineId, qty: Number(qty || 1), expectedVersion } });
     return;
   }
   const update = serveLineQuantity(order, lineId, Number(qty || 1));
@@ -2828,11 +2909,12 @@ async function serveAllReadyLines(orderId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    await runSupabaseAuthoritativeCommand("serve_all_ready", () => authoritativeBackendApi.serveAllReady({
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("serve_all_ready", (idempotencyKey) => authoritativeBackendApi.serveAllReady({
       orderId,
-      expectedVersion: expectedOrderVersion(order),
-      idempotencyKey: nextCommandKey("serve-all")
-    }));
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, expectedVersion } });
     return;
   }
   const update = serveAllReady(order);
@@ -2848,13 +2930,14 @@ async function updateStationStatus(orderId, stationCode, status, lineIds = []) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    await runSupabaseAuthoritativeCommand("update_kds_line_prep", () => authoritativeBackendApi.updateKdsLinePrep({
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("update_kds_line_prep", (idempotencyKey) => authoritativeBackendApi.updateKdsLinePrep({
       orderId,
       lineIds,
       nextPrepStatus: status,
-      expectedVersion: expectedOrderVersion(order),
-      idempotencyKey: nextCommandKey("kds-prep")
-    }));
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, lineIds, status, expectedVersion } });
     return;
   }
   const update = applyPrepStatusTransition(order, { stationCode, lineIds }, status);
@@ -2872,12 +2955,15 @@ async function assignCourseToFamily(orderId, familyLineId) {
     return node.dataset.courseValue === orderId && node.dataset.courseFamily === familyLineId;
   });
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    await runSupabaseAuthoritativeCommand("assign_order_family_course", () => authoritativeBackendApi.assignFamilyCourse({
+    const course = input?.value || "";
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("assign_order_family_course", (idempotencyKey) => authoritativeBackendApi.assignFamilyCourse({
       orderId,
       familyLineId,
-      course: input?.value || "",
-      idempotencyKey: nextCommandKey("course-assign")
-    }));
+      course,
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, familyLineId, course, expectedVersion } });
     return;
   }
   const result = assignServiceFamilyCourse(order, familyLineId, input?.value || "");
@@ -2897,11 +2983,13 @@ async function holdOrderFamily(orderId, familyLineId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    await runSupabaseAuthoritativeCommand("hold_order_family", () => authoritativeBackendApi.holdFamily({
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("hold_order_family", (idempotencyKey) => authoritativeBackendApi.holdFamily({
       orderId,
       familyLineId,
-      idempotencyKey: nextCommandKey("course-hold")
-    }));
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, familyLineId, expectedVersion } });
     return;
   }
   const result = holdServiceFamily(order, familyLineId);
@@ -2921,11 +3009,13 @@ async function fireOrderFamily(orderId, familyLineId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    await runSupabaseAuthoritativeCommand("fire_order_family", () => authoritativeBackendApi.fireFamily({
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("fire_order_family", (idempotencyKey) => authoritativeBackendApi.fireFamily({
       orderId,
       familyLineId,
-      idempotencyKey: nextCommandKey("course-fire-family")
-    }));
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, familyLineId, expectedVersion } });
     return;
   }
   const result = fireServiceFamily(order, familyLineId);
@@ -2945,11 +3035,13 @@ async function fireWholeCourse(orderId, course) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
-    await runSupabaseAuthoritativeCommand("fire_order_course", () => authoritativeBackendApi.fireCourse({
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("fire_order_course", (idempotencyKey) => authoritativeBackendApi.fireCourse({
       orderId,
       course,
-      idempotencyKey: nextCommandKey("course-fire")
-    }));
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, course, expectedVersion } });
     return;
   }
   const result = fireOrderCourse(order, course);

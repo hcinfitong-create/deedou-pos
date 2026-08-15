@@ -154,27 +154,27 @@ export function createAuthoritativeBackendApi(options = {}) {
     }));
   }
 
-  async function assignFamilyCourse({ orderId, familyLineId, course, idempotencyKey } = {}) {
+  async function assignFamilyCourse({ orderId, familyLineId, course, expectedVersion, idempotencyKey } = {}) {
     return rpc("assign_order_family_course", staffParams({
-      params: { p_order_id: text(orderId), p_family_line_id: text(familyLineId), p_course: text(course), p_idempotency_key: text(idempotencyKey) }
+      params: { p_order_id: text(orderId), p_family_line_id: text(familyLineId), p_course: text(course), p_idempotency_key: text(idempotencyKey), p_expected_version: optionalInteger(expectedVersion) }
     }));
   }
 
-  async function holdFamily({ orderId, familyLineId, idempotencyKey } = {}) {
+  async function holdFamily({ orderId, familyLineId, expectedVersion, idempotencyKey } = {}) {
     return rpc("hold_order_family", staffParams({
-      params: { p_order_id: text(orderId), p_family_line_id: text(familyLineId), p_idempotency_key: text(idempotencyKey) }
+      params: { p_order_id: text(orderId), p_family_line_id: text(familyLineId), p_idempotency_key: text(idempotencyKey), p_expected_version: optionalInteger(expectedVersion) }
     }));
   }
 
-  async function fireFamily({ orderId, familyLineId, idempotencyKey } = {}) {
+  async function fireFamily({ orderId, familyLineId, expectedVersion, idempotencyKey } = {}) {
     return rpc("fire_order_family", staffParams({
-      params: { p_order_id: text(orderId), p_family_line_id: text(familyLineId), p_idempotency_key: text(idempotencyKey) }
+      params: { p_order_id: text(orderId), p_family_line_id: text(familyLineId), p_idempotency_key: text(idempotencyKey), p_expected_version: optionalInteger(expectedVersion) }
     }));
   }
 
-  async function fireCourse({ orderId, course, idempotencyKey } = {}) {
+  async function fireCourse({ orderId, course, expectedVersion, idempotencyKey } = {}) {
     return rpc("fire_order_course", staffParams({
-      params: { p_order_id: text(orderId), p_course: text(course), p_idempotency_key: text(idempotencyKey) }
+      params: { p_order_id: text(orderId), p_course: text(course), p_idempotency_key: text(idempotencyKey), p_expected_version: optionalInteger(expectedVersion) }
     }));
   }
 
@@ -246,32 +246,53 @@ export function createAuthoritativeBackendApi(options = {}) {
   }
 
   function subscribeLocationRefresh({ locationId, onRefresh, onError } = {}) {
-    let subscription = null;
+    const subscriptions = [];
     let closed = false;
     getClient()
       .then((client) => {
         if (closed || !client?.channel) return;
-        const channel = client
-          .channel(`dd008c-location-${text(locationId)}`)
-          .on("postgres_changes", {
-            event: "INSERT",
-            schema: "public",
-            table: "dd008c_refresh_hints",
-            filter: `location_id=eq.${text(locationId)}`
-          }, (event) => onRefresh?.(event))
-          .subscribe((status, error) => {
+        refreshAudiencesForLocation(locationId).forEach((audience) => {
+          const channel = client
+            .channel(`location:${text(locationId)}:${audience}`, { config: { private: true } })
+            .on("broadcast", { event: "refresh" }, (event) => onRefresh?.(normalizeRefreshBroadcast(event, audience)))
+            .subscribe((status, error) => {
             if (error) onError?.(error);
             if (status === "CHANNEL_ERROR") onError?.(new Error("CHANNEL_ERROR"));
           });
-        subscription = channel;
+          subscriptions.push(channel);
+        });
       })
       .catch((error) => onError?.(error));
     return {
       unsubscribe() {
         closed = true;
-        subscription?.unsubscribe?.();
+        subscriptions.forEach((subscription) => subscription?.unsubscribe?.());
       }
     };
+  }
+
+  function refreshAudiencesForLocation(locationId) {
+    const audiences = ["ops"];
+    const authState = authStateRef() || {};
+    const workstationMode = text(authState.authorization?.workstationMode || authState.workstationMode);
+    const permissions = staffPermissionsForLocation(locationId);
+    if (
+      workstationMode === "CASHIER"
+      || workstationMode === "ADMIN"
+      || permissions.includes("payments.read")
+      || permissions.includes("payments.record")
+    ) {
+      audiences.push("cashier");
+    }
+    return audiences;
+  }
+
+  function staffPermissionsForLocation(locationId) {
+    const authState = authStateRef() || {};
+    const rows = Array.isArray(authState.staffContext) ? authState.staffContext : [];
+    const normalizedLocationId = text(locationId);
+    const row = rows.find((item) => text(item.locationId || item.location_id) === normalizedLocationId) || rows[0] || {};
+    return Array.isArray(row.permissions) ? row.permissions.map(text) : [];
   }
 
   return {
@@ -314,6 +335,21 @@ export function normalizeCommandResult(value) {
     entityId: text(row.entity_id || row.entityId),
     version: optionalInteger(row.version),
     payload: row.payload && typeof row.payload === "object" ? row.payload : {}
+  };
+}
+
+function normalizeRefreshBroadcast(event = {}, audience = "ops") {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  return {
+    broadcast: true,
+    audience,
+    new: {
+      location_id: text(payload.locationId),
+      audience: text(payload.audience || audience),
+      entity_type: text(payload.entityType),
+      entity_id: text(payload.entityId),
+      payload
+    }
   };
 }
 

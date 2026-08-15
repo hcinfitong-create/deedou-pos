@@ -194,7 +194,9 @@ insert into public.orders (
 values
   ('dd008c-order-pending', 'deedou-demo', 'DD008C-PENDING', 'dd008c-session-d02', 'dd008c-table-d02', 'TABLE_SERVICE', 'DINE_IN', 'CUSTOMER_QR', 'Contract', 'D02', 'PENDING_ACCEPTANCE', 198000, 1),
   ('dd008c-order-skip', 'deedou-demo', 'DD008C-SKIP', 'dd008c-session-d02', 'dd008c-table-d02', 'TABLE_SERVICE', 'DINE_IN', 'CUSTOMER_QR', 'Contract', 'D02', 'PENDING_ACCEPTANCE', 99000, 1),
-  ('dd008c-order-multi', 'deedou-demo', 'DD008C-MULTI', 'dd008c-session-d02', 'dd008c-table-d02', 'TABLE_SERVICE', 'DINE_IN', 'CUSTOMER_QR', 'Contract', 'D02', 'ACCEPTED', 154000, 1)
+  ('dd008c-order-multi', 'deedou-demo', 'DD008C-MULTI', 'dd008c-session-d02', 'dd008c-table-d02', 'TABLE_SERVICE', 'DINE_IN', 'CUSTOMER_QR', 'Contract', 'D02', 'ACCEPTED', 154000, 1),
+  ('dd008c-order-partial', 'deedou-demo', 'DD008C-PARTIAL', 'dd008c-session-d02', 'dd008c-table-d02', 'TABLE_SERVICE', 'DINE_IN', 'STAFF', 'Contract', 'D02', 'SERVED', 99000, 1),
+  ('dd008c-order-course', 'deedou-demo', 'DD008C-COURSE', 'dd008c-session-d02', 'dd008c-table-d02', 'TABLE_SERVICE', 'DINE_IN', 'STAFF', 'Contract', 'D02', 'ACCEPTED', 99000, 1)
 on conflict (id) do nothing;
 
 insert into public.order_lines (id, order_id, line_id, product_id, station_code, name_vi, name_en, qty, bill_qty, price_vnd, prep_status, item_status, hold_state, queued_at)
@@ -202,7 +204,9 @@ values
   ('dd008c-line-pending-rice', 'dd008c-order-pending', 'fried-rice:1:item', 'fried-rice', 'KITCHEN_HOT', 'Com chien hai san', 'Seafood Fried Rice', 2, 2, 99000, 'QUEUED', 'QUEUED', 'FIRED', null),
   ('dd008c-line-skip-rice', 'dd008c-order-skip', 'fried-rice:1:item', 'fried-rice', 'KITCHEN_HOT', 'Com chien hai san', 'Seafood Fried Rice', 1, 1, 99000, 'QUEUED', 'QUEUED', 'FIRED', null),
   ('dd008c-line-multi-hot', 'dd008c-order-multi', 'fried-rice:1:item', 'fried-rice', 'KITCHEN_HOT', 'Com chien hai san', 'Seafood Fried Rice', 1, 1, 99000, 'QUEUED', 'QUEUED', 'FIRED', now()),
-  ('dd008c-line-multi-tea', 'dd008c-order-multi', 'mango-tea:2:item', 'mango-tea', 'BAR_TEA', 'Tra xoai', 'Mango Tea', 1, 1, 55000, 'QUEUED', 'QUEUED', 'FIRED', now())
+  ('dd008c-line-multi-tea', 'dd008c-order-multi', 'mango-tea:2:item', 'mango-tea', 'BAR_TEA', 'Tra xoai', 'Mango Tea', 1, 1, 55000, 'QUEUED', 'QUEUED', 'FIRED', now()),
+  ('dd008c-line-partial-rice', 'dd008c-order-partial', 'fried-rice:1:item', 'fried-rice', 'KITCHEN_HOT', 'Com chien hai san', 'Seafood Fried Rice', 1, 1, 99000, 'READY', 'SERVED', 'FIRED', now()),
+  ('dd008c-line-course-rice', 'dd008c-order-course', 'fried-rice:1:item', 'fried-rice', 'KITCHEN_HOT', 'Com chien hai san', 'Seafood Fried Rice', 1, 1, 99000, 'QUEUED', 'QUEUED', 'FIRED', now())
 on conflict (order_id, line_id) do nothing;
 
 set local role authenticated;
@@ -232,6 +236,40 @@ begin
   limit 1;
   if v_result.ok <> true or v_result.version <> 2 then
     raise exception 'expected duplicate ACCEPT replay without version bump, got %/%/%', v_result.ok, v_result.reason, v_result.version;
+  end if;
+end $$;
+
+reset role;
+
+set local role authenticated;
+set local request.jwt.claim.sub = '20000000-0000-4000-8000-000000000002';
+set local request.jwt.claim.role = 'authenticated';
+
+do $$
+declare
+  v_result record;
+  v_course text;
+begin
+  select * into v_result
+  from public.assign_order_family_course('deedou-demo', 'dd008c-order-course', 'fried-rice:1:item', '1', 'dd008c-course-assign-a', 'STAFF', 'dd008c-staff-device', 1)
+  limit 1;
+  if v_result.ok <> true or v_result.version <> 2 then
+    raise exception 'expected course assignment accepted with version 2, got %/%/%', v_result.ok, v_result.reason, v_result.version;
+  end if;
+
+  select * into v_result
+  from public.assign_order_family_course('deedou-demo', 'dd008c-order-course', 'fried-rice:1:item', '2', 'dd008c-course-assign-b', 'STAFF', 'dd008c-staff-device', 1)
+  limit 1;
+  if v_result.ok <> false or v_result.reason <> 'STALE_VERSION' then
+    raise exception 'expected conflicting course assignment stale-version rejection, got %/%', v_result.category, v_result.reason;
+  end if;
+
+  select course into v_course
+  from public.order_lines
+  where order_id = 'dd008c-order-course'
+    and line_id = 'fried-rice:1:item';
+  if v_course <> '1' then
+    raise exception 'stale course assignment overwrote course: %', v_course;
   end if;
 end $$;
 
@@ -388,6 +426,28 @@ declare
   v_payment_id text;
 begin
   select * into v_result
+  from public.record_order_payment('deedou-demo', 'dd008c-order-partial', 'CASH', 1000, '', '', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> false or v_result.reason <> 'IDEMPOTENCY_KEY_REQUIRED' then
+    raise exception 'expected empty payment idempotency key rejected, got %/%', v_result.category, v_result.reason;
+  end if;
+
+  select * into v_result
+  from public.record_order_payment('deedou-demo', 'dd008c-order-partial', 'CASH', 40000, '', 'dd008c-pay-partial', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> true then
+    raise exception 'expected partial payment accepted, got %/%', v_result.category, v_result.reason;
+  end if;
+  v_payment_id := v_result.entity_id;
+
+  select * into v_result
+  from public.record_order_payment('deedou-demo', 'dd008c-order-partial', 'CASH', 40000, '', 'dd008c-pay-partial', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> true or v_result.entity_id <> v_payment_id then
+    raise exception 'expected partial payment retry replay, got %/%/%', v_result.ok, v_result.reason, v_result.entity_id;
+  end if;
+
+  select * into v_result
   from public.record_order_payment('deedou-demo', 'dd008c-order-pending', 'CASH', 0, '', 'dd008c-pay-zero', 'CASHIER', 'dd008c-cashier-device')
   limit 1;
   if v_result.ok <> false or v_result.reason <> 'INVALID_PAYMENT_AMOUNT' then
@@ -433,6 +493,7 @@ reset role;
 do $$
 declare
   v_payment_count integer;
+  v_partial_payment_count integer;
 begin
   select count(*) into v_payment_count
   from public.payment_transactions
@@ -440,6 +501,14 @@ begin
     and type = 'PAYMENT';
   if v_payment_count <> 1 then
     raise exception 'expected duplicate payment replay to create one payment, got %', v_payment_count;
+  end if;
+
+  select count(*) into v_partial_payment_count
+  from public.payment_transactions
+  where order_id = 'dd008c-order-partial'
+    and type = 'PAYMENT';
+  if v_partial_payment_count <> 1 then
+    raise exception 'expected partial payment retry to create one payment, got %', v_partial_payment_count;
   end if;
 end $$;
 
@@ -624,6 +693,7 @@ do $$
 declare
   v_groups integer;
   v_payments integer;
+  v_payment_id text;
 begin
   select count(*), count(distinct tender_group_id)
   into v_payments, v_groups
@@ -633,6 +703,60 @@ begin
 
   if v_payments <> 2 or v_groups <> 1 then
     raise exception 'expected one table tender group across two payments, got payments %, groups %', v_payments, v_groups;
+  end if;
+
+  select value into v_payment_id from dd008c_contract_ids where key = 'pending-payment';
+
+  if not exists (
+    select 1
+    from public.audit_events
+    where location_id = 'deedou-demo'
+      and command = 'assign_order_family_course'
+      and target_id = 'dd008c-order-course'
+      and outcome = 'OK'
+      and staff_id = 'dd008c-staff-floor'
+      and device_id = 'dd008c-dev-staff'
+  ) then
+    raise exception 'expected successful course assignment audit with server-derived staff/device';
+  end if;
+
+  if not exists (
+    select 1
+    from public.audit_events
+    where location_id = 'deedou-demo'
+      and command = 'refund_order_payment'
+      and target_id = v_payment_id
+      and outcome = 'FORBIDDEN'
+      and staff_id = 'dd008c-staff-cashier'
+      and device_id = 'dd008c-dev-cashier'
+  ) then
+    raise exception 'expected denied refund audit with cashier staff/device';
+  end if;
+
+  if not exists (
+    select 1
+    from public.audit_events
+    where location_id = 'deedou-demo'
+      and command = 'refund_order_payment'
+      and metadata->>'relatedPaymentId' = v_payment_id
+      and outcome = 'OK'
+      and staff_id = 'dd008c-staff-manager'
+      and device_id = 'dd008c-dev-cashier'
+  ) then
+    raise exception 'expected successful refund audit with manager staff and cashier workstation device';
+  end if;
+
+  if not exists (
+    select 1
+    from public.audit_events
+    where location_id = 'deedou-demo'
+      and command = 'record_table_tender'
+      and target_id = 'dd008c-session-tender'
+      and outcome = 'OK'
+      and staff_id = 'dd008c-staff-cashier'
+      and device_id = 'dd008c-dev-cashier'
+  ) then
+    raise exception 'expected table tender audit with cashier staff/device';
   end if;
 end $$;
 
