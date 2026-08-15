@@ -34,6 +34,8 @@ export {
   createAuthoritativeBackendApi
 } from "./authoritative.js";
 
+export { createAdminBackendApi } from "./admin.js";
+
 export {
   AUTH_HEALTH_STATES,
   OPERATIONAL_STATES,
