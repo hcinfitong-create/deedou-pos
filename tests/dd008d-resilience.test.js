@@ -10,6 +10,7 @@ import {
   buildLegacyExport,
   createLegacyMigrationApi,
   createOperationalStateController,
+  createReconnectCoordinator,
   cutoverPolicy,
   getCutoverStage,
   previewLegacyExport,
@@ -67,6 +68,107 @@ test("DD-008D operational state requires backend, auth, realtime, and a fresh au
     reason: "OFFLINE_WRITE_BLOCKED",
     commandName: "record_order_payment"
   });
+});
+
+test("DD-008D terminal auth/realtime recovery failures do not remain stuck RECONNECTING", () => {
+  const controller = createOperationalStateController({ mode: BACKEND_MODES.SUPABASE });
+  controller.beginReconnect();
+  controller.markBackendProbe({ ok: true });
+  controller.markAuth(AUTH_HEALTH_STATES.UNAUTHENTICATED, "SIGN_IN_REQUIRED");
+  assert.equal(controller.getState().state, OPERATIONAL_STATES.DEGRADED);
+
+  controller.beginReconnect();
+  controller.markAuth(AUTH_HEALTH_STATES.AUTHENTICATED);
+  controller.markRealtime(REALTIME_HEALTH_STATES.ERROR, "CHANNEL_ERROR");
+  assert.equal(controller.getState().state, OPERATIONAL_STATES.DEGRADED);
+});
+
+test("DD-008D reconnect coordinator waits for private realtime then authoritative refetch before ONLINE", async () => {
+  let now = Date.parse("2026-08-16T01:00:00+07:00");
+  const controller = createOperationalStateController({ mode: BACKEND_MODES.SUPABASE, clock: () => now });
+  const calls = [];
+  const channels = [];
+  const fakeClient = {
+    channel(topic, options) {
+      calls.push(["channel", topic, options]);
+      const channel = {
+        handler: null,
+        on(type, filter, handler) {
+          calls.push(["on", type, filter.event]);
+          this.handler = handler;
+          return this;
+        },
+        subscribe(callback) {
+          calls.push(["subscribe", topic]);
+          queueMicrotask(() => callback("SUBSCRIBED"));
+          return this;
+        },
+        unsubscribe() {
+          calls.push(["unsubscribe", topic]);
+        }
+      };
+      channels.push(channel);
+      return channel;
+    }
+  };
+  let snapshotCount = 0;
+  const coordinator = createReconnectCoordinator({
+    mode: BACKEND_MODES.SUPABASE,
+    authApi: {
+      getSessionInfo: async () => ({ ok: true, session: { userId: "staff-1" } }),
+      getClient: async () => fakeClient
+    },
+    backendApi: {
+      issueRealtimeTicket: async ({ audience }) => {
+        calls.push(["ticket", audience]);
+        return { ok: true, payload: { topic: `location:deedou-demo:${audience}:ticket` } };
+      },
+      fetchStaffSnapshot: async () => {
+        calls.push(["snapshot"]);
+        return { ok: true, payload: { orders: [{ id: "O1", version: 4 }] } };
+      }
+    },
+    operationalController: controller,
+    onSnapshot(snapshot) {
+      snapshotCount += 1;
+      assert.equal(snapshot.orders[0].version, 4);
+    },
+    subscribeTimeoutMs: 200
+  });
+
+  const result = await coordinator.recover({ locationId: "deedou-demo", audiences: ["ops", "cashier"] });
+  assert.equal(result.ok, true);
+  assert.equal(snapshotCount, 1);
+  assert.equal(coordinator.subscriptionCount, 2);
+  assert.equal(controller.getState().state, OPERATIONAL_STATES.ONLINE);
+  assert.equal(calls.filter(([type]) => type === "subscribe").length, 2);
+  assert.equal(calls.filter(([type]) => type === "snapshot").length, 1);
+  assert.ok(calls.findIndex(([type]) => type === "subscribe") < calls.findIndex(([type]) => type === "snapshot"));
+
+  now += 1000;
+  channels[0].handler?.({ payload: { entityType: "order", entityId: "O1", correlationId: "dbtx:123" } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(calls.filter(([type]) => type === "snapshot").length, 2);
+  assert.equal(controller.getState().lastCorrelationId, "dbtx:123");
+
+  coordinator.disconnect();
+  assert.equal(coordinator.subscriptionCount, 0);
+  assert.equal(controller.getState().realtimeState, REALTIME_HEALTH_STATES.DISCONNECTED);
+});
+
+test("DD-008D reconnect refuses to declare ONLINE when auth is missing", async () => {
+  const controller = createOperationalStateController({ mode: BACKEND_MODES.SUPABASE });
+  const coordinator = createReconnectCoordinator({
+    mode: BACKEND_MODES.SUPABASE,
+    authApi: { getSessionInfo: async () => ({ ok: true, session: null }) },
+    backendApi: {},
+    operationalController: controller
+  });
+
+  const result = await coordinator.recover({ locationId: "deedou-demo" });
+  assert.equal(result.ok, false);
+  assert.equal(result.category, "UNAUTHENTICATED");
+  assert.equal(controller.getState().state, OPERATIONAL_STATES.DEGRADED);
 });
 
 test("DD-008D diagnostics strip secret-like fields", () => {
