@@ -37,6 +37,22 @@ function collectSourceFiles(dir) {
   return result;
 }
 
+function tomlSection(source, sectionName) {
+  const lines = String(source || "").split(/\r?\n/);
+  const header = `[${sectionName}]`;
+  const collected = [];
+  let active = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^\[[^\]]+\]$/.test(trimmed)) {
+      active = trimmed === header;
+      continue;
+    }
+    if (active) collected.push(line);
+  }
+  return collected.join("\n");
+}
+
 const packageJson = JSON.parse(read("package.json"));
 const packageLockExists = existsSync(new URL("package-lock.json", root));
 if (packageLockExists && packageJson.private === true) pass("dependency lockfile present and package is private");
@@ -84,15 +100,17 @@ for (const required of [
 if (!failures.some((item) => item.includes("DD-008D migration missing"))) pass("legacy import tables/RPCs retain RLS, preview-first, and no-overwrite contracts");
 
 const supabaseConfig = read("supabase/config.toml");
-if (/\[auth\][\s\S]*?enable_signup\s*=\s*false/.test(supabaseConfig)) pass("local Supabase general signup is disabled");
-else warn("local Supabase config does not clearly disable general signup");
-if (/additional_redirect_urls\s*=\s*\["http:\/\/127\.0\.0\.1:8099"\]/.test(supabaseConfig)) {
+const authSection = tomlSection(supabaseConfig, "auth");
+const emailAuthSection = tomlSection(supabaseConfig, "auth.email");
+if (/^\s*enable_signup\s*=\s*false\s*(?:#.*)?$/m.test(authSection)) pass("local Supabase general signup is disabled");
+else warn("local Supabase [auth] section does not clearly disable general signup");
+if (/additional_redirect_urls\s*=\s*\["http:\/\/127\.0\.0\.1:8099"\]/.test(authSection)) {
   pass("checked-in redirect allowlist is local-only, not a permissive production wildcard");
 } else {
   warn("review checked-in auth redirect allowlist before production cutover");
 }
-if (/\[auth\.email\][\s\S]*?enable_signup\s*=\s*true/.test(supabaseConfig)) {
-  warn("local email signup is enabled for integration fixtures; production Supabase Auth must disable public signup unless intentionally approved");
+if (/^\s*enable_signup\s*=\s*true\s*(?:#.*)?$/m.test(emailAuthSection)) {
+  warn("local [auth.email] signup is enabled for integration fixtures; production Supabase Auth must disable public signup unless intentionally approved");
 }
 
 const seed = read("supabase/seed.sql");
