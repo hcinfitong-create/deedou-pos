@@ -745,14 +745,23 @@ async function waitForCondition(predicate, label, timeout = 30000) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 
-async function activeRealtimeTicketCount() {
-  const { count, error } = await adminClient
-    .from("dd008c_realtime_subscription_tickets")
-    .select("id", { count: "exact", head: true })
-    .eq("location_id", ids.locationA)
-    .gt("expires_at", new Date().toISOString());
-  if (error) throw new Error(`Could not count active realtime tickets: ${error.message}`);
-  return count || 0;
+function activeRealtimeTicketCount() {
+  const output = execFileSync("psql", [
+    dbUrl,
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-X",
+    "-A",
+    "-t",
+    "-c",
+    `select count(*) from public.dd008c_realtime_subscription_tickets where location_id = ${lit(ids.locationA)} and expires_at > now();`
+  ], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const count = Number.parseInt(output.trim(), 10);
+  if (!Number.isFinite(count)) throw new Error("Could not count active realtime tickets from trusted DB connection");
+  return count;
 }
 
 async function startStaticServer(root) {

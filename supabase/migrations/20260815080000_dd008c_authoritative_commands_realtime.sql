@@ -120,13 +120,6 @@ end
 $$;
 
 drop policy if exists dd008c_refresh_hints_staff_location_read on public.dd008c_refresh_hints;
-create policy dd008c_refresh_hints_staff_location_read
-on public.dd008c_refresh_hints
-for select
-to authenticated
-using (public.dd008c_refresh_audience_allowed(location_id, audience));
-
-grant select on public.dd008c_refresh_hints to authenticated;
 
 do $$
 begin

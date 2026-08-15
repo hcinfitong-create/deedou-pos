@@ -798,7 +798,12 @@ test("DD-008C realtime refresh is audience and workstation-device ticket scoped"
   assert.match(authoritativeMigrationSql, /create table if not exists public\.dd008c_realtime_subscription_tickets/i);
   assert.match(authoritativeMigrationSql, /alter table public\.dd008c_refresh_hints enable row level security/i);
   assert.match(authoritativeMigrationSql, /alter table public\.dd008c_realtime_subscription_tickets enable row level security/i);
-  assert.match(authoritativeMigrationSql, /public\.dd008c_refresh_audience_allowed\(location_id, audience\)/i);
+  assert.match(authoritativeMigrationSql, /revoke all on public\.dd008c_refresh_hints from anon, authenticated/i);
+  assert.match(authoritativeMigrationSql, /revoke all on public\.dd008c_realtime_subscription_tickets from anon, authenticated/i);
+  assert.doesNotMatch(authoritativeMigrationSql, /grant select on public\.dd008c_refresh_hints to authenticated/i);
+  assert.doesNotMatch(authoritativeMigrationSql, /grant select on public\.dd008c_realtime_subscription_tickets to (anon|authenticated)/i);
+  assert.doesNotMatch(authoritativeMigrationSql, /create policy dd008c_refresh_hints_staff_location_read/i);
+  assert.doesNotMatch(authoritativeMigrationSql, /using\s*\(\s*public\.dd008c_refresh_audience_allowed\(location_id,\s*audience\)\s*\)/i);
   assert.match(authoritativeMigrationSql, /create or replace function public\.dd008c_refresh_audience_allowed\(\s*p_location_id text,\s*p_audience text,\s*p_ticket_id text/i);
   assert.match(authoritativeMigrationSql, /public\.dd008c_refresh_permission_for_audience\(p_audience\)/i);
   assert.match(issueTicket, /public\.authorize_staff_access\(p_location_id, v_permission, p_workstation_mode, p_device_credential\)/i);
@@ -813,6 +818,9 @@ test("DD-008C realtime refresh is audience and workstation-device ticket scoped"
   assert.match(authoritativeContractSql, /manager on STAFF workstation denied cashier realtime/i);
   assert.match(authoritativeContractSql, /expected KDS denied cashier realtime/i);
   assert.match(authoritativeContractSql, /expected revoked device denied realtime/i);
+  assert.match(authoritativeContractSql, /expected authenticated raw refresh hint read to be blocked/i);
+  assert.match(browserSmokeScript, /execFileSync\("psql"/i);
+  assert.doesNotMatch(browserSmokeScript, /\.from\("dd008c_realtime_subscription_tickets"\)/i);
 });
 
 test("DD-008C app reuses pending command-intent idempotency keys", () => {

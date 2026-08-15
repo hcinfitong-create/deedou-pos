@@ -861,18 +861,18 @@ set local request.jwt.claim.sub = '20000000-0000-4000-8000-000000000001';
 set local request.jwt.claim.role = 'authenticated';
 
 do $$
+begin
+  perform 1 from public.dd008c_refresh_hints where location_id = 'deedou-demo' limit 1;
+  raise exception 'expected authenticated raw refresh hint read to be blocked';
+exception
+  when insufficient_privilege then null;
+end $$;
+
+do $$
 declare
-  v_hint_count integer;
   v_result record;
   v_cashier_ticket text;
 begin
-  select count(*) into v_hint_count
-  from public.dd008c_refresh_hints
-  where location_id = 'deedou-demo';
-  if v_hint_count <> 0 then
-    raise exception 'expected authenticated staff without realtime ticket to see no raw refresh hints, got %', v_hint_count;
-  end if;
-
   select * into v_result
   from public.dd008c_issue_realtime_ticket('deedou-demo', 'ops', 'CASHIER', 'dd008c-cashier-device')
   limit 1;
