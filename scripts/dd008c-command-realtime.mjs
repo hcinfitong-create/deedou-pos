@@ -116,6 +116,52 @@ assert(snapshot.orders.some((order) => order.id === orderId), "staff snapshot di
 let cashierSnapshot = await locationSnapshot(cashierClient, "CASHIER", deviceSecrets.cashier);
 assert(cashierSnapshot.orders.some((order) => order.id === orderId), "cashier snapshot did not converge to submitted order after independent refresh/refetch");
 
+const voidCandidate = await command(publicClient, "submit_qr_order", {
+  p_qr_token: qrToken,
+  p_items: [{ productId: "espresso", qty: 1 }],
+  p_note: "DD-008C authoritative void command",
+  p_idempotency_key: `${runId}_void_candidate`
+});
+assertCommand(voidCandidate, true, "", "public QR order for void command");
+const voidDenied = await command(staffClient, "void_order", {
+  p_location_id: LOCATION_ID,
+  p_order_id: voidCandidate.entity_id,
+  p_reason: "wrong workstation",
+  p_expected_version: voidCandidate.version,
+  p_idempotency_key: `${runId}_void_denied`,
+  p_workstation_mode: "STAFF",
+  p_device_credential: deviceSecrets.staff
+});
+assert(
+  voidDenied.ok === false && ["PERMISSION_DENIED", "DEVICE_MODE_DENIED"].includes(voidDenied.reason),
+  `staff workstation denied void_order expected permission/device denial, got ${JSON.stringify(voidDenied)}`
+);
+const voided = await command(cashierClient, "void_order", {
+  p_location_id: LOCATION_ID,
+  p_order_id: voidCandidate.entity_id,
+  p_reason: "authoritative void integration",
+  p_expected_version: voidCandidate.version,
+  p_idempotency_key: `${runId}_void_ok`,
+  p_workstation_mode: "CASHIER",
+  p_device_credential: deviceSecrets.cashier
+});
+assertCommand(voided, true, "", "cashier void_order accepted");
+const voidReplay = await command(cashierClient, "void_order", {
+  p_location_id: LOCATION_ID,
+  p_order_id: voidCandidate.entity_id,
+  p_reason: "authoritative void integration",
+  p_expected_version: voidCandidate.version,
+  p_idempotency_key: `${runId}_void_ok`,
+  p_workstation_mode: "CASHIER",
+  p_device_credential: deviceSecrets.cashier
+});
+assertCommand(voidReplay, true, "", "void_order idempotency replay");
+assert(voidReplay.version === voided.version, "void_order replay changed version");
+assertDedupCount("void_order", `${runId}_void_ok`, 1);
+assertOrderField(voidCandidate.entity_id, "status", "VOIDED", "void_order did not mark order VOIDED");
+await waitForRefresh(staffRefresh.events, (event) => refreshReason(event) === "ORDER_VOIDED" && refreshEntityId(event) === voidCandidate.entity_id, "staff void order refresh hint");
+await waitForRefresh(cashierRefresh.events, (event) => refreshReason(event) === "ORDER_VOIDED" && refreshEntityId(event) === voidCandidate.entity_id, "cashier void order refresh hint");
+
 const accepted = await command(staffClient, "set_order_status", {
   p_location_id: LOCATION_ID,
   p_order_id: orderId,
@@ -408,6 +454,11 @@ values
   (${lit(ids.managerStaffDevice)}, ${lit(LOCATION_ID)}, 'DD-008C Manager Staff Mode', 'STAFF', public.hash_device_credential(${lit(deviceSecrets.managerStaff)}), true, ${lit(ids.manager)}),
   (${lit(ids.revokedDevice)}, ${lit(LOCATION_ID)}, 'DD-008C Revoked', 'CASHIER', public.hash_device_credential(${lit(deviceSecrets.revoked)}), false, ${lit(ids.cashier)})
 on conflict (id) do nothing;
+
+update public.products
+set periods = array['morning','afternoon','evening']::text[]
+where location_id = ${lit(LOCATION_ID)}
+  and id in ('fried-rice', 'espresso', 'mango-tea');
 
 commit;
 `);

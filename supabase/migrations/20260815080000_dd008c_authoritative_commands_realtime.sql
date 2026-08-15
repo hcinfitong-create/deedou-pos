@@ -10,6 +10,67 @@ alter table public.table_sessions
 alter table public.service_requests
   add column if not exists version integer not null default 1;
 
+insert into public.permissions (id, permission_key, description)
+values ('orders.void', 'orders.void', 'Void unpaid order batches')
+on conflict (id) do update
+set permission_key = excluded.permission_key,
+    description = excluded.description;
+
+insert into public.role_permissions (role_id, permission_id)
+values
+  ('OWNER', 'orders.void'),
+  ('MANAGER', 'orders.void'),
+  ('CASHIER', 'orders.void')
+on conflict do nothing;
+
+create or replace function public.workstation_mode_allows_permission(p_mode text, p_permission_key text)
+returns boolean
+language sql
+immutable
+security definer
+set search_path = ''
+as $$
+  select case p_mode
+    when 'CASHIER' then p_permission_key in (
+      'menu.read',
+      'orders.read',
+      'orders.create_staff',
+      'orders.void',
+      'service_requests.read',
+      'tables.read',
+      'tables.manage_session',
+      'payments.read',
+      'payments.record',
+      'payments.void',
+      'payments.refund'
+    )
+    when 'STAFF' then p_permission_key in (
+      'menu.read',
+      'orders.read',
+      'orders.accept',
+      'service.serve',
+      'service_requests.read',
+      'service_requests.complete',
+      'course.manage',
+      'tables.read'
+    )
+    when 'KDS_KITCHEN' then p_permission_key in ('orders.read', 'kds.kitchen')
+    when 'KDS_BAR' then p_permission_key in ('orders.read', 'kds.bar')
+    when 'KDS_DESSERT' then p_permission_key in ('orders.read', 'kds.dessert')
+    when 'ADMIN' then p_permission_key in (
+      'menu.read',
+      'menu.manage',
+      'tables.read',
+      'payments.read',
+      'audit.read',
+      'staff.read',
+      'staff.manage',
+      'devices.manage'
+    )
+    else false
+  end
+$$;
+
 create table if not exists public.dd008c_refresh_hints (
   id uuid primary key default gen_random_uuid(),
   location_id text not null references public.locations(id) on delete cascade,
@@ -462,6 +523,134 @@ begin
 
   return v_number::integer;
 end
+$$;
+
+create or replace function public.dd008c_current_service_period(p_location_id text)
+returns text
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_timezone text;
+  v_hour integer;
+begin
+  select public.locations.timezone
+  into v_timezone
+  from public.locations
+  where public.locations.id = p_location_id;
+
+  v_hour := extract(hour from timezone(coalesce(nullif(v_timezone, ''), 'Asia/Saigon'), now()))::integer;
+  if v_hour < 11 then
+    return 'morning';
+  elsif v_hour < 17 then
+    return 'afternoon';
+  end if;
+  return 'evening';
+end
+$$;
+
+create or replace function public.dd008c_public_order_validation_reason(p_reason text)
+returns text
+language sql
+immutable
+security definer
+set search_path = ''
+as $$
+  select case coalesce(nullif(btrim(p_reason), ''), '')
+    when 'ITEMS_REQUIRED' then 'ITEMS_REQUIRED'
+    when 'INVALID_QUANTITY' then 'INVALID_QUANTITY'
+    when 'PRODUCT_UNAVAILABLE' then 'PRODUCT_UNAVAILABLE'
+    when 'PRODUCT_OUT_OF_PERIOD' then 'PRODUCT_OUT_OF_PERIOD'
+    when 'TABLE_NOT_FOUND' then 'TABLE_NOT_FOUND'
+    when 'VARIANT_REQUIRED' then 'VARIANT_REQUIRED'
+    when 'VARIANT_UNAVAILABLE' then 'VARIANT_UNAVAILABLE'
+    when 'VARIANT_NOT_ALLOWED' then 'VARIANT_NOT_ALLOWED'
+    when 'OPTION_COUNT_INVALID' then 'OPTION_COUNT_INVALID'
+    when 'MODIFIER_OPTION_UNAVAILABLE' then 'MODIFIER_OPTION_UNAVAILABLE'
+    when 'NEGATIVE_UNIT_PRICE' then 'NEGATIVE_UNIT_PRICE'
+    when 'TABLE_TOKEN_NOT_FOUND' then 'TABLE_TOKEN_NOT_FOUND'
+    when 'IDEMPOTENCY_KEY_REQUIRED' then 'IDEMPOTENCY_KEY_REQUIRED'
+    else 'ORDER_VALIDATION_FAILED'
+  end
+$$;
+
+create or replace function public.dd008c_public_menu_payload(p_location_id text)
+returns jsonb
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'id', public.products.id,
+    'kind', public.products.kind,
+    'category', public.products.category,
+    'vi', public.products.name_vi,
+    'en', public.products.name_en,
+    'descVi', public.products.desc_vi,
+    'descEn', public.products.desc_en,
+    'price', public.products.price_vnd,
+    'image', public.products.image_url,
+    'color', public.products.color,
+    'art', public.products.art,
+    'periods', public.products.periods,
+    'available', public.products.available,
+    'variants', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'id', public.product_variants.variant_key,
+        'vi', public.product_variants.name_vi,
+        'en', public.product_variants.name_en,
+        'priceDelta', public.product_variants.price_delta_vnd,
+        'available', public.product_variants.available
+      ) order by public.product_variants.display_order, public.product_variants.variant_key)
+      from public.product_variants
+      where public.product_variants.product_id = public.products.id
+        and public.product_variants.available = true
+    ), '[]'::jsonb),
+    'modifierGroups', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'id', public.modifier_groups.group_key,
+        'vi', public.modifier_groups.name_vi,
+        'en', public.modifier_groups.name_en,
+        'required', public.modifier_groups.required,
+        'multiple', public.modifier_groups.multiple,
+        'minSelect', public.modifier_groups.min_select,
+        'maxSelect', public.modifier_groups.max_select,
+        'options', coalesce((
+          select jsonb_agg(jsonb_build_object(
+            'id', public.modifier_options.option_key,
+            'vi', public.modifier_options.name_vi,
+            'en', public.modifier_options.name_en,
+            'priceDelta', public.modifier_options.price_delta_vnd,
+            'available', public.modifier_options.available
+          ) order by public.modifier_options.display_order, public.modifier_options.option_key)
+          from public.modifier_options
+          where public.modifier_options.modifier_group_id = public.modifier_groups.id
+            and public.modifier_options.available = true
+        ), '[]'::jsonb)
+      ) order by public.product_modifier_groups.display_order, public.modifier_groups.display_order, public.modifier_groups.group_key)
+      from public.product_modifier_groups
+      join public.modifier_groups
+        on public.modifier_groups.id = public.product_modifier_groups.modifier_group_id
+       and public.modifier_groups.location_id = public.products.location_id
+      where public.product_modifier_groups.product_id = public.products.id
+    ), '[]'::jsonb),
+    'components', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'key', public.product_components.component_key,
+        'vi', public.product_components.name_vi,
+        'en', public.product_components.name_en,
+        'qty', public.product_components.qty
+      ) order by public.product_components.display_order, public.product_components.component_key)
+      from public.product_components
+      where public.product_components.parent_product_id = public.products.id
+    ), '[]'::jsonb)
+  ) order by public.products.kind, public.products.category, public.products.name_vi, public.products.id), '[]'::jsonb)
+  from public.products
+  where public.products.location_id = p_location_id
+    and public.products.available = true
 $$;
 
 create or replace function public.dd008c_emit_refresh(
@@ -963,6 +1152,7 @@ begin
 
   select jsonb_build_object(
     'locationId', p_location_id,
+    'products', public.dd008c_public_menu_payload(p_location_id),
     'orders', coalesce((
       select jsonb_agg(public.dd008c_order_payload(public.orders.id, v_can_read_payments) order by public.orders.created_at desc, public.orders.id)
       from public.orders
@@ -1034,6 +1224,7 @@ begin
   select jsonb_build_object(
     'locationId', v_table.location_id,
     'table', jsonb_build_object('code', v_table.code, 'zone', v_table.zone),
+    'products', public.dd008c_public_menu_payload(v_table.location_id),
     'tableSession', case when v_session_id is null then null else public.dd008c_table_session_payload(v_session_id) end,
     'orders', coalesce((
       select jsonb_agg(public.dd008c_order_payload(public.orders.id, false) order by public.orders.created_at desc, public.orders.id)
@@ -1236,6 +1427,10 @@ begin
     limit 1;
     if v_product.id is null then
       raise exception 'PRODUCT_UNAVAILABLE';
+    end if;
+    if coalesce(array_length(v_product.periods, 1), 0) > 0
+      and not (public.dd008c_current_service_period(p_location_id) = any(v_product.periods)) then
+      raise exception 'PRODUCT_OUT_OF_PERIOD';
     end if;
 
     v_selection := coalesce(v_item->'selection', '{}'::jsonb);
@@ -1563,7 +1758,7 @@ begin
     );
   exception
     when others then
-      return query select * from public.dd008c_failure('VALIDATION_ERROR', SQLERRM);
+      return query select * from public.dd008c_failure('VALIDATION_ERROR', public.dd008c_public_order_validation_reason(SQLERRM));
       return;
   end;
 
@@ -1884,6 +2079,123 @@ begin
 end
 $$;
 
+create or replace function public.void_order(
+  p_location_id text,
+  p_order_id text,
+  p_reason text default '',
+  p_expected_version integer default null,
+  p_idempotency_key text default '',
+  p_workstation_mode text default '',
+  p_device_credential text default ''
+)
+returns table (
+  ok boolean,
+  category text,
+  reason text,
+  entity_type text,
+  entity_id text,
+  version integer,
+  payload jsonb
+)
+language plpgsql
+volatile
+security definer
+set search_path = ''
+as $$
+declare
+  v_authz record;
+  v_order public.orders;
+  v_summary record;
+  v_reason text := left(coalesce(nullif(btrim(p_reason), ''), 'Cashier void order'), 500);
+  v_key text := nullif(btrim(coalesce(p_idempotency_key, '')), '');
+  v_hash text := public.dd008c_hash_request(jsonb_build_object(
+    'locationId', p_location_id,
+    'orderId', p_order_id,
+    'reason', v_reason,
+    'expectedVersion', p_expected_version
+  ));
+  v_existing public.command_deduplication;
+  v_result jsonb;
+begin
+  select * into v_authz from public.dd008c_authorize_command(p_location_id, 'orders.void', p_workstation_mode, p_device_credential) limit 1;
+  if v_authz.ok is distinct from true then
+    return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order', 'order', p_order_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED'));
+    return;
+  end if;
+  if v_key is null then
+    return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order', 'order', p_order_id, 'VALIDATION_ERROR', 'IDEMPOTENCY_KEY_REQUIRED');
+    return;
+  end if;
+
+  perform pg_advisory_xact_lock(hashtext('void_order:' || p_location_id || ':' || v_key));
+  select * into v_existing
+  from public.command_deduplication
+  where location_id = p_location_id
+    and command_key = v_key
+    and command = 'void_order'
+  for update;
+  if v_existing.id is not null then
+    if v_existing.request_hash <> v_hash then
+      return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order', 'order', p_order_id, 'CONFLICT', 'IDEMPOTENCY_KEY_REUSED');
+      return;
+    end if;
+    return query select * from public.dd008c_result_from_json(v_existing.result_reference::jsonb);
+    return;
+  end if;
+
+  select * into v_order
+  from public.orders
+  where id = p_order_id
+    and location_id = p_location_id
+  for update;
+  if v_order.id is null then
+    return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order', 'order', p_order_id, 'VALIDATION_ERROR', 'ORDER_NOT_FOUND');
+    return;
+  end if;
+  if p_expected_version is not null and v_order.version <> p_expected_version then
+    return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order', 'order', p_order_id, 'CONFLICT', 'STALE_VERSION', jsonb_build_object('currentVersion', v_order.version));
+    return;
+  end if;
+  if v_order.status in ('PAID', 'VOIDED', 'REJECTED', 'REFUNDED', 'PARTIALLY_REFUNDED') then
+    return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order', 'order', p_order_id, 'INVALID_STATE', 'ORDER_TERMINAL');
+    return;
+  end if;
+
+  select * into v_summary from public.dd008c_payment_status_for_order(p_order_id) limit 1;
+  if coalesce(v_summary.effective_paid_vnd, 0) > 0 or coalesce(v_summary.refunded_vnd, 0) > 0 then
+    return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order', 'order', p_order_id, 'INVALID_STATE', 'PAYMENT_EXISTS');
+    return;
+  end if;
+
+  update public.order_lines
+  set item_status = 'CANCELLED'
+  where order_id = p_order_id;
+
+  update public.orders
+  set status = 'VOIDED',
+      station_status = '{}'::jsonb,
+      version = public.orders.version + 1
+  where id = p_order_id
+  returning * into v_order;
+
+  v_result := public.dd008c_result_json(
+    true,
+    'OK',
+    '',
+    'order',
+    p_order_id,
+    v_order.version,
+    jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true))
+  );
+  perform public.dd008c_audit_staff_result(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'void_order', 'order', p_order_id, v_result, jsonb_build_object('reason', v_reason));
+  insert into public.command_deduplication (location_id, command_key, command, actor_type, actor_id, request_hash, result_reference)
+  values (p_location_id, v_key, 'void_order', 'STAFF', v_authz.staff_profile_id, v_hash, v_result::text);
+  perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'ORDER_VOIDED'));
+  perform public.dd008c_emit_refresh(p_location_id, 'cashier', 'order', p_order_id, jsonb_build_object('reason', 'ORDER_VOIDED'));
+  return query select * from public.dd008c_result_from_json(v_result);
+end
+$$;
+
 create or replace function public.dd008c_station_permission(p_station_code text)
 returns text
 language sql
@@ -2061,7 +2373,7 @@ declare
 begin
   select * into v_authz from public.dd008c_authorize_command(p_location_id, 'service.serve', p_workstation_mode, p_device_credential) limit 1;
   if v_authz.ok is distinct from true then
-    return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'serve_all_ready', 'order', p_order_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED'));
+    return query select * from public.dd008c_audited_failure(p_location_id, v_authz.staff_profile_id, v_authz.device_id, 'serve_order_line', 'order', p_order_id, 'FORBIDDEN', coalesce(v_authz.reason, 'PERMISSION_DENIED'));
     return;
   end if;
   v_replay := public.dd008c_replay_command(p_location_id, 'serve_order_line', p_idempotency_key, v_hash);
@@ -2974,6 +3286,9 @@ revoke all on function public.dd008c_hash_request(jsonb) from public;
 revoke all on function public.dd008c_replay_command(text, text, text, text) from public;
 revoke all on function public.dd008c_store_command(text, text, text, text, text, text, jsonb) from public;
 revoke all on function public.dd008c_normalize_positive_integer(jsonb) from public;
+revoke all on function public.dd008c_current_service_period(text) from public;
+revoke all on function public.dd008c_public_order_validation_reason(text) from public;
+revoke all on function public.dd008c_public_menu_payload(text) from public;
 revoke all on function public.dd008c_emit_refresh(text, text, text, text, jsonb) from public;
 revoke all on function public.dd008c_write_audit(text, text, text, text, text, text, text, text, text, jsonb) from public;
 revoke all on function public.dd008c_audit_staff_result(text, text, text, text, text, text, jsonb, jsonb) from public;
@@ -3000,6 +3315,7 @@ revoke all on function public.dd008c_get_public_table_snapshot(text) from public
 revoke all on function public.dd008c_get_location_snapshot(text, text, text) from public;
 revoke all on function public.create_staff_order(text, jsonb, text, text, text, text, text, text) from public;
 revoke all on function public.set_order_status(text, text, text, integer, text, text, text) from public;
+revoke all on function public.void_order(text, text, text, integer, text, text, text) from public;
 revoke all on function public.update_kds_line_prep(text, text, text[], text, integer, text, text, text) from public;
 revoke all on function public.serve_order_line(text, text, text, integer, integer, text, text, text) from public;
 revoke all on function public.serve_all_ready(text, text, integer, text, text, text) from public;
@@ -3026,6 +3342,7 @@ grant execute on function public.dd008c_refresh_audience_allowed(text, text, tex
 grant execute on function public.dd008c_get_location_snapshot(text, text, text) to authenticated;
 grant execute on function public.create_staff_order(text, jsonb, text, text, text, text, text, text) to authenticated;
 grant execute on function public.set_order_status(text, text, text, integer, text, text, text) to authenticated;
+grant execute on function public.void_order(text, text, text, integer, text, text, text) to authenticated;
 grant execute on function public.update_kds_line_prep(text, text, text[], text, integer, text, text, text) to authenticated;
 grant execute on function public.serve_order_line(text, text, text, integer, integer, text, text, text) to authenticated;
 grant execute on function public.serve_all_ready(text, text, integer, text, text, text) to authenticated;

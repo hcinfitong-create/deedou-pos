@@ -97,7 +97,8 @@ try {
   console.log("SUPABASE browser: manager Location A staff allow, manager Location B denied");
   console.log("SUPABASE browser: cashier Location B denied, inactive denied, wrong/revoked workstation denied, local logout returned to sign-in gate");
   console.log("SUPABASE browser: authoritative route left legacy localStorage business state unchanged");
-  console.log("SUPABASE browser: multi-context realtime customer QR -> staff accept -> KDS prep/ready -> staff serve -> cashier partial/final payment -> staff reconnect convergence");
+  console.log("SUPABASE browser: PostgreSQL catalog price/availability rendered in customer QR and cashier counter menu");
+  console.log("SUPABASE browser: multi-context realtime customer QR -> staff accept -> KDS prep/ready -> staff serve -> cashier partial/final payment -> authoritative void -> staff reconnect convergence");
   console.log("zero app console errors");
 } catch (error) {
   printCollectedDiagnostics(consoleErrors);
@@ -166,6 +167,27 @@ values
   (${lit(ids.revokedDevice)}, ${lit(ids.locationA)}, 'Browser Smoke Revoked', 'CASHIER', public.hash_device_credential(${lit(deviceSecrets.revoked)}), false, ${lit(ids.owner)})
 on conflict (id) do nothing;
 
+update public.products
+set periods = array['morning','afternoon','evening']::text[],
+    price_vnd = case when id = 'espresso' then 41000 else price_vnd end,
+    available = case when id = 'coconut-coffee' then false else available end
+where location_id = ${lit(ids.locationA)}
+  and id in ('fried-rice', 'espresso', 'mango-tea', 'coconut-coffee');
+
+update public.product_variants
+set available = false
+where product_id = 'mango-tea'
+  and variant_key = 'large';
+
+update public.modifier_options
+set available = false
+where option_key = 'aloe-vera'
+  and modifier_group_id in (
+    select id
+    from public.modifier_groups
+    where location_id = ${lit(ids.locationA)}
+  );
+
 commit;
 `);
 
@@ -216,6 +238,10 @@ async function runSupabaseSmoke(activeBrowser, baseUrl, users, errorSink) {
       await verifySignedOutGateNoFlash(cashierPage, `${baseUrl}/index.html?v=dd008c-supabase#/cashier`, "Cashier POS");
       await loginThroughGate(cashierPage, users.cashier, ids.locationA, "CASHIER");
       await expectAuthoritativeAuthorized(cashierPage, "Cashier");
+      await cashierPage.locator("[data-counter-open]").first().click();
+      await waitForBodyIncludes(cashierPage, "41.000 đ", "cashier PostgreSQL catalog price");
+      assertNotContains(await bodyText(cashierPage), "Cà phê dừa", "cashier PostgreSQL catalog availability");
+      assertNotContains(await bodyText(cashierPage), "Coconut Coffee", "cashier PostgreSQL catalog availability");
       await expectLegacyBusinessStateUnchanged(cashierPage, "Cashier");
     });
 
@@ -442,6 +468,28 @@ async function runOperationalRealtimeE2E(activeBrowser, baseUrl, users, errorSin
       await waitForBodyIncludes(cashierPage, "PAID", "cashier sees final payment");
       await waitForBodyIncludes(staffPage, orderNo, "staff remains operational after cashier payment");
 
+      const voidNote = `DD-008C browser void order ${runId}`;
+      const { data: voidData, error: voidError } = await publicClient.rpc("submit_qr_order", {
+        p_qr_token: "beach-a01-47VLmz",
+        p_items: [{ productId: "espresso", qty: 1 }],
+        p_note: voidNote,
+        p_idempotency_key: `${runId}_browser_void_order_submit`
+      });
+      const voidSubmit = Array.isArray(voidData) ? voidData[0] : voidData;
+      if (voidError || voidSubmit?.ok !== true) {
+        throw new Error(`public QR order for cashier void failed: ${voidError?.message || JSON.stringify(voidSubmit)}`);
+      }
+      const voidOrderNo = voidSubmit.payload?.order?.orderNo || voidSubmit.entity_id;
+      await cashierPage.locator('[data-select-table="A01"]').click().catch(() => {});
+      await waitForBodyIncludes(cashierPage, voidOrderNo, "cashier sees unpaid QR order before void");
+      const voidCard = cashierPage.locator(".order-card").filter({ hasText: voidOrderNo }).first();
+      await voidCard.locator("[data-void]").first().click();
+      await cashierPage.locator(`[data-void-reason="${voidSubmit.entity_id}"]`).fill("browser smoke void unpaid");
+      await cashierPage.locator(`[data-void-confirm="${voidSubmit.entity_id}"]`).click();
+      await waitForBodyIncludes(cashierPage, "VOIDED", "cashier sees authoritative voided order");
+      await waitForBodyIncludes(cashierPage, voidOrderNo, "cashier sees voided order in closed history");
+      assertNotContains(await bodyText(kitchenPage), voidOrderNo, "KDS should not show cashier-voided pending order");
+
       await staffContext.close();
       staffClosedForReconnect = true;
       const { data, error } = await publicClient.rpc("create_service_request", {
@@ -497,6 +545,9 @@ async function verifyPublicQrSignedOut(activeBrowser, baseUrl, errorSink) {
       await assertAppReady(page, "SUPABASE public QR");
       assert.equal(await page.locator(".auth-gate").count(), 0, "public QR should not require staff sign-in");
       assertContains(await bodyText(page), "DeeDou", "public QR");
+      await waitForBodyIncludes(page, "41.000 đ", "public QR PostgreSQL catalog price");
+      assertNotContains(await bodyText(page), "Cà phê dừa", "public QR PostgreSQL catalog availability");
+      assertNotContains(await bodyText(page), "Coconut Coffee", "public QR PostgreSQL catalog availability");
     });
   } finally {
     await context.close();
@@ -645,8 +696,10 @@ function isRelevantNetworkUrl(rawUrl) {
       || path === "/rest/v1/rpc/authorize_staff_access"
       || path === "/rest/v1/rpc/get_my_staff_context"
       || path === "/rest/v1/rpc/dd008c_issue_realtime_ticket"
+      || path === "/rest/v1/rpc/dd008c_get_location_snapshot"
       || path === "/rest/v1/rpc/submit_qr_order"
-      || path === "/rest/v1/rpc/dd008c_get_public_table_snapshot";
+      || path === "/rest/v1/rpc/dd008c_get_public_table_snapshot"
+      || path === "/rest/v1/rpc/void_order";
   } catch {
     return false;
   }
@@ -721,15 +774,38 @@ async function expectLegacyBusinessStateUnchanged(page, routeLabel) {
   const storageKey = "deedou_state";
   const sentinelState = JSON.stringify({
     cart: [{ id: "legacy-sentinel", qty: 1 }],
-    orders: [],
+    orders: [{
+      id: "legacy-sentinel-order",
+      orderNo: "LEGACY-SENTINEL",
+      table: "A01",
+      zone: "Beach",
+      status: "ACCEPTED",
+      total: 12345,
+      items: [{ id: "legacy-sentinel-item", lineId: "legacy-sentinel:item", nameVi: "LEGACY SENTINEL ITEM", nameEn: "LEGACY SENTINEL ITEM", qty: 1, price: 12345, status: "QUEUED" }],
+      serviceMode: "TABLE_SERVICE",
+      fulfillmentType: "DINE_IN",
+      orderSource: "STAFF"
+    }],
     events: [],
     audit: [],
     sequence: 987,
     tableSessions: []
   });
-  await page.evaluate(([key, value]) => window.localStorage.setItem(key, value), [storageKey, sentinelState]);
+  await page.evaluate(([key, value]) => {
+    window.localStorage.setItem(key, value);
+    window.dispatchEvent(new StorageEvent("storage", { key, newValue: value, storageArea: window.localStorage }));
+    if ("BroadcastChannel" in window) {
+      const channel = new BroadcastChannel("deedou-pos");
+      channel.postMessage({ type: "sync", at: Date.now() });
+      channel.close();
+    }
+  }, [storageKey, sentinelState]);
+  await expectAuthoritativeAuthorized(page, routeLabel);
+  assertNotContains(await bodyText(page), "LEGACY-SENTINEL", `${routeLabel} storage event should not replace authoritative state`);
+  assertNotContains(await bodyText(page), "LEGACY SENTINEL ITEM", `${routeLabel} broadcast should not replace authoritative state`);
   await page.reload({ waitUntil: "domcontentloaded" });
   await expectAuthoritativeAuthorized(page, routeLabel);
+  assertNotContains(await bodyText(page), "LEGACY-SENTINEL", `${routeLabel} reload should not use legacy business state`);
   const stored = await page.evaluate((key) => window.localStorage.getItem(key), storageKey);
   assert.equal(stored, sentinelState, "SUPABASE authoritative route must not mutate legacy localStorage business state");
 }

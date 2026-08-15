@@ -115,6 +115,17 @@ export function createAuthoritativeBackendApi(options = {}) {
     }));
   }
 
+  async function voidOrder({ orderId, reason, expectedVersion, idempotencyKey } = {}) {
+    return rpc("void_order", staffParams({
+      params: {
+        p_order_id: text(orderId),
+        p_reason: text(reason),
+        p_expected_version: optionalInteger(expectedVersion),
+        p_idempotency_key: text(idempotencyKey)
+      }
+    }));
+  }
+
   async function updateKdsLinePrep({ orderId, lineIds, nextPrepStatus, expectedVersion, idempotencyKey } = {}) {
     return rpc("update_kds_line_prep", staffParams({
       params: {
@@ -322,6 +333,7 @@ export function createAuthoritativeBackendApi(options = {}) {
     completeServiceRequest,
     createStaffOrder,
     setOrderStatus,
+    voidOrder,
     updateKdsLinePrep,
     serveOrderLine,
     serveAllReady,

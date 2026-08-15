@@ -76,6 +76,20 @@ values
   ('dd008c-dev-revoked', 'deedou-demo', 'DD-008C Revoked Cashier', 'CASHIER', public.hash_device_credential('dd008c-revoked-device'), false, 'dd008c-staff-cashier')
 on conflict (id) do nothing;
 
+update public.products
+set periods = array['morning','afternoon','evening']::text[]
+where location_id = 'deedou-demo'
+  and id in ('fried-rice', 'espresso', 'mango-tea');
+
+insert into public.products (id, location_id, kind, category, name_vi, name_en, desc_vi, desc_en, price_vnd, station_code, available, periods)
+values
+  ('dd008c-period-in', 'deedou-demo', 'FOOD', 'rice', 'Mon trong khung gio', 'In-period dish', '', '', 1000, 'KITCHEN_HOT', true, array[public.dd008c_current_service_period('deedou-demo')]::text[]),
+  ('dd008c-period-out', 'deedou-demo', 'FOOD', 'rice', 'Mon ngoai khung gio', 'Out-of-period dish', '', '', 1000, 'KITCHEN_HOT', true, array[case when public.dd008c_current_service_period('deedou-demo') = 'morning' then 'evening' else 'morning' end]::text[]),
+  ('dd008c-unavailable-catalog', 'deedou-demo', 'DRINK', 'coffee', 'An trong catalog', 'Hidden catalog item', '', '', 1000, 'BAR_COFFEE', false, array['morning','afternoon','evening']::text[])
+on conflict (id) do update
+set periods = excluded.periods,
+    available = excluded.available;
+
 set local role anon;
 set local request.jwt.claim.sub = '';
 
@@ -141,6 +155,73 @@ begin
   if v_result.ok <> false or v_result.reason <> 'TABLE_TOKEN_NOT_FOUND' then
     raise exception 'expected exact-token public resolver failure, got %/%', v_result.category, v_result.reason;
   end if;
+
+  select * into v_result
+  from public.dd008c_get_public_table_snapshot('dd008c-d01-token-47VLmz')
+  limit 1;
+  if v_result.ok <> true then
+    raise exception 'expected public table snapshot accepted, got %/%', v_result.category, v_result.reason;
+  end if;
+  if (v_result.payload->'products')::text like '%station_code%' or (v_result.payload->'products')::text like '%"station"%' then
+    raise exception 'public catalog snapshot leaked station routing: %', v_result.payload->'products';
+  end if;
+  select count(*) into v_count
+  from jsonb_array_elements(v_result.payload->'products') product
+  where product->>'id' = 'mango-tea'
+    and jsonb_array_length(product->'variants') > 0
+    and jsonb_array_length(product->'modifierGroups') > 0;
+  if v_count <> 1 then
+    raise exception 'expected public catalog snapshot to include configured mango-tea options';
+  end if;
+  select count(*) into v_count
+  from jsonb_array_elements(v_result.payload->'products') product
+  where product->>'id' = 'bbq-couple'
+    and jsonb_array_length(product->'components') > 0;
+  if v_count <> 1 then
+    raise exception 'expected public catalog snapshot to include public combo component info';
+  end if;
+  select count(*) into v_count
+  from jsonb_array_elements(v_result.payload->'products') product
+  where product->>'id' = 'dd008c-unavailable-catalog';
+  if v_count <> 0 then
+    raise exception 'public catalog snapshot exposed unavailable product';
+  end if;
+
+  select * into v_result
+  from public.submit_qr_order(
+    'dd008c-d01-token-47VLmz',
+    '[{"productId":"dd008c-period-in","qty":1}]'::jsonb,
+    'server-side service period accepted',
+    'dd008c-period-in'
+  )
+  limit 1;
+  if v_result.ok <> true then
+    raise exception 'expected in-period product accepted, got %/%', v_result.category, v_result.reason;
+  end if;
+
+  select * into v_result
+  from public.submit_qr_order(
+    'dd008c-d01-token-47VLmz',
+    '[{"productId":"dd008c-period-out","qty":1}]'::jsonb,
+    'server-side service period rejected',
+    'dd008c-period-out'
+  )
+  limit 1;
+  if v_result.ok <> false or v_result.reason <> 'PRODUCT_OUT_OF_PERIOD' then
+    raise exception 'expected out-of-period product rejected, got %/%', v_result.category, v_result.reason;
+  end if;
+
+  select * into v_result
+  from public.submit_qr_order(
+    'dd008c-d01-token-47VLmz',
+    '[{"productId":"mango-tea","qty":1,"selection":{"variantId":"regular","modifierSelections":{"sugar":{}}}}]'::jsonb,
+    'malformed public QR shape',
+    'dd008c-public-qr-malformed-options'
+  )
+  limit 1;
+  if v_result.ok <> false or v_result.reason <> 'ORDER_VALIDATION_FAILED' then
+    raise exception 'expected public-safe unknown validation reason, got %/%', v_result.category, v_result.reason;
+  end if;
 end $$;
 
 reset role;
@@ -197,7 +278,9 @@ values
   ('dd008c-order-skip', 'deedou-demo', 'DD008C-SKIP', 'dd008c-session-d02', 'dd008c-table-d02', 'TABLE_SERVICE', 'DINE_IN', 'CUSTOMER_QR', 'Contract', 'D02', 'PENDING_ACCEPTANCE', 99000, 1),
   ('dd008c-order-multi', 'deedou-demo', 'DD008C-MULTI', 'dd008c-session-d02', 'dd008c-table-d02', 'TABLE_SERVICE', 'DINE_IN', 'CUSTOMER_QR', 'Contract', 'D02', 'ACCEPTED', 154000, 1),
   ('dd008c-order-partial', 'deedou-demo', 'DD008C-PARTIAL', 'dd008c-session-d02', 'dd008c-table-d02', 'TABLE_SERVICE', 'DINE_IN', 'STAFF', 'Contract', 'D02', 'SERVED', 99000, 1),
-  ('dd008c-order-course', 'deedou-demo', 'DD008C-COURSE', 'dd008c-session-d02', 'dd008c-table-d02', 'TABLE_SERVICE', 'DINE_IN', 'STAFF', 'Contract', 'D02', 'ACCEPTED', 99000, 1)
+  ('dd008c-order-course', 'deedou-demo', 'DD008C-COURSE', 'dd008c-session-d02', 'dd008c-table-d02', 'TABLE_SERVICE', 'DINE_IN', 'STAFF', 'Contract', 'D02', 'ACCEPTED', 99000, 1),
+  ('dd008c-order-void', 'deedou-demo', 'DD008C-VOID', 'dd008c-session-d02', 'dd008c-table-d02', 'TABLE_SERVICE', 'DINE_IN', 'STAFF', 'Contract', 'D02', 'ACCEPTED', 99000, 1),
+  ('dd008c-order-void-paid', 'deedou-demo', 'DD008C-VOID-PAID', 'dd008c-session-d02', 'dd008c-table-d02', 'TABLE_SERVICE', 'DINE_IN', 'STAFF', 'Contract', 'D02', 'SERVED', 99000, 1)
 on conflict (id) do nothing;
 
 insert into public.order_lines (id, order_id, line_id, product_id, station_code, name_vi, name_en, qty, bill_qty, price_vnd, prep_status, item_status, hold_state, queued_at)
@@ -207,8 +290,14 @@ values
   ('dd008c-line-multi-hot', 'dd008c-order-multi', 'fried-rice:1:item', 'fried-rice', 'KITCHEN_HOT', 'Com chien hai san', 'Seafood Fried Rice', 1, 1, 99000, 'QUEUED', 'QUEUED', 'FIRED', now()),
   ('dd008c-line-multi-tea', 'dd008c-order-multi', 'mango-tea:2:item', 'mango-tea', 'BAR_TEA', 'Tra xoai', 'Mango Tea', 1, 1, 55000, 'QUEUED', 'QUEUED', 'FIRED', now()),
   ('dd008c-line-partial-rice', 'dd008c-order-partial', 'fried-rice:1:item', 'fried-rice', 'KITCHEN_HOT', 'Com chien hai san', 'Seafood Fried Rice', 1, 1, 99000, 'READY', 'SERVED', 'FIRED', now()),
-  ('dd008c-line-course-rice', 'dd008c-order-course', 'fried-rice:1:item', 'fried-rice', 'KITCHEN_HOT', 'Com chien hai san', 'Seafood Fried Rice', 1, 1, 99000, 'QUEUED', 'QUEUED', 'FIRED', now())
+  ('dd008c-line-course-rice', 'dd008c-order-course', 'fried-rice:1:item', 'fried-rice', 'KITCHEN_HOT', 'Com chien hai san', 'Seafood Fried Rice', 1, 1, 99000, 'QUEUED', 'QUEUED', 'FIRED', now()),
+  ('dd008c-line-void-rice', 'dd008c-order-void', 'fried-rice:1:item', 'fried-rice', 'KITCHEN_HOT', 'Com chien hai san', 'Seafood Fried Rice', 1, 1, 99000, 'QUEUED', 'QUEUED', 'FIRED', now()),
+  ('dd008c-line-void-paid-rice', 'dd008c-order-void-paid', 'fried-rice:1:item', 'fried-rice', 'KITCHEN_HOT', 'Com chien hai san', 'Seafood Fried Rice', 1, 1, 99000, 'READY', 'SERVED', 'FIRED', now())
 on conflict (order_id, line_id) do nothing;
+
+insert into public.payment_transactions (id, location_id, order_id, type, method, provider, amount_vnd, note)
+values ('dd008c-payment-void-paid', 'deedou-demo', 'dd008c-order-void-paid', 'PAYMENT', 'CASH', 'MANUAL', 99000, 'void guard fixture')
+on conflict (id) do nothing;
 
 set local role authenticated;
 set local request.jwt.claim.sub = '20000000-0000-4000-8000-000000000002';
@@ -241,6 +330,130 @@ begin
 end $$;
 
 reset role;
+
+set local role authenticated;
+set local request.jwt.claim.sub = '20000000-0000-4000-8000-000000000002';
+set local request.jwt.claim.role = 'authenticated';
+
+do $$
+declare
+  v_result record;
+begin
+  select * into v_result
+  from public.void_order('deedou-demo', 'dd008c-order-void', 'wrong role', 1, 'dd008c-void-staff-denied', 'STAFF', 'dd008c-staff-device')
+  limit 1;
+  if v_result.ok <> false or v_result.category <> 'FORBIDDEN' then
+    raise exception 'expected non-cashier void denied, got %/%', v_result.category, v_result.reason;
+  end if;
+end $$;
+
+reset role;
+
+set local role authenticated;
+set local request.jwt.claim.sub = '20000000-0000-4000-8000-000000000001';
+set local request.jwt.claim.role = 'authenticated';
+
+do $$
+declare
+  v_result record;
+  v_void_version integer;
+begin
+  select * into v_result
+  from public.void_order('deedou-demo', 'dd008c-order-void', 'stale guard', 99, 'dd008c-void-stale', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> false or v_result.reason <> 'STALE_VERSION' then
+    raise exception 'expected stale void blocked, got %/%', v_result.category, v_result.reason;
+  end if;
+
+  select * into v_result
+  from public.void_order('deedou-demo', 'dd008c-order-void-paid', 'paid guard', 1, 'dd008c-void-paid-blocked', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> false or v_result.reason <> 'PAYMENT_EXISTS' then
+    raise exception 'expected paid order void blocked, got %/%', v_result.category, v_result.reason;
+  end if;
+
+  select * into v_result
+  from public.void_order('deedou-demo', 'dd008c-order-void', 'customer changed mind', 1, 'dd008c-void-ok', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> true or v_result.version <> 2 then
+    raise exception 'expected void accepted version 2, got %/%/%', v_result.ok, v_result.reason, v_result.version;
+  end if;
+  v_void_version := v_result.version;
+
+  select * into v_result
+  from public.void_order('deedou-demo', 'dd008c-order-void', 'customer changed mind', 1, 'dd008c-void-ok', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> true or v_result.version <> v_void_version then
+    raise exception 'expected void idempotency replay without mutation, got %/%/%', v_result.ok, v_result.reason, v_result.version;
+  end if;
+
+  select * into v_result
+  from public.void_order('deedou-demo', 'dd008c-order-void', 'different reason', 1, 'dd008c-void-ok', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> false or v_result.category <> 'CONFLICT' then
+    raise exception 'expected void idempotency conflict, got %/%', v_result.category, v_result.reason;
+  end if;
+end $$;
+
+reset role;
+
+do $$
+declare
+  v_status text;
+  v_line_status text;
+  v_paid_status text;
+  v_hint_count integer;
+begin
+  select status into v_status from public.orders where id = 'dd008c-order-void';
+  if v_status <> 'VOIDED' then
+    raise exception 'expected order voided, got %', v_status;
+  end if;
+
+  select item_status into v_line_status from public.order_lines where order_id = 'dd008c-order-void' and line_id = 'fried-rice:1:item';
+  if v_line_status <> 'CANCELLED' then
+    raise exception 'expected voided order line cancelled, got %', v_line_status;
+  end if;
+
+  select status into v_paid_status from public.orders where id = 'dd008c-order-void-paid';
+  if v_paid_status <> 'SERVED' then
+    raise exception 'payment-blocked void mutated paid order status: %', v_paid_status;
+  end if;
+
+  select count(*) into v_hint_count
+  from public.dd008c_refresh_hints
+  where location_id = 'deedou-demo'
+    and entity_type = 'order'
+    and entity_id = 'dd008c-order-void'
+    and payload->>'reason' = 'ORDER_VOIDED'
+    and audience in ('ops', 'cashier');
+  if v_hint_count <> 2 then
+    raise exception 'expected void order ops/cashier refresh hints, got %', v_hint_count;
+  end if;
+
+  if not exists (
+    select 1 from public.audit_events
+    where location_id = 'deedou-demo'
+      and command = 'void_order'
+      and target_id = 'dd008c-order-void'
+      and outcome = 'OK'
+      and staff_id = 'dd008c-staff-cashier'
+      and device_id = 'dd008c-dev-cashier'
+      and metadata->>'reason' = 'customer changed mind'
+  ) then
+    raise exception 'expected successful void order audit metadata';
+  end if;
+
+  if not exists (
+    select 1 from public.audit_events
+    where location_id = 'deedou-demo'
+      and command = 'void_order'
+      and target_id = 'dd008c-order-void-paid'
+      and outcome = 'INVALID_STATE'
+      and metadata->>'reason' = 'PAYMENT_EXISTS'
+  ) then
+    raise exception 'expected payment-blocked void audit';
+  end if;
+end $$;
 
 set local role authenticated;
 set local request.jwt.claim.sub = '20000000-0000-4000-8000-000000000002';

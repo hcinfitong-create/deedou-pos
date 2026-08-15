@@ -249,6 +249,7 @@ test("DD-008C app routes authoritative commands instead of SUPABASE localStorage
     "completeServiceRequest",
     "createStaffOrder",
     "setOrderStatus",
+    "voidOrder",
     "updateKdsLinePrep",
     "serveOrderLine",
     "serveAllReady",
@@ -265,6 +266,11 @@ test("DD-008C app routes authoritative commands instead of SUPABASE localStorage
     assert.match(appSource, new RegExp(`authoritativeBackendApi\\.${apiName}`));
   });
   assert.match(appSource, /if \(backendConfig\.mode === BACKEND_MODES\.SUPABASE\) \{\s*state = defaultState\(\);\s*\}/);
+  assert.match(appSource, /products = \[\];/);
+  assert.match(appSource, /function handleExternalBusinessSignal/);
+  assert.match(appSource, /refreshSupabaseAuthoritativeStateFromRoute/);
+  assert.match(appSource, /applySupabaseCatalogProducts\(payload\.products\)/);
+  assert.doesNotMatch(appSource, /authoritativeBackendApi\.setOrderStatus\(\{\s*orderId,\s*status: "VOIDED"/);
   assert.match(appSource, /localStorage admin changes are disabled in SUPABASE mode/);
   assert.doesNotMatch(appSource, /server command not available until DD-008C/);
 });
@@ -693,6 +699,7 @@ test("DD-008C creates authoritative command RPCs with SECURITY DEFINER and empty
     "dd008c_get_location_snapshot",
     "create_staff_order",
     "set_order_status",
+    "void_order",
     "update_kds_line_prep",
     "serve_order_line",
     "serve_all_ready",
@@ -726,6 +733,7 @@ test("DD-008C exposes only intended public and authenticated command grants", ()
     "dd008c_get_location_snapshot",
     "create_staff_order",
     "set_order_status",
+    "void_order",
     "update_kds_line_prep",
     "serve_order_line",
     "serve_all_ready",
@@ -744,6 +752,23 @@ test("DD-008C exposes only intended public and authenticated command grants", ()
   assert.doesNotMatch(authoritativeMigrationSql, /grant\s+(insert|update|delete|all)[\s\S]*to\s+authenticated/i);
 });
 
+test("DD-008C Supabase snapshots carry PostgreSQL catalog data without routing internals", () => {
+  const catalog = authoritativeFunctionSql("dd008c_public_menu_payload");
+  const staffSnapshot = authoritativeFunctionSql("dd008c_get_location_snapshot");
+  const publicSnapshot = authoritativeFunctionSql("dd008c_get_public_table_snapshot");
+
+  assert.match(staffSnapshot, /'products', public\.dd008c_public_menu_payload\(p_location_id\)/i);
+  assert.match(publicSnapshot, /'products', public\.dd008c_public_menu_payload\(v_table\.location_id\)/i);
+  assert.match(catalog, /public\.products\.available = true/i);
+  assert.match(catalog, /public\.product_variants\.available = true/i);
+  assert.match(catalog, /public\.modifier_options\.available = true/i);
+  assert.match(catalog, /public\.product_components/i);
+  assert.doesNotMatch(catalog, /station_code/i);
+  ["payment_transactions", "audit_events", "command_deduplication", "staff_profiles", "workstation_devices", "device_credential"].forEach((forbidden) => {
+    assert.equal(catalog.includes(forbidden), false, forbidden);
+  });
+});
+
 test("DD-008C authoritative commands keep DD-003 through DD-007 invariants server-side", () => {
   const qrSubmit = authoritativeFunctionSql("submit_qr_order");
   const insertOrder = authoritativeFunctionSql("dd008c_insert_order_from_items");
@@ -756,16 +781,21 @@ test("DD-008C authoritative commands keep DD-003 through DD-007 invariants serve
   const payment = authoritativeFunctionSql("record_order_payment");
   const refund = authoritativeFunctionSql("refund_order_payment");
   const billQty = authoritativeFunctionSql("update_order_line_bill_qty");
+  const voidOrder = authoritativeFunctionSql("void_order");
 
   assert.match(qrSubmit, /command_deduplication/i);
+  assert.match(qrSubmit, /dd008c_public_order_validation_reason\(SQLERRM\)/i);
   assert.match(insertOrder, /products\.available = true/i);
   assert.match(insertOrder, /PRODUCT_UNAVAILABLE/i);
+  assert.match(insertOrder, /dd008c_current_service_period\(p_location_id\)/i);
+  assert.match(insertOrder, /PRODUCT_OUT_OF_PERIOD/i);
   assert.match(insertOrder, /OPTION_COUNT_INVALID/i);
   assert.match(kds, /station_code <> 'COMBO'/i);
   assert.match(kds, /hold_state <> 'FIRED'/i);
   assert.match(kds, /INVALID_PREP_STATUS_TRANSITION/i);
   assert.doesNotMatch(kds, /SERVED/);
   assert.match(serveLine, /v_line\.served_qty \+ p_qty > v_line\.qty/i);
+  assert.doesNotMatch(serveLine, /dd008c_audited_failure[\s\S]*'serve_all_ready'/i);
   assert.match(fireFamily, /ALREADY_FIRED/i);
   [assignCourse, holdFamily, fireFamily, fireCourse].forEach((courseCommand) => {
     assert.match(courseCommand, /where id = p_order_id and location_id = p_location_id for update/i);
@@ -779,6 +809,13 @@ test("DD-008C authoritative commands keep DD-003 through DD-007 invariants serve
   assert.match(refund, /REFUND_EXCEEDS_REMAINING/i);
   assert.match(billQty, /PAYMENT_EXISTS/i);
   assert.match(billQty, /BILL_QTY_EXCEEDS_QTY/i);
+  assert.match(voidOrder, /'orders\.void'/i);
+  assert.match(voidOrder, /PAYMENT_EXISTS/i);
+  assert.match(voidOrder, /IDEMPOTENCY_KEY_REUSED/i);
+  assert.match(voidOrder, /dd008c_audit_staff_result/i);
+  assert.match(voidOrder, /ORDER_VOIDED/i);
+  assert.match(authoritativeMigrationSql, /'orders\.void', 'orders\.void'/i);
+  assert.match(authoritativeMigrationSql, /when 'CASHIER' then p_permission_key in \([\s\S]*'orders\.void'/i);
 });
 
 test("DD-008C table tender validates outstanding balance before ledger inserts", () => {
@@ -844,6 +881,7 @@ test("CI executes the DD-008C authoritative command contract against the real lo
     "submit_qr_order",
     "create_staff_order",
     "set_order_status",
+    "void_order",
     "update_kds_line_prep",
     "serve_order_line",
     "record_order_payment",
@@ -857,6 +895,10 @@ test("CI executes the DD-008C authoritative command contract against the real lo
   assert.match(authoritativeContractSql, /TENDER_EXCEEDS_OUTSTANDING/i);
   assert.match(authoritativeContractSql, /SERVED_QTY_EXCEEDS_REMAINING/i);
   assert.match(authoritativeContractSql, /expected multi-station order READY after all stations ready/i);
+  assert.match(authoritativeContractSql, /expected void accepted version 2/i);
+  assert.match(authoritativeContractSql, /PRODUCT_OUT_OF_PERIOD/i);
+  assert.match(authoritativeContractSql, /ORDER_VALIDATION_FAILED/i);
+  assert.match(authoritativeContractSql, /public catalog snapshot to include configured mango-tea options/i);
 });
 
 test("DD-008C real integration script covers command concurrency and refresh convergence", () => {

@@ -139,24 +139,54 @@ const SUPABASE_COMMAND_INTENTS_KEY = "deedou_supabase_command_intents";
 const bus = "BroadcastChannel" in window ? new BroadcastChannel("deedou-pos") : null;
 if (bus) {
   bus.onmessage = () => {
-    products = loadProducts();
-    state = loadState();
-    render();
+    handleExternalBusinessSignal();
   };
 }
 
 window.addEventListener("hashchange", render);
-window.addEventListener("storage", () => {
-  products = loadProducts();
-  state = loadState();
-  render();
+window.addEventListener("storage", (event) => {
+  handleExternalBusinessSignal(event);
 });
 document.addEventListener("click", handleCourseWorkflowClick);
 if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+  products = [];
   staffAuthApi.onAuthStateChange(syncStaffAuthSession);
   restoreStaffAuthSession();
 }
 render();
+
+function handleExternalBusinessSignal(event = {}) {
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    if (event.key && ![STATE_KEY, PRODUCT_KEY, "deedou_products"].includes(event.key)) {
+      render();
+      return;
+    }
+    refreshSupabaseAuthoritativeStateFromRoute();
+    return;
+  }
+  try {
+    products = loadProducts();
+    state = loadState();
+    render();
+  } catch {
+    render();
+  }
+}
+
+function refreshSupabaseAuthoritativeStateFromRoute() {
+  const current = route();
+  if (current.name === "customer") {
+    supabaseCustomerLoaded = false;
+    ensureSupabasePublicTableState(current.token, { force: true });
+    return;
+  }
+  if (isStaffRoute(current.name)) {
+    supabaseSnapshotLoaded = false;
+    ensureSupabaseOperationalState({ force: true });
+    return;
+  }
+  render();
+}
 
 function loadState() {
   const saved = localStorage.getItem(STATE_KEY);
@@ -292,6 +322,38 @@ function loadProducts() {
     return defaultProducts.map((item) => normalizeProduct({ ...item, available: map[item.id] ?? item.available }));
   }
   return structuredClone(defaultProducts).map(normalizeProduct);
+}
+
+function normalizeSupabaseCatalogProduct(item = {}) {
+  return normalizeProduct({
+    id: item.id,
+    kind: item.kind,
+    category: item.category,
+    vi: item.vi ?? item.nameVi ?? item.name_vi,
+    en: item.en ?? item.nameEn ?? item.name_en,
+    descVi: item.descVi ?? item.desc_vi ?? "",
+    descEn: item.descEn ?? item.desc_en ?? "",
+    price: item.price ?? item.priceVnd ?? item.price_vnd ?? 0,
+    image: item.image ?? item.imageUrl ?? item.image_url ?? "",
+    color: item.color || "#dcefe5",
+    art: item.art || "plate",
+    available: item.available !== false,
+    periods: Array.isArray(item.periods) ? item.periods : [],
+    station: "MENU",
+    components: (item.components || []).map((component) => ({
+      vi: component.vi ?? component.nameVi ?? component.name_vi,
+      en: component.en ?? component.nameEn ?? component.name_en,
+      qty: component.qty,
+      station: "MENU_COMPONENT"
+    })),
+    variants: item.variants || [],
+    modifierGroups: item.modifierGroups || item.modifiers || []
+  });
+}
+
+function applySupabaseCatalogProducts(catalogProducts) {
+  if (!Array.isArray(catalogProducts)) return;
+  products = catalogProducts.map(normalizeSupabaseCatalogProduct).filter((item) => item.available);
 }
 
 function normalizeProduct(item) {
@@ -628,6 +690,7 @@ async function ensureSupabaseOperationalState(options = {}) {
 }
 
 function applySupabaseSnapshot(payload = {}) {
+  applySupabaseCatalogProducts(payload.products);
   state = normalizeState({
     ...defaultState(),
     orders: payload.orders || [],
@@ -675,6 +738,7 @@ async function ensureSupabasePublicTableState(token, options = {}) {
 
 function applySupabasePublicSnapshot(payload = {}) {
   const tableSession = payload.tableSession ? [payload.tableSession] : payload.tableSessions || [];
+  applySupabaseCatalogProducts(payload.products);
   state = normalizeState({
     ...defaultState(),
     cart: state.cart || [],
@@ -1107,10 +1171,10 @@ function tablePaymentPanel(table, orders) {
       </label>
       ${splitPlan ? renderSplitPlan(splitPlan) : ""}
       <div class="split-actions table-payment-actions">
-        <button class="ghost" data-table-prebill="${escapeAttr(table.code)}">Pre-bill</button>
+        ${backendConfig.mode === BACKEND_MODES.SUPABASE ? "" : `<button class="ghost" data-table-prebill="${escapeAttr(table.code)}">Pre-bill</button>`}
         ${renderPaymentMethodButtons({ actionAttr: "data-table-pay", targetId: table.code, disabled: paymentDisabled })}
         <button class="ghost" data-table-split="${escapeAttr(table.code)}" ${disabled}>Split 2</button>
-        <button class="danger" data-table-void="${escapeAttr(table.code)}">Void bill</button>
+        ${backendConfig.mode === BACKEND_MODES.SUPABASE ? "" : `<button class="danger" data-table-void="${escapeAttr(table.code)}">Void bill</button>`}
       </div>
       ${renderPaymentDemoNote()}
       ${orders.map(renderPaymentHistory).join("")}
@@ -2767,12 +2831,12 @@ async function voidOrder(orderId, reason = "") {
   if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
     pendingVoidOrderId = "";
     const expectedVersion = expectedOrderVersion(order);
-    await runSupabaseAuthoritativeCommand("set_order_status", (idempotencyKey) => authoritativeBackendApi.setOrderStatus({
+    await runSupabaseAuthoritativeCommand("void_order", (idempotencyKey) => authoritativeBackendApi.voidOrder({
       orderId,
-      status: "VOIDED",
+      reason: voidReason,
       expectedVersion,
       idempotencyKey
-    }), { intent: { orderId, status: "VOIDED", expectedVersion } });
+    }), { intent: { orderId, reason: voidReason, expectedVersion } });
     return;
   }
   order.status = "VOIDED";
