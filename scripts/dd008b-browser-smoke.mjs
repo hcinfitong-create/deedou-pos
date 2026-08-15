@@ -36,10 +36,13 @@ const ids = Object.freeze({
   owner: `${runId}_owner`,
   cashier: `${runId}_cashier`,
   kitchen: `${runId}_kitchen`,
+  manager: `${runId}_manager`,
   inactive: `${runId}_inactive`,
   adminDevice: `${runId}_dev_admin`,
   cashierDevice: `${runId}_dev_cashier`,
   kitchenDevice: `${runId}_dev_kitchen`,
+  managerDevice: `${runId}_dev_manager`,
+  managerBDevice: `${runId}_dev_manager_b`,
   cashierBDevice: `${runId}_dev_cashier_b`,
   revokedDevice: `${runId}_dev_revoked`
 });
@@ -47,6 +50,8 @@ const deviceSecrets = Object.freeze({
   admin: secret("admin-device"),
   cashier: secret("cashier-device"),
   kitchen: secret("kitchen-device"),
+  manager: secret("manager-device"),
+  managerB: secret("manager-b-device"),
   cashierB: secret("cashier-b-device"),
   revoked: secret("revoked-device")
 });
@@ -80,7 +85,8 @@ try {
   console.log("DD-008B browser smoke passed");
   console.log("LOCAL_DEMO routes: customer, cashier, staff, bar, kitchen, dessert, admin");
   console.log("SUPABASE browser: signed-out QR, sign-in gate, cashier allow/admin deny, kitchen allow/cashier/payment/admin deny");
-  console.log("SUPABASE browser: location B denied, inactive denied, wrong/revoked workstation denied, local logout returned to sign-in gate");
+  console.log("SUPABASE browser: manager Location A staff allow, manager Location B denied");
+  console.log("SUPABASE browser: cashier Location B denied, inactive denied, wrong/revoked workstation denied, local logout returned to sign-in gate");
   console.log("SUPABASE browser: read-only/fail-closed route left legacy localStorage business state unchanged");
   console.log("zero app console errors");
 } catch (error) {
@@ -96,6 +102,7 @@ async function provisionRuntimeFixture() {
     owner: await createRuntimeUser("owner"),
     cashier: await createRuntimeUser("cashier"),
     kitchen: await createRuntimeUser("kitchen"),
+    manager: await createRuntimeUser("manager"),
     inactive: await createRuntimeUser("inactive")
   };
 
@@ -111,6 +118,7 @@ values
   (${lit(ids.owner)}, ${lit(users.owner.id)}::uuid, 'Browser Smoke Owner', true),
   (${lit(ids.cashier)}, ${lit(users.cashier.id)}::uuid, 'Browser Smoke Cashier', true),
   (${lit(ids.kitchen)}, ${lit(users.kitchen.id)}::uuid, 'Browser Smoke Kitchen', true),
+  (${lit(ids.manager)}, ${lit(users.manager.id)}::uuid, 'Browser Smoke Manager', true),
   (${lit(ids.inactive)}, ${lit(users.inactive.id)}::uuid, 'Browser Smoke Inactive', false)
 on conflict (id) do nothing;
 
@@ -119,6 +127,7 @@ values
   (${lit(ids.owner)}, ${lit(ids.locationA)}, true),
   (${lit(ids.cashier)}, ${lit(ids.locationA)}, true),
   (${lit(ids.kitchen)}, ${lit(ids.locationA)}, true),
+  (${lit(ids.manager)}, ${lit(ids.locationA)}, true),
   (${lit(ids.inactive)}, ${lit(ids.locationA)}, true)
 on conflict (staff_profile_id, location_id) do update set active = excluded.active;
 
@@ -127,6 +136,7 @@ values
   (${lit(ids.owner)}, ${lit(ids.locationA)}, 'OWNER', true),
   (${lit(ids.cashier)}, ${lit(ids.locationA)}, 'CASHIER', true),
   (${lit(ids.kitchen)}, ${lit(ids.locationA)}, 'KITCHEN', true),
+  (${lit(ids.manager)}, ${lit(ids.locationA)}, 'MANAGER', true),
   (${lit(ids.inactive)}, ${lit(ids.locationA)}, 'CASHIER', true)
 on conflict (staff_profile_id, location_id, role_id) do update set active = excluded.active;
 
@@ -135,6 +145,8 @@ values
   (${lit(ids.adminDevice)}, ${lit(ids.locationA)}, 'Browser Smoke Admin', 'ADMIN', public.hash_device_credential(${lit(deviceSecrets.admin)}), true, ${lit(ids.owner)}),
   (${lit(ids.cashierDevice)}, ${lit(ids.locationA)}, 'Browser Smoke Cashier', 'CASHIER', public.hash_device_credential(${lit(deviceSecrets.cashier)}), true, ${lit(ids.owner)}),
   (${lit(ids.kitchenDevice)}, ${lit(ids.locationA)}, 'Browser Smoke Kitchen', 'KDS_KITCHEN', public.hash_device_credential(${lit(deviceSecrets.kitchen)}), true, ${lit(ids.owner)}),
+  (${lit(ids.managerDevice)}, ${lit(ids.locationA)}, 'Browser Smoke Manager Staff', 'STAFF', public.hash_device_credential(${lit(deviceSecrets.manager)}), true, ${lit(ids.owner)}),
+  (${lit(ids.managerBDevice)}, ${lit(ids.locationB)}, 'Browser Smoke Manager B Staff', 'STAFF', public.hash_device_credential(${lit(deviceSecrets.managerB)}), true, ${lit(ids.owner)}),
   (${lit(ids.cashierBDevice)}, ${lit(ids.locationB)}, 'Browser Smoke Cashier B', 'CASHIER', public.hash_device_credential(${lit(deviceSecrets.cashierB)}), true, ${lit(ids.owner)}),
   (${lit(ids.revokedDevice)}, ${lit(ids.locationA)}, 'Browser Smoke Revoked', 'CASHIER', public.hash_device_credential(${lit(deviceSecrets.revoked)}), false, ${lit(ids.owner)})
 on conflict (id) do nothing;
@@ -234,6 +246,33 @@ async function runSupabaseSmoke(activeBrowser, baseUrl, users, errorSink) {
   } finally {
     await kitchenContext.close();
   }
+
+  const managerContext = await createSupabaseContext(activeBrowser, {
+    label: "SUPABASE manager",
+    deviceCredential: deviceSecrets.manager,
+    workstationMode: "STAFF",
+    locationId: ids.locationA
+  });
+  try {
+    const managerPage = await newObservedPage(managerContext, "SUPABASE manager", errorSink);
+    await withFailureDiagnostics(managerPage, "SUPABASE manager Location A staff allow/read-only", errorSink, async () => {
+      await managerPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/staff`, { waitUntil: "domcontentloaded" });
+      await loginThroughGate(managerPage, users.manager, ids.locationA, "STAFF");
+      await expectReadOnlyAuthorized(managerPage, "Staff");
+    });
+  } finally {
+    await managerContext.close();
+  }
+
+  await expectDeniedLogin(activeBrowser, baseUrl, errorSink, {
+    label: "SUPABASE manager Location B denied",
+    user: users.manager,
+    locationId: ids.locationB,
+    workstationMode: "STAFF",
+    deviceCredential: deviceSecrets.managerB,
+    routeName: "staff",
+    forbidden: ["Staff đã xác thực"]
+  });
 
   await expectDeniedLogin(activeBrowser, baseUrl, errorSink, {
     label: "SUPABASE location B denied",

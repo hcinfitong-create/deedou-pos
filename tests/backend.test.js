@@ -545,6 +545,20 @@ test("DD-008B browser smoke waits for auth gate binding before login submit", ()
   assert.match(loginHelper, /await assertAppReady[\s\S]*button\[type="submit"\]'\)\.click\(\);/);
 });
 
+test("DD-008B browser smoke covers Manager Location A allow and Location B deny", () => {
+  const assignmentBlock = browserSmokeScript.match(/insert into public\.staff_location_assignments[\s\S]*?on conflict/)?.[0] || "";
+
+  assert.match(browserSmokeScript, /manager: await createRuntimeUser\("manager"\)/);
+  assert.match(browserSmokeScript, /\$\{lit\(ids\.manager\)\}, \$\{lit\(users\.manager\.id\)\}::uuid, 'Browser Smoke Manager', true/);
+  assert.match(browserSmokeScript, /\$\{lit\(ids\.manager\)\}, \$\{lit\(ids\.locationA\)\}, 'MANAGER', true/);
+  assert.match(browserSmokeScript, /'Browser Smoke Manager Staff', 'STAFF'/);
+  assert.match(browserSmokeScript, /'Browser Smoke Manager B Staff', 'STAFF'/);
+  assert.match(assignmentBlock, /\$\{lit\(ids\.manager\)\}, \$\{lit\(ids\.locationA\)\}/);
+  assert.doesNotMatch(assignmentBlock, /\$\{lit\(ids\.manager\)\}, \$\{lit\(ids\.locationB\)\}/);
+  assert.match(browserSmokeScript, /SUPABASE manager Location A staff allow\/read-only[\s\S]*loginThroughGate\(managerPage, users\.manager, ids\.locationA, "STAFF"\)[\s\S]*expectReadOnlyAuthorized\(managerPage, "Staff"\)/);
+  assert.match(browserSmokeScript, /SUPABASE manager Location B denied[\s\S]*user: users\.manager[\s\S]*locationId: ids\.locationB[\s\S]*workstationMode: "STAFF"[\s\S]*routeName: "staff"/);
+});
+
 function functionSql(functionName) {
   const match = migrationSql.match(new RegExp(`create or replace function public\\.${functionName}\\([\\s\\S]*?\\n\\$\\$;`, "i"));
   assert.ok(match, `Missing function ${functionName}`);
