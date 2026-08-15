@@ -29,8 +29,8 @@ index.html
       -> features/station-workflow
       -> features/table-session
       -> features/payments
-      -> shared/backend (foundation only, not runtime-authoritative yet)
-      -> shared/auth (SUPABASE staff gate only)
+      -> shared/backend (SUPABASE command/query/realtime adapter)
+      -> shared/auth (SUPABASE managed Auth and staff gate)
 ```
 
 The current router is hash-based:
@@ -80,9 +80,19 @@ DD-008B adds staff authentication/RBAC on top of that foundation:
 - Supabase Auth email/password identifies a browser user through the `@supabase/supabase-js` managed lifecycle: sign-in, session restore, refresh, auth-state notifications, and local/current-session logout.
 - `staff_profiles`, location assignments, role assignments, permissions, and workstation devices decide effective access through database helpers that use `auth.uid()`.
 - Workstation credentials are server-generated, returned once, stored only as SHA-256 hashes, and enforced inside privileged RPCs rather than only in route gates.
-- Browser route gates ask server RPCs before rendering privileged routes in `SUPABASE` mode, but successful DD-008B auth currently renders fail-closed staff surfaces until DD-008C adds authoritative command RPCs.
+- Browser route gates ask server RPCs before rendering privileged routes in `SUPABASE` mode.
 - Public customer QR/menu routes remain unauthenticated.
-- Business writes remain denied until a later command-boundary phase.
+
+DD-008C adds the first server-authoritative operational command boundary:
+
+- `LOCAL_DEMO` keeps the existing localStorage behavior unchanged.
+- `SUPABASE` staff/customer surfaces refetch authoritative snapshots through narrow RPCs instead of trusting localStorage business state.
+- Order, service request, KDS, serving, course, table-session, payment, void, refund, and table-tender mutations call transactional PostgreSQL RPCs.
+- Command results use a normalized success/failure envelope and public browser failures are reduced to `UNAUTHENTICATED`, `FORBIDDEN`, `CONFLICT`, `INVALID_STATE`, `BACKEND_UNAVAILABLE`, or `VALIDATION_ERROR`.
+- Server commands enforce authenticated staff, active location assignment, permission, active registered device, and workstation mode inside the RPC, not only in route gates.
+- Public QR commands remain exact-token scoped and derive product price/options/server totals from catalog tables.
+- Realtime is implemented as location-scoped refresh hints. The database commit is the source of truth; clients refetch snapshots after receiving hints.
+- Admin/menu write cutover remains deferred and must not fall back to authoritative-looking localStorage mutations in `SUPABASE`.
 
 Committed Supabase infrastructure lives under:
 
@@ -182,6 +192,8 @@ DD-007 adds `features/payments` as the pure owner for append-only payment ledger
 DD-008A adds `shared/backend` plus Supabase migrations/seed as a foundation-only infrastructure module. It does not replace localStorage, add realtime KDS, or make order/payment commands authoritative.
 
 DD-008B adds `shared/auth` plus a new Supabase auth/RBAC migration, database contract, and real local Supabase Auth integration CI. It does not add custom PINs, service-role browser calls, public signup, authoritative business writes, realtime KDS, or localStorage removal.
+
+DD-008C adds `shared/backend` command adapters, a new authoritative command/realtime migration, a database command contract, and Supabase-mode app wiring for server-confirmed mutations. It does not add service-role browser calls, real payment-provider settlement, or admin/menu write RPCs.
 
 ## Current Known Coupling
 

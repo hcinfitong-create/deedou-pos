@@ -239,13 +239,20 @@ test("authorization cache keys never include JWTs or device bearer credentials",
   assert.match(key, /payments\.record/);
 });
 
-test("authorized SUPABASE routes do not unlock legacy localStorage mutation handlers", () => {
-  assert.match(appSource, /if \(shouldRenderSupabaseReadOnly\(current\.name, staffAccess\)\) \{\s*bindSupabaseReadOnlyRoute\(current\.name\);/s);
-  assert.match(appSource, /if \(shouldRenderSupabaseReadOnly\(active, staffAccess\)\) return supabaseReadOnlyPage\(active\);/);
+test("authorized SUPABASE routes load authoritative operational state before privileged handlers", () => {
+  assert.match(appSource, /createAuthoritativeBackendApi/);
+  assert.match(appSource, /shouldUseSupabaseAuthoritativeState\(current\.name, staffAccess\)/);
+  assert.match(appSource, /ensureSupabaseOperationalState\(\)/);
+  assert.match(appSource, /authoritativeBackendApi\.fetchStaffSnapshot/);
+  assert.match(appSource, /authoritativeBackendApi\.recordOrderPayment/);
+  assert.match(appSource, /authoritativeBackendApi\.updateKdsLinePrep/);
+  assert.match(appSource, /authoritativeBackendApi\.serveOrderLine/);
+  assert.match(appSource, /authoritativeBackendApi\.recordTableTender/);
   assert.match(appSource, /function saveState\(\) \{\s*if \(blockSupabaseLocalCommand\("STATE_SAVE"\)\)/s);
   assert.match(appSource, /function saveProducts\(\) \{\s*if \(blockSupabaseLocalCommand\("MENU_SAVE"\)\)/s);
-  assert.match(appSource, /function saveCounterDraft\(\) \{\s*if \(blockSupabaseLocalCommand\("COUNTER_DRAFT"\)\)/s);
-  assert.match(appSource, /server command not available until DD-008C/);
+  assert.match(appSource, /localStorage admin changes are disabled in SUPABASE mode/);
+  assert.doesNotMatch(appSource, /shouldRenderSupabaseReadOnly/);
+  assert.doesNotMatch(appSource, /server command not available until DD-008C/);
 });
 
 test("browser source has no Supabase admin API or server secret exposure", () => {
@@ -265,8 +272,9 @@ test("browser source has no Supabase admin API or server secret exposure", () =>
   assert.match(authSource, /onAuthStateChange/);
   assert.match(authSource, /signOut\(\{\s*scope:\s*"local"\s*\}\)/);
   assert.doesNotMatch(authSource, /accessToken|refreshToken/);
-  assert.match(appSource, /shouldRenderSupabaseReadOnly/);
-  assert.match(appSource, /server command not available until DD-008C/);
+  assert.match(appSource, /shouldUseSupabaseAuthoritativeState/);
+  assert.match(appSource, /command must run through DeeDou server authority in SUPABASE mode/);
+  assert.doesNotMatch(appSource, /shouldRenderSupabaseReadOnly/);
 });
 
 function supabaseConfig() {

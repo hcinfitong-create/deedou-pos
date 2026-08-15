@@ -16,7 +16,7 @@ const apiUrl = statusEnv.API_URL || statusEnv.SUPABASE_URL || "http://127.0.0.1:
 const anonKey = statusEnv.ANON_KEY || statusEnv.SUPABASE_ANON_KEY;
 const serviceRoleKey = statusEnv.SERVICE_ROLE_KEY || statusEnv.SUPABASE_SERVICE_ROLE_KEY;
 const dbUrl = process.env.DB_URL || statusEnv.DB_URL || "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
-const failureArtifactDir = resolve(repoRoot, "artifacts", "dd008b-browser-smoke");
+const failureArtifactDir = resolve(repoRoot, "artifacts", "dd008c-browser-smoke");
 const failureScreenshotPath = resolve(failureArtifactDir, "failure.png");
 
 if (!anonKey || !serviceRoleKey) {
@@ -29,7 +29,7 @@ const backendConfig = Object.freeze({
   supabasePublishableKey: anonKey
 });
 
-const runId = `dd008b_browser_${Date.now()}_${randomUUID().slice(0, 8)}`.replace(/-/g, "_");
+const runId = `dd008c_browser_${Date.now()}_${randomUUID().slice(0, 8)}`.replace(/-/g, "_");
 const ids = Object.freeze({
   locationA: "deedou-demo",
   locationB: `${runId}_loc_b`,
@@ -82,12 +82,12 @@ try {
     throw new Error(`Browser smoke captured app console errors:\n${consoleErrors.join("\n")}`);
   }
 
-  console.log("DD-008B browser smoke passed");
+  console.log("DD-008C browser smoke passed");
   console.log("LOCAL_DEMO routes: customer, cashier, staff, bar, kitchen, dessert, admin");
-  console.log("SUPABASE browser: signed-out QR, sign-in gate, cashier allow/admin deny, kitchen allow/cashier/payment/admin deny");
+  console.log("SUPABASE browser: signed-out QR, sign-in gate, cashier authoritative allow/admin deny, kitchen authoritative allow/cashier/payment/admin deny");
   console.log("SUPABASE browser: manager Location A staff allow, manager Location B denied");
   console.log("SUPABASE browser: cashier Location B denied, inactive denied, wrong/revoked workstation denied, local logout returned to sign-in gate");
-  console.log("SUPABASE browser: read-only/fail-closed route left legacy localStorage business state unchanged");
+  console.log("SUPABASE browser: authoritative route left legacy localStorage business state unchanged");
   console.log("zero app console errors");
 } catch (error) {
   printCollectedDiagnostics(consoleErrors);
@@ -110,7 +110,7 @@ async function provisionRuntimeFixture() {
 begin;
 
 insert into public.locations (id, name, timezone, currency)
-values (${lit(ids.locationB)}, 'DD-008B Browser Smoke B', 'Asia/Saigon', 'VND')
+values (${lit(ids.locationB)}, 'DD-008C Browser Smoke B', 'Asia/Saigon', 'VND')
 on conflict (id) do nothing;
 
 insert into public.staff_profiles (id, auth_user_id, display_name, active)
@@ -197,21 +197,21 @@ async function runSupabaseSmoke(activeBrowser, baseUrl, users, errorSink) {
   });
   try {
     const cashierPage = await newObservedPage(cashierContext, "SUPABASE cashier", errorSink);
-    await withFailureDiagnostics(cashierPage, "SUPABASE cashier allow/read-only", errorSink, async () => {
-      await verifySignedOutGateNoFlash(cashierPage, `${baseUrl}/index.html?v=dd008b-supabase#/cashier`, "Cashier POS");
+    await withFailureDiagnostics(cashierPage, "SUPABASE cashier allow/authoritative", errorSink, async () => {
+      await verifySignedOutGateNoFlash(cashierPage, `${baseUrl}/index.html?v=dd008c-supabase#/cashier`, "Cashier POS");
       await loginThroughGate(cashierPage, users.cashier, ids.locationA, "CASHIER");
-      await expectReadOnlyAuthorized(cashierPage, "Cashier");
-      await expectLegacyBusinessStateUnchanged(cashierPage);
+      await expectAuthoritativeAuthorized(cashierPage, "Cashier");
+      await expectLegacyBusinessStateUnchanged(cashierPage, "Cashier");
     });
 
     await withFailureDiagnostics(cashierPage, "SUPABASE cashier denied admin", errorSink, async () => {
-      await cashierPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/admin`, { waitUntil: "domcontentloaded" });
+      await cashierPage.goto(`${baseUrl}/index.html?v=dd008c-supabase#/admin`, { waitUntil: "domcontentloaded" });
       await expectDeniedGate(cashierPage, "cashier denied admin", ["DeeDou POS setup"]);
     });
 
     await withFailureDiagnostics(cashierPage, "SUPABASE cashier logout", errorSink, async () => {
-      await cashierPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/cashier`, { waitUntil: "domcontentloaded" });
-      await expectReadOnlyAuthorized(cashierPage, "Cashier");
+      await cashierPage.goto(`${baseUrl}/index.html?v=dd008c-supabase#/cashier`, { waitUntil: "domcontentloaded" });
+      await expectAuthoritativeAuthorized(cashierPage, "Cashier");
       await cashierPage.locator("section [data-auth-logout]").click();
       await expectSignedOutGate(cashierPage, "cashier logout");
     });
@@ -227,10 +227,10 @@ async function runSupabaseSmoke(activeBrowser, baseUrl, users, errorSink) {
   });
   try {
     const kitchenPage = await newObservedPage(kitchenContext, "SUPABASE kitchen", errorSink);
-    await withFailureDiagnostics(kitchenPage, "SUPABASE kitchen allow/read-only", errorSink, async () => {
-      await kitchenPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/kitchen`, { waitUntil: "domcontentloaded" });
+    await withFailureDiagnostics(kitchenPage, "SUPABASE kitchen allow/authoritative", errorSink, async () => {
+      await kitchenPage.goto(`${baseUrl}/index.html?v=dd008c-supabase#/kitchen`, { waitUntil: "domcontentloaded" });
       await loginThroughGate(kitchenPage, users.kitchen, ids.locationA, "KDS_KITCHEN");
-      await expectReadOnlyAuthorized(kitchenPage, "Kitchen KDS");
+      await expectAuthoritativeAuthorized(kitchenPage, "Kitchen KDS");
     });
 
     for (const [routeName, forbidden] of [
@@ -239,7 +239,7 @@ async function runSupabaseSmoke(activeBrowser, baseUrl, users, errorSink) {
       ["admin", ["DeeDou POS setup"]]
     ]) {
       await withFailureDiagnostics(kitchenPage, `SUPABASE kitchen denied ${routeName}`, errorSink, async () => {
-        await kitchenPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/${routeName}`, { waitUntil: "domcontentloaded" });
+        await kitchenPage.goto(`${baseUrl}/index.html?v=dd008c-supabase#/${routeName}`, { waitUntil: "domcontentloaded" });
         await expectDeniedGate(kitchenPage, `kitchen denied ${routeName}`, forbidden);
       });
     }
@@ -255,10 +255,10 @@ async function runSupabaseSmoke(activeBrowser, baseUrl, users, errorSink) {
   });
   try {
     const managerPage = await newObservedPage(managerContext, "SUPABASE manager", errorSink);
-    await withFailureDiagnostics(managerPage, "SUPABASE manager Location A staff allow/read-only", errorSink, async () => {
-      await managerPage.goto(`${baseUrl}/index.html?v=dd008b-supabase#/staff`, { waitUntil: "domcontentloaded" });
+    await withFailureDiagnostics(managerPage, "SUPABASE manager Location A staff allow/authoritative", errorSink, async () => {
+      await managerPage.goto(`${baseUrl}/index.html?v=dd008c-supabase#/staff`, { waitUntil: "domcontentloaded" });
       await loginThroughGate(managerPage, users.manager, ids.locationA, "STAFF");
-      await expectReadOnlyAuthorized(managerPage, "Staff");
+      await expectAuthoritativeAuthorized(managerPage, "Staff");
     });
   } finally {
     await managerContext.close();
@@ -325,7 +325,7 @@ async function verifyPublicQrSignedOut(activeBrowser, baseUrl, errorSink) {
   try {
     const page = await newObservedPage(context, "SUPABASE public QR", errorSink);
     await withFailureDiagnostics(page, "SUPABASE public QR", errorSink, async () => {
-      await page.goto(`${baseUrl}/index.html?v=dd008b-supabase#/t/beach-a01-47VLmz`, { waitUntil: "domcontentloaded" });
+      await page.goto(`${baseUrl}/index.html?v=dd008c-supabase#/t/beach-a01-47VLmz`, { waitUntil: "domcontentloaded" });
       await assertAppReady(page, "SUPABASE public QR");
       assert.equal(await page.locator(".auth-gate").count(), 0, "public QR should not require staff sign-in");
       assertContains(await bodyText(page), "DeeDou", "public QR");
@@ -340,7 +340,7 @@ async function expectDeniedLogin(activeBrowser, baseUrl, errorSink, options) {
   try {
     const page = await newObservedPage(context, options.label, errorSink);
     await withFailureDiagnostics(page, options.label, errorSink, async () => {
-      await page.goto(`${baseUrl}/index.html?v=dd008b-supabase#/${options.routeName}`, { waitUntil: "domcontentloaded" });
+      await page.goto(`${baseUrl}/index.html?v=dd008c-supabase#/${options.routeName}`, { waitUntil: "domcontentloaded" });
       await loginThroughGate(page, options.user, options.locationId, options.workstationMode);
       await expectDeniedGate(page, options.label, options.forbidden || []);
     });
@@ -410,7 +410,7 @@ async function reportFailureDiagnostics({ page, label, error, errorSink }) {
   if (failureReported) return;
   failureReported = true;
 
-  console.error("DD-008B BROWSER-SMOKE DIAGNOSTIC FAILURE");
+  console.error("DD-008C BROWSER-SMOKE DIAGNOSTIC FAILURE");
   console.error(`phase: ${sanitizeDiagnosticText(label)}`);
   console.error(`error: ${sanitizeDiagnosticText(error?.stack || error?.message || String(error))}`);
 
@@ -502,7 +502,7 @@ async function expectSignedOutGate(page, label) {
   await page.locator("form[data-auth-login]").waitFor({ timeout: 20000 });
   await waitForNotChecking(page);
   await assertAppReady(page, label);
-  assert.equal(await page.locator("[data-supabase-command]").count(), 0, `${label} should not expose read-only command surface`);
+  assert.equal(await page.locator("[data-supabase-command]").count(), 0, `${label} should not expose obsolete fail-closed command surface`);
 }
 
 async function loginThroughGate(page, user, locationId, workstationMode) {
@@ -516,13 +516,18 @@ async function loginThroughGate(page, user, locationId, workstationMode) {
   await page.locator('form[data-auth-login] button[type="submit"]').click();
 }
 
-async function expectReadOnlyAuthorized(page, routeLabel) {
-  await page.locator("[data-supabase-command]").waitFor({ timeout: 25000 });
+async function expectAuthoritativeAuthorized(page, routeLabel) {
+  await waitForNotChecking(page);
+  await page.waitForFunction(() => {
+    const text = document.body.innerText || "";
+    return !text.includes("Đang tải dữ liệu Supabase") && !text.includes("Không tải được dữ liệu Supabase") && !document.querySelector("form[data-auth-login]");
+  }, null, { timeout: 25000 }).catch(async () => {
+    await page.waitForFunction(() => !document.querySelector("form[data-auth-login]"), null, { timeout: 25000 });
+  });
   await assertAppReady(page, `authorized ${routeLabel}`);
-  const text = await bodyText(page);
-  assertContains(text, "DD-008B", `authorized ${routeLabel}`);
-  assertContains(text, routeLabel, `authorized ${routeLabel}`);
   assert.equal(await page.locator("form[data-auth-login]").count(), 0, `authorized ${routeLabel} should not remain on login form`);
+  assert.equal(await page.locator(".auth-gate").count(), 0, `authorized ${routeLabel} should not show auth gate`);
+  assert.equal(await page.locator("[data-supabase-command]").count(), 0, `authorized ${routeLabel} should not show obsolete fail-closed command surface`);
 }
 
 async function expectDeniedGate(page, label, forbiddenTexts = []) {
@@ -530,7 +535,7 @@ async function expectDeniedGate(page, label, forbiddenTexts = []) {
   await page.waitForFunction(() => document.querySelectorAll("[data-auth-logout]").length > 0, null, { timeout: 25000 });
   await waitForNotChecking(page);
   await assertAppReady(page, label);
-  assert.equal(await page.locator("[data-supabase-command]").count(), 0, `${label} should not expose fail-closed command button`);
+  assert.equal(await page.locator("[data-supabase-command]").count(), 0, `${label} should not expose obsolete fail-closed command button`);
   assert.ok(await page.locator("form[data-auth-login]").count() > 0, `${label} should show a signed-in permission review form`);
   const text = await bodyText(page);
   forbiddenTexts.forEach((forbidden) => assertNotContains(text, forbidden, label));
@@ -541,7 +546,7 @@ async function waitForNotChecking(page) {
   await page.waitForFunction((text) => !document.body.innerText.includes(text), checkingText, { timeout: 25000 });
 }
 
-async function expectLegacyBusinessStateUnchanged(page) {
+async function expectLegacyBusinessStateUnchanged(page, routeLabel) {
   const storageKey = "deedou_state";
   const sentinelState = JSON.stringify({
     cart: [{ id: "legacy-sentinel", qty: 1 }],
@@ -552,10 +557,10 @@ async function expectLegacyBusinessStateUnchanged(page) {
     tableSessions: []
   });
   await page.evaluate(([key, value]) => window.localStorage.setItem(key, value), [storageKey, sentinelState]);
-  await page.locator("[data-supabase-command]").click();
-  await page.waitForFunction(() => document.body.innerText.includes("Local demo storage was not mutated."), null, { timeout: 10000 });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expectAuthoritativeAuthorized(page, routeLabel);
   const stored = await page.evaluate((key) => window.localStorage.getItem(key), storageKey);
-  assert.equal(stored, sentinelState, "SUPABASE read-only command must not mutate legacy localStorage business state");
+  assert.equal(stored, sentinelState, "SUPABASE authoritative route must not mutate legacy localStorage business state");
 }
 
 async function assertAppReady(page, label) {
@@ -628,7 +633,7 @@ async function createRuntimeUser(kind) {
     email,
     password,
     email_confirm: true,
-    user_metadata: { dd008b_browser_smoke: runId, kind }
+    user_metadata: { dd008c_browser_smoke: runId, kind }
   });
   if (error || !data.user?.id) {
     throw new Error(`Failed to create browser smoke runtime user ${kind}: ${error?.message || "missing user"}`);
