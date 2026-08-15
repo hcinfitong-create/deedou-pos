@@ -858,7 +858,8 @@ as $$
 declare
   v_order_id text := 'ORD-' || replace(extensions.gen_random_uuid()::text, '-', '');
   v_order_no text := 'D' || to_char(now(), 'HH24MISS') || '-' || upper(substr(replace(extensions.gen_random_uuid()::text, '-', ''), 1, 4));
-  v_table record;
+  v_table_code text := '';
+  v_table_zone text := '';
   v_item jsonb;
   v_index integer := 0;
   v_product record;
@@ -886,11 +887,16 @@ begin
   end if;
 
   if p_physical_table_id is not null then
-    select * into v_table
+    select public.physical_tables.code, public.physical_tables.zone
+    into v_table_code, v_table_zone
     from public.physical_tables
     where public.physical_tables.id = p_physical_table_id
       and public.physical_tables.location_id = p_location_id
+      and public.physical_tables.is_active = true
     limit 1;
+    if v_table_code is null then
+      raise exception 'TABLE_NOT_FOUND';
+    end if;
   end if;
 
   insert into public.orders (
@@ -922,8 +928,8 @@ begin
     p_service_mode,
     p_fulfillment_type,
     p_order_source,
-    coalesce(v_table.zone, ''),
-    coalesce(v_table.code, ''),
+    coalesce(v_table_zone, ''),
+    coalesce(v_table_code, ''),
     p_status,
     0,
     0,
@@ -1435,6 +1441,7 @@ declare
   v_authz record;
   v_table record;
   v_session public.table_sessions;
+  v_physical_table_id text := null;
   v_order_id text;
   v_service_mode text;
   v_fulfillment text := case when upper(btrim(coalesce(p_fulfillment_type, ''))) = 'TAKEAWAY' then 'TAKEAWAY' else 'DINE_IN' end;
@@ -1460,6 +1467,7 @@ begin
       return query select * from public.dd008c_failure('VALIDATION_ERROR', 'TABLE_NOT_FOUND');
       return;
     end if;
+    v_physical_table_id := v_table.id;
     v_service_mode := 'TABLE_SERVICE';
   else
     v_service_mode := 'COUNTER_SERVICE';
@@ -1481,11 +1489,11 @@ begin
 
   begin
     if v_service_mode = 'TABLE_SERVICE' then
-      v_session := public.dd008c_open_or_reuse_table_session(p_location_id, v_table.id, 'COUNTER');
+      v_session := public.dd008c_open_or_reuse_table_session(p_location_id, v_physical_table_id, 'COUNTER');
     end if;
     v_order_id := public.dd008c_insert_order_from_items(
       p_location_id,
-      v_table.id,
+      v_physical_table_id,
       coalesce(v_session.id, ''),
       v_service_mode,
       v_fulfillment,

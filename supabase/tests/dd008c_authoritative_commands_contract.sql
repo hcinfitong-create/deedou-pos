@@ -541,7 +541,12 @@ begin
     ('takeaway-b', v_order_b)
   on conflict (key) do update set value = excluded.value;
 
-  perform public.record_order_payment('deedou-demo', v_order_a, 'VNPAY', 39000, '', 'dd008c-takeaway-pay-a', 'CASHIER', 'dd008c-cashier-device');
+  select * into v_result
+  from public.record_order_payment('deedou-demo', v_order_a, 'VNPAY', 39000, '', 'dd008c-takeaway-pay-a', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> true then
+    raise exception 'expected takeaway A payment accepted, got %/%', v_result.category, v_result.reason;
+  end if;
 
   select * into v_result
   from public.record_table_tender('deedou-demo', 'dd008c-session-d02', 'CASH', 9999999, 'dd008c-table-overpay', 'CASHIER', 'dd008c-cashier-device')
@@ -569,8 +574,28 @@ begin
     raise exception 'takeaway orders must not create table sessions';
   end if;
 
+  if exists (select 1 from public.orders where id in (v_order_a, v_order_b) and physical_table_id is not null) then
+    raise exception 'takeaway orders must not attach to physical tables';
+  end if;
+
+  if exists (select 1 from public.orders where id in (v_order_a, v_order_b) and service_mode <> 'COUNTER_SERVICE') then
+    raise exception 'takeaway orders must use counter service mode';
+  end if;
+
+  if exists (select 1 from public.orders where id in (v_order_a, v_order_b) and fulfillment_type <> 'TAKEAWAY') then
+    raise exception 'takeaway orders must keep TAKEAWAY fulfillment type';
+  end if;
+
+  if (select paid_vnd from public.orders where id = v_order_a) <> 39000 then
+    raise exception 'expected takeaway A paid_vnd 39000 after isolated payment';
+  end if;
+
   if (select paid_vnd from public.orders where id = v_order_b) <> 0 then
     raise exception 'paying takeaway A mutated takeaway B';
+  end if;
+
+  if exists (select 1 from public.payment_transactions where order_id = v_order_b) then
+    raise exception 'paying takeaway A created payment ledger rows on takeaway B';
   end if;
 end $$;
 
