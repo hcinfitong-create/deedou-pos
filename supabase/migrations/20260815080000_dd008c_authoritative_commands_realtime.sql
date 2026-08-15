@@ -503,8 +503,7 @@ begin
   set status = v_next,
       prep_started_at = case when v_next = 'IN_PREPARATION' and public.orders.prep_started_at is null then now() else public.orders.prep_started_at end,
       ready_at = case when v_next = 'READY' and public.orders.ready_at is null then now() else public.orders.ready_at end,
-      served_at = case when v_next = 'SERVED' and public.orders.served_at is null then now() else public.orders.served_at end,
-      version = public.orders.version + case when public.orders.status is distinct from v_next then 1 else 0 end
+      served_at = case when v_next = 'SERVED' and public.orders.served_at is null then now() else public.orders.served_at end
   where public.orders.id = p_order_id;
 
   perform public.dd008c_sync_payment_projection(p_order_id);
@@ -1709,6 +1708,11 @@ begin
   where order_id = p_order_id
     and line_id = any(p_line_ids);
 
+  update public.orders
+  set version = public.orders.version + 1
+  where public.orders.id = p_order_id
+    and public.orders.location_id = p_location_id;
+
   v_new_status := public.dd008c_refresh_order_status(p_order_id);
   perform public.dd008c_write_audit(p_location_id, 'STAFF', v_authz.staff_profile_id, v_authz.staff_profile_id, v_authz.device_id, 'update_kds_line_prep', 'order', p_order_id, 'OK', jsonb_build_object('prepStatus', v_next, 'lineIds', p_line_ids));
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'KDS_PREP', 'station', v_station));
@@ -1789,6 +1793,12 @@ begin
       served_at = now(),
       item_status = case when served_qty + p_qty >= qty then 'SERVED' else item_status end
   where id = v_line.id;
+
+  update public.orders
+  set version = public.orders.version + 1
+  where public.orders.id = p_order_id
+    and public.orders.location_id = p_location_id;
+
   v_new_status := public.dd008c_refresh_order_status(p_order_id);
   perform public.dd008c_write_audit(p_location_id, 'STAFF', v_authz.staff_profile_id, v_authz.staff_profile_id, v_authz.device_id, 'serve_order_line', 'order_line', v_line.line_id, 'OK');
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'LINE_SERVED'));
@@ -1860,6 +1870,12 @@ begin
     return query select * from public.dd008c_failure('INVALID_STATE', 'NO_READY_LINES');
     return;
   end if;
+
+  update public.orders
+  set version = public.orders.version + 1
+  where public.orders.id = p_order_id
+    and public.orders.location_id = p_location_id;
+
   perform public.dd008c_refresh_order_status(p_order_id);
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'order', p_order_id, jsonb_build_object('reason', 'READY_LINES_SERVED'));
   v_result := public.dd008c_result_json(true, 'OK', '', 'order', p_order_id, (select public.orders.version from public.orders where public.orders.id = p_order_id), jsonb_build_object('order', public.dd008c_order_payload(p_order_id, true)));
