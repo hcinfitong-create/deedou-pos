@@ -25,3 +25,20 @@ test("customer history does not fall back to table-code-only filtering without a
   assert.deepEqual(selectCustomerSessionOrders({ orders, tableSessionId: "" }), []);
   assert.doesNotMatch(renderCustomerOrderStatusStrip({ orders, tableSessionId: "", lang: "vi", copy }), /D01-0001/);
 });
+
+test("customer status strip confirms the submitted note and escapes note/order content", () => {
+  const orders = [{
+    id: "current",
+    orderNo: "<D01-0003>",
+    table: "A01",
+    tableSessionId: "TS-current",
+    status: "PENDING_ACCEPTANCE",
+    total: 99000,
+    note: '<img src=x onerror="boom"> no onion'
+  }];
+
+  const html = renderCustomerOrderStatusStrip({ orders, tableSessionId: "TS-current", lang: "vi", copy });
+  assert.match(html, /&lt;D01-0003&gt;/);
+  assert.match(html, /Note: &lt;img src=x onerror=&quot;boom&quot;&gt; no onion/);
+  assert.doesNotMatch(html, /<img/);
+});
