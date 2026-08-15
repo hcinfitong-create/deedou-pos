@@ -2184,7 +2184,19 @@ begin
     return query select * from public.dd008c_failure('CONFLICT', 'DESTINATION_OCCUPIED');
     return;
   end if;
-  update public.table_sessions set physical_table_id = v_destination.id, table_code = v_destination.code, zone = v_destination.zone, version = public.table_sessions.version + 1 where id = p_table_session_id returning * into v_session;
+  begin
+    update public.table_sessions
+    set physical_table_id = v_destination.id,
+        table_code = v_destination.code,
+        zone = v_destination.zone,
+        version = public.table_sessions.version + 1
+    where id = p_table_session_id
+    returning * into v_session;
+  exception
+    when unique_violation then
+      return query select * from public.dd008c_failure('CONFLICT', 'DESTINATION_OCCUPIED', 'table_session', p_table_session_id);
+      return;
+  end;
   update public.orders set physical_table_id = v_destination.id, table_code = v_destination.code, zone = v_destination.zone, version = public.orders.version + 1 where table_session_id = p_table_session_id and location_id = p_location_id;
   update public.service_requests set physical_table_id = v_destination.id, table_code = v_destination.code, zone = v_destination.zone, version = public.service_requests.version + 1 where table_session_id = p_table_session_id and status = 'OPEN';
   perform public.dd008c_emit_refresh(p_location_id, 'ops', 'table_session', p_table_session_id, jsonb_build_object('reason', 'TABLE_TRANSFER'));

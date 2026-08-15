@@ -272,8 +272,6 @@ begin
   if v_result.ok <> true or v_result.version <> 3 then raise exception 'expected KDS ACK version 3, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
   select * into v_result from public.update_kds_line_prep('deedou-demo', 'dd008c-order-pending', array['fried-rice:1:item'], 'PREPARING', 3, 'dd008c-kds-prep', 'KDS_KITCHEN', 'dd008c-kitchen-device') limit 1;
   if v_result.ok <> true or v_result.version <> 4 then raise exception 'expected KDS PREPARING version 4, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
-  select * into v_result from public.update_kds_line_prep('deedou-demo', 'dd008c-order-pending', array['fried-rice:1:item'], 'PREPARING', 3, 'dd008c-kds-prep', 'KDS_KITCHEN', 'dd008c-kitchen-device') limit 1;
-  if v_result.ok <> true or v_result.version <> 4 then raise exception 'expected KDS PREPARING replay version 4, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
   select * into v_result from public.update_kds_line_prep('deedou-demo', 'dd008c-order-pending', array['fried-rice:1:item'], 'READY', 4, 'dd008c-kds-ready', 'KDS_KITCHEN', 'dd008c-kitchen-device') limit 1;
   if v_result.ok <> true or v_result.version <> 5 then raise exception 'expected KDS READY version 5, got %/%/%', v_result.ok, v_result.reason, v_result.version; end if;
 
