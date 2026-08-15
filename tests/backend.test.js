@@ -5,10 +5,12 @@ import { readFileSync } from "node:fs";
 import {
   BACKEND_MODES,
   CONNECTION_STATES,
+  createAuthoritativeBackendApi,
   createBackendClient,
   getBackendConfig,
   getBackendMode,
   getConnectionState,
+  normalizeCommandResult,
   probeBackendConnection,
   subscribeConnectionState,
   validatePublicBackendConfig
@@ -16,13 +18,17 @@ import {
 
 const migrationSql = readFileSync(new URL("../supabase/migrations/20260812000000_dd008a_backend_foundation.sql", import.meta.url), "utf8");
 const authMigrationSql = readFileSync(new URL("../supabase/migrations/20260812010000_dd008b_auth_rbac.sql", import.meta.url), "utf8");
+const authoritativeMigrationSql = readFileSync(new URL("../supabase/migrations/20260815080000_dd008c_authoritative_commands_realtime.sql", import.meta.url), "utf8");
 const authContractSql = readFileSync(new URL("../supabase/tests/dd008b_auth_rbac_contract.sql", import.meta.url), "utf8");
+const authoritativeContractSql = readFileSync(new URL("../supabase/tests/dd008c_authoritative_commands_contract.sql", import.meta.url), "utf8");
 const seedSql = readFileSync(new URL("../supabase/seed.sql", import.meta.url), "utf8");
 const packageJson = readFileSync(new URL("../package.json", import.meta.url), "utf8");
 const gitignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8");
 const ciWorkflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const supabaseConfig = readFileSync(new URL("../supabase/config.toml", import.meta.url), "utf8");
 const browserSmokeScript = readFileSync(new URL("../scripts/dd008b-browser-smoke.mjs", import.meta.url), "utf8");
+const dd008cIntegrationScript = readFileSync(new URL("../scripts/dd008c-command-realtime.mjs", import.meta.url), "utf8");
+const appSource = readFileSync(new URL("../app.js", import.meta.url), "utf8");
 
 const exposedTables = Object.freeze([
   "locations",
@@ -174,6 +180,99 @@ test("backend client setup never reports ONLINE without a Supabase factory and p
   assert.equal(created.ok, false);
   assert.equal(created.reason, "SUPABASE_CLIENT_FACTORY_MISSING");
   assert.equal(getConnectionState().state, CONNECTION_STATES.ERROR);
+});
+
+test("DD-008C command result normalization preserves deterministic failure categories", () => {
+  assert.deepEqual(normalizeCommandResult([{ ok: true, category: "OK", entity_type: "order", entity_id: "O1", version: 3, payload: { id: "O1" } }]), {
+    ok: true,
+    category: "OK",
+    reason: "",
+    entityType: "order",
+    entityId: "O1",
+    version: 3,
+    payload: { id: "O1" }
+  });
+
+  assert.equal(normalizeCommandResult(null).ok, false);
+  assert.equal(normalizeCommandResult(null).category, "BACKEND_UNAVAILABLE");
+});
+
+test("DD-008C shared backend adapter uses the managed Supabase client and injects workstation context", async () => {
+  const calls = [];
+  const api = createAuthoritativeBackendApi({
+    config: {
+      mode: BACKEND_MODES.SUPABASE,
+      supabaseUrl: "https://deedou-demo.supabase.co",
+      supabasePublishableKey: "sb_publishable_demo_key"
+    },
+    authApi: {
+      getClient: () => ({
+        rpc: async (functionName, params) => {
+          calls.push({ functionName, params });
+          return { data: [{ ok: true, category: "OK", entity_type: "order", entity_id: "O1", version: 1, payload: {} }], error: null };
+        }
+      })
+    },
+    deviceStorage: memoryStorage({ deedou_device_credential: "server-issued-device" }),
+    authStateRef: () => ({
+      locationId: "deedou-demo",
+      authorization: { workstationMode: "CASHIER" }
+    })
+  });
+
+  const result = await api.recordOrderPayment({
+    orderId: "O1",
+    method: "CASH",
+    amountVnd: 100000,
+    tenderGroupId: "TG-1",
+    idempotencyKey: "idem-1"
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(calls[0].functionName, "record_order_payment");
+  assert.deepEqual(calls[0].params, {
+    p_location_id: "deedou-demo",
+    p_workstation_mode: "CASHIER",
+    p_device_credential: "server-issued-device",
+    p_order_id: "O1",
+    p_method: "CASH",
+    p_amount_vnd: 100000,
+    p_tender_group_id: "TG-1",
+    p_idempotency_key: "idem-1"
+  });
+});
+
+test("DD-008C app routes authoritative commands instead of SUPABASE localStorage business mutations", () => {
+  [
+    "submitQrOrder",
+    "createServiceRequest",
+    "completeServiceRequest",
+    "createStaffOrder",
+    "setOrderStatus",
+    "voidOrder",
+    "updateKdsLinePrep",
+    "serveOrderLine",
+    "serveAllReady",
+    "updateOrderLineBillQty",
+    "recordOrderPayment",
+    "voidOrderPayment",
+    "refundOrderPayment",
+    "recordTableTender",
+    "openTableVisit",
+    "transferTableVisit",
+    "closeTableVisit",
+    "subscribeLocationRefresh"
+  ].forEach((apiName) => {
+    assert.match(appSource, new RegExp(`authoritativeBackendApi\\.${apiName}`));
+  });
+  assert.match(appSource, /if \(backendConfig\.mode === BACKEND_MODES\.SUPABASE\) \{\s*state = defaultState\(\);\s*\}/);
+  assert.match(appSource, /products = \[\];/);
+  assert.match(appSource, /function handleExternalBusinessSignal/);
+  assert.match(appSource, /refreshSupabaseAuthoritativeStateFromRoute/);
+  assert.match(appSource, /applySupabaseCatalogProducts\(payload\.products\)/);
+  assert.doesNotMatch(appSource, /authoritativeBackendApi\.setOrderStatus\(\{\s*orderId,\s*status: "VOIDED"/);
+  assert.match(appSource, /localStorage admin changes are disabled in SUPABASE mode/);
+  assert.doesNotMatch(appSource, /server command not available until DD-008C/);
 });
 
 test("all exposed backend tables enable RLS", () => {
@@ -518,34 +617,38 @@ test("CI executes real DD-008B Supabase database and Auth integration contracts 
   assert.doesNotMatch(ciWorkflow, /SUPABASE_SERVICE_ROLE|PRODUCTION/i);
 });
 
-test("DD-008B merge gates run on Node 22 and include exact-head browser smoke", () => {
+test("DD-008C merge gates run on Node 22 and include exact-head integration/browser smoke", () => {
   assert.match(packageJson, /"node":\s*">=22"/i);
+  assert.match(packageJson, /"dd008c:command-realtime":\s*"node scripts\/dd008c-command-realtime\.mjs"/i);
+  assert.match(packageJson, /node --check scripts\/dd008c-command-realtime\.mjs/i);
 
-  ["test", "backend-db", "auth-integration", "browser-smoke"].forEach((jobName) => {
+  ["test", "backend-db", "auth-integration", "dd008c-integration", "browser-smoke"].forEach((jobName) => {
     const jobMatch = ciWorkflow.match(new RegExp(`${jobName}:([\\s\\S]*?)(?:\\n  [a-zA-Z0-9_-]+:|\\n?$)`, "i"));
     assert.ok(jobMatch, `Missing CI job ${jobName}`);
     assert.match(jobMatch[1], /node-version:\s*22/i, `${jobName} should use Node 22`);
     assert.match(jobMatch[1], /node --version/i, `${jobName} should print exact Node version`);
   });
 
+  assert.match(ciWorkflow, /dd008c-integration:/i);
+  assert.match(ciWorkflow, /npm run dd008c:command-realtime/i);
   assert.match(ciWorkflow, /browser-smoke:/i);
   assert.match(ciWorkflow, /npx playwright install --with-deps chromium/i);
   assert.match(ciWorkflow, /npx supabase start/i);
   assert.match(ciWorkflow, /npx supabase db reset/i);
-  assert.match(ciWorkflow, /npm run dd008b:browser-smoke/i);
+  assert.match(ciWorkflow, /npm run dd008c:browser-smoke/i);
   assert.match(ciWorkflow, /actions\/upload-artifact@v4/i);
-  assert.match(ciWorkflow, /artifacts\/dd008b-browser-smoke\//i);
+  assert.match(ciWorkflow, /artifacts\/dd008c-browser-smoke\//i);
   assert.doesNotMatch(ciWorkflow, /SUPABASE_SERVICE_ROLE|PRODUCTION/i);
 });
 
-test("DD-008B browser smoke waits for auth gate binding before login submit", () => {
+test("DD-008C browser smoke waits for auth gate binding before login submit", () => {
   const loginHelper = browserSmokeScript.match(/async function loginThroughGate[\s\S]*?\n}/)?.[0] || "";
 
   assert.match(loginHelper, /await waitForNotChecking\(page\);[\s\S]*await assertAppReady\(page, `login gate \$\{workstationMode\}`\);/);
   assert.match(loginHelper, /await assertAppReady[\s\S]*button\[type="submit"\]'\)\.click\(\);/);
 });
 
-test("DD-008B browser smoke covers Manager Location A allow and Location B deny", () => {
+test("DD-008C browser smoke covers Manager Location A allow and Location B deny", () => {
   const assignmentBlock = browserSmokeScript.match(/insert into public\.staff_location_assignments[\s\S]*?on conflict/)?.[0] || "";
 
   assert.match(browserSmokeScript, /manager: await createRuntimeUser\("manager"\)/);
@@ -555,8 +658,281 @@ test("DD-008B browser smoke covers Manager Location A allow and Location B deny"
   assert.match(browserSmokeScript, /'Browser Smoke Manager B Staff', 'STAFF'/);
   assert.match(assignmentBlock, /\$\{lit\(ids\.manager\)\}, \$\{lit\(ids\.locationA\)\}/);
   assert.doesNotMatch(assignmentBlock, /\$\{lit\(ids\.manager\)\}, \$\{lit\(ids\.locationB\)\}/);
-  assert.match(browserSmokeScript, /SUPABASE manager Location A staff allow\/read-only[\s\S]*loginThroughGate\(managerPage, users\.manager, ids\.locationA, "STAFF"\)[\s\S]*expectReadOnlyAuthorized\(managerPage, "Staff"\)/);
+  assert.match(browserSmokeScript, /SUPABASE manager Location A staff allow\/authoritative[\s\S]*loginThroughGate\(managerPage, users\.manager, ids\.locationA, "STAFF"\)[\s\S]*expectAuthoritativeAuthorized\(managerPage, "Staff"\)/);
   assert.match(browserSmokeScript, /SUPABASE manager Location B denied[\s\S]*user: users\.manager[\s\S]*locationId: ids\.locationB[\s\S]*workstationMode: "STAFF"[\s\S]*routeName: "staff"/);
+});
+
+test("DD-008C browser smoke covers separate-context operational realtime E2E", () => {
+  [
+    "runOperationalRealtimeE2E",
+    "SUPABASE E2E customer",
+    "SUPABASE E2E staff",
+    "SUPABASE E2E kitchen",
+    "SUPABASE E2E cashier",
+    "timezoneId: \"Asia/Ho_Chi_Minh\"",
+    "setFixedTime(new Date(\"2026-08-15T20:00:00+07:00\"))",
+    "evening kitchen fixture missing",
+    "browser operational E2E",
+    "customer QR authoritative pending order",
+    "DeeDou đang kiểm tra order của bạn.",
+    "99.000 đ",
+    "data-status=\"ACCEPTED\"",
+    "clickStationAction(kitchenPage, note, \"ACKNOWLEDGED\")",
+    "clickStationAction(kitchenPage, note, \"PREPARING\")",
+    "clickStationAction(kitchenPage, note, \"READY\")",
+    "data-serve-line",
+    "data-table-pay=\"A01\"",
+    "publicClient.rpc(\"create_service_request\"",
+    "Staff reconnect operational E2E",
+    "activeRealtimeTicketCount",
+    "multi-context realtime customer QR"
+  ].forEach((evidence) => {
+    assert.match(browserSmokeScript, new RegExp(escapeRegExp(evidence), "i"));
+  });
+});
+
+test("DD-008C creates authoritative command RPCs with SECURITY DEFINER and empty search path", () => {
+  [
+    "submit_qr_order",
+    "create_service_request",
+    "dd008c_get_public_table_snapshot",
+    "dd008c_get_location_snapshot",
+    "create_staff_order",
+    "set_order_status",
+    "void_order",
+    "update_kds_line_prep",
+    "serve_order_line",
+    "serve_all_ready",
+    "assign_order_family_course",
+    "hold_order_family",
+    "fire_order_family",
+    "fire_order_course",
+    "open_table_visit",
+    "transfer_table_visit",
+    "close_table_visit",
+    "complete_service_request",
+    "update_order_line_bill_qty",
+    "record_order_payment",
+    "void_order_payment",
+    "refund_order_payment",
+    "record_table_tender",
+    "dd008c_issue_realtime_ticket"
+  ].forEach((functionName) => {
+    const sql = authoritativeFunctionSql(functionName);
+    assert.match(sql, /security definer/i, `${functionName} must be SECURITY DEFINER`);
+    assert.match(sql, /set search_path = ''/i, `${functionName} must pin empty search_path`);
+  });
+});
+
+test("DD-008C exposes only intended public and authenticated command grants", () => {
+  ["submit_qr_order", "create_service_request", "dd008c_get_public_table_snapshot"].forEach((functionName) => {
+    assert.match(authoritativeMigrationSql, new RegExp(`grant execute on function public\\.${functionName}\\([\\s\\S]*?\\) to anon, authenticated;`, "i"));
+  });
+
+  [
+    "dd008c_get_location_snapshot",
+    "create_staff_order",
+    "set_order_status",
+    "void_order",
+    "update_kds_line_prep",
+    "serve_order_line",
+    "serve_all_ready",
+    "complete_service_request",
+    "update_order_line_bill_qty",
+    "record_order_payment",
+    "void_order_payment",
+    "refund_order_payment",
+    "record_table_tender",
+    "dd008c_issue_realtime_ticket"
+  ].forEach((functionName) => {
+    assert.match(authoritativeMigrationSql, new RegExp(`grant execute on function public\\.${functionName}\\([\\s\\S]*?\\) to authenticated;`, "i"));
+  });
+
+  assert.doesNotMatch(authoritativeMigrationSql, /grant\s+(insert|update|delete|all)[\s\S]*to\s+anon/i);
+  assert.doesNotMatch(authoritativeMigrationSql, /grant\s+(insert|update|delete|all)[\s\S]*to\s+authenticated/i);
+});
+
+test("DD-008C Supabase snapshots carry PostgreSQL catalog data without routing internals", () => {
+  const catalog = authoritativeFunctionSql("dd008c_public_menu_payload");
+  const staffSnapshot = authoritativeFunctionSql("dd008c_get_location_snapshot");
+  const publicSnapshot = authoritativeFunctionSql("dd008c_get_public_table_snapshot");
+
+  assert.match(staffSnapshot, /'products', public\.dd008c_public_menu_payload\(p_location_id\)/i);
+  assert.match(publicSnapshot, /'products', public\.dd008c_public_menu_payload\(v_table\.location_id\)/i);
+  assert.match(catalog, /public\.products\.available = true/i);
+  assert.match(catalog, /public\.product_variants\.available = true/i);
+  assert.match(catalog, /public\.modifier_options\.available = true/i);
+  assert.match(catalog, /public\.product_components/i);
+  assert.doesNotMatch(catalog, /station_code/i);
+  ["payment_transactions", "audit_events", "command_deduplication", "staff_profiles", "workstation_devices", "device_credential"].forEach((forbidden) => {
+    assert.equal(catalog.includes(forbidden), false, forbidden);
+  });
+});
+
+test("DD-008C authoritative commands keep DD-003 through DD-007 invariants server-side", () => {
+  const qrSubmit = authoritativeFunctionSql("submit_qr_order");
+  const insertOrder = authoritativeFunctionSql("dd008c_insert_order_from_items");
+  const kds = authoritativeFunctionSql("update_kds_line_prep");
+  const serveLine = authoritativeFunctionSql("serve_order_line");
+  const assignCourse = authoritativeFunctionSql("assign_order_family_course");
+  const holdFamily = authoritativeFunctionSql("hold_order_family");
+  const fireFamily = authoritativeFunctionSql("fire_order_family");
+  const fireCourse = authoritativeFunctionSql("fire_order_course");
+  const payment = authoritativeFunctionSql("record_order_payment");
+  const refund = authoritativeFunctionSql("refund_order_payment");
+  const billQty = authoritativeFunctionSql("update_order_line_bill_qty");
+  const voidOrder = authoritativeFunctionSql("void_order");
+
+  assert.match(qrSubmit, /command_deduplication/i);
+  assert.match(qrSubmit, /dd008c_public_order_validation_reason\(SQLERRM\)/i);
+  assert.match(insertOrder, /products\.available = true/i);
+  assert.match(insertOrder, /PRODUCT_UNAVAILABLE/i);
+  assert.match(insertOrder, /dd008c_current_service_period\(p_location_id\)/i);
+  assert.match(insertOrder, /PRODUCT_OUT_OF_PERIOD/i);
+  assert.match(insertOrder, /OPTION_COUNT_INVALID/i);
+  assert.match(kds, /station_code <> 'COMBO'/i);
+  assert.match(kds, /hold_state <> 'FIRED'/i);
+  assert.match(kds, /INVALID_PREP_STATUS_TRANSITION/i);
+  assert.doesNotMatch(kds, /SERVED/);
+  assert.match(serveLine, /v_line\.served_qty \+ p_qty > v_line\.qty/i);
+  assert.doesNotMatch(serveLine, /dd008c_audited_failure[\s\S]*'serve_all_ready'/i);
+  assert.match(fireFamily, /ALREADY_FIRED/i);
+  [assignCourse, holdFamily, fireFamily, fireCourse].forEach((courseCommand) => {
+    assert.match(courseCommand, /where id = p_order_id and location_id = p_location_id for update/i);
+    assert.match(courseCommand, /ORDER_NOT_FOUND/i);
+  });
+  [assignCourse, holdFamily, fireFamily].forEach((familyCommand) => {
+    assert.match(familyCommand, /LINE_NOT_FOUND/i);
+  });
+  assert.match(payment, /PAYMENT_EXCEEDS_OUTSTANDING/i);
+  assert.match(payment, /command_deduplication/i);
+  assert.match(refund, /REFUND_EXCEEDS_REMAINING/i);
+  assert.match(billQty, /PAYMENT_EXISTS/i);
+  assert.match(billQty, /BILL_QTY_EXCEEDS_QTY/i);
+  assert.match(voidOrder, /'orders\.void'/i);
+  assert.match(voidOrder, /PAYMENT_EXISTS/i);
+  assert.match(voidOrder, /IDEMPOTENCY_KEY_REUSED/i);
+  assert.match(voidOrder, /dd008c_audit_staff_result/i);
+  assert.match(voidOrder, /ORDER_VOIDED/i);
+  assert.match(authoritativeMigrationSql, /'orders\.void', 'orders\.void'/i);
+  assert.match(authoritativeMigrationSql, /when 'CASHIER' then p_permission_key in \([\s\S]*'orders\.void'/i);
+});
+
+test("DD-008C table tender validates outstanding balance before ledger inserts", () => {
+  const tableTender = authoritativeFunctionSql("record_table_tender");
+
+  assert.match(tableTender, /select \* into v_session from public\.table_sessions/i);
+  assert.match(tableTender, /for update/i);
+  assert.match(tableTender, /order by public\.orders\.created_at, public\.orders\.id[\s\S]*for update/i);
+  assert.match(tableTender, /NO_OUTSTANDING_BALANCE/i);
+  assert.match(tableTender, /TENDER_EXCEEDS_OUTSTANDING/i);
+  assert.ok(
+    tableTender.indexOf("TENDER_EXCEEDS_OUTSTANDING") < tableTender.indexOf("insert into public.payment_transactions"),
+    "table tender must reject overpayment before inserting payment rows"
+  );
+  assert.match(tableTender, /command_deduplication/i);
+});
+
+test("DD-008C realtime refresh is audience and workstation-device ticket scoped", () => {
+  const issueTicket = authoritativeFunctionSql("dd008c_issue_realtime_ticket");
+
+  assert.match(authoritativeMigrationSql, /create table if not exists public\.dd008c_refresh_hints/i);
+  assert.match(authoritativeMigrationSql, /create table if not exists public\.dd008c_realtime_subscription_tickets/i);
+  assert.match(authoritativeMigrationSql, /alter table public\.dd008c_refresh_hints enable row level security/i);
+  assert.match(authoritativeMigrationSql, /alter table public\.dd008c_realtime_subscription_tickets enable row level security/i);
+  assert.match(authoritativeMigrationSql, /revoke all on public\.dd008c_refresh_hints from anon, authenticated/i);
+  assert.match(authoritativeMigrationSql, /revoke all on public\.dd008c_realtime_subscription_tickets from anon, authenticated/i);
+  assert.doesNotMatch(authoritativeMigrationSql, /grant select on public\.dd008c_refresh_hints to authenticated/i);
+  assert.doesNotMatch(authoritativeMigrationSql, /grant select on public\.dd008c_realtime_subscription_tickets to (anon|authenticated)/i);
+  assert.doesNotMatch(authoritativeMigrationSql, /create policy dd008c_refresh_hints_staff_location_read/i);
+  assert.doesNotMatch(authoritativeMigrationSql, /using\s*\(\s*public\.dd008c_refresh_audience_allowed\(location_id,\s*audience\)\s*\)/i);
+  assert.match(authoritativeMigrationSql, /create or replace function public\.dd008c_refresh_audience_allowed\(\s*p_location_id text,\s*p_audience text,\s*p_ticket_id text/i);
+  assert.match(authoritativeMigrationSql, /public\.dd008c_refresh_permission_for_audience\(p_audience\)/i);
+  assert.match(issueTicket, /public\.authorize_staff_access\(p_location_id, v_permission, p_workstation_mode, p_device_credential\)/i);
+  assert.match(issueTicket, /'location:' \|\| p_location_id \|\| ':' \|\| v_audience \|\| ':' \|\| v_ticket_id::text/i);
+  assert.match(authoritativeMigrationSql, /public\.workstation_mode_allows_permission\(/i);
+  assert.match(authoritativeMigrationSql, /public\.workstation_devices\.active = true/i);
+  assert.match(authoritativeMigrationSql, /realtime\.send\(v_payload, 'refresh', v_ticket_topic, true\)/i);
+  assert.match(authoritativeMigrationSql, /public\.dd008c_refresh_audience_allowed\(\s*split_part\(realtime\.topic\(\), ':', 2\),\s*split_part\(realtime\.topic\(\), ':', 3\),\s*split_part\(realtime\.topic\(\), ':', 4\)/i);
+  assert.doesNotMatch(authoritativeMigrationSql, /realtime\.send\(v_payload, 'refresh', v_topic, true\)/i);
+  assert.match(authoritativeMigrationSql, /alter publication supabase_realtime add table public\.dd008c_refresh_hints/i);
+  assert.match(authoritativeMigrationSql, /public\.dd008c_emit_refresh/i);
+  assert.match(authoritativeContractSql, /manager on STAFF workstation denied cashier realtime/i);
+  assert.match(authoritativeContractSql, /expected KDS denied cashier realtime/i);
+  assert.match(authoritativeContractSql, /expected revoked device denied realtime/i);
+  assert.match(authoritativeContractSql, /expected authenticated raw refresh hint read to be blocked/i);
+  assert.match(browserSmokeScript, /execFileSync\("psql"/i);
+  assert.doesNotMatch(browserSmokeScript, /\.from\("dd008c_realtime_subscription_tickets"\)/i);
+});
+
+test("DD-008C app reuses pending command-intent idempotency keys", () => {
+  assert.match(appSource, /SUPABASE_COMMAND_INTENTS_KEY/);
+  assert.match(appSource, /function pendingCommandKey/);
+  assert.match(appSource, /function clearPendingCommandKey/);
+  assert.match(appSource, /function isTerminalCommandResult/);
+  assert.match(appSource, /operation\(idempotencyKey\)/);
+  assert.match(appSource, /tenderGroupIdForCommand\(idempotencyKey\)/);
+  assert.doesNotMatch(appSource, /idempotencyKey:\s*nextCommandKey\(/);
+});
+
+test("CI executes the DD-008C authoritative command contract against the real local database", () => {
+  assert.match(ciWorkflow, /supabase\/tests\/dd008c_authoritative_commands_contract\.sql/i);
+  [
+    "submit_qr_order",
+    "create_staff_order",
+    "set_order_status",
+    "void_order",
+    "update_kds_line_prep",
+    "serve_order_line",
+    "record_order_payment",
+    "record_table_tender",
+    "open_table_visit",
+    "transfer_table_visit",
+    "close_table_visit"
+  ].forEach((functionName) => {
+    assert.match(authoritativeContractSql, new RegExp(`public\\.${functionName}`, "i"));
+  });
+  assert.match(authoritativeContractSql, /TENDER_EXCEEDS_OUTSTANDING/i);
+  assert.match(authoritativeContractSql, /SERVED_QTY_EXCEEDS_REMAINING/i);
+  assert.match(authoritativeContractSql, /expected multi-station order READY after all stations ready/i);
+  assert.match(authoritativeContractSql, /expected void accepted version 2/i);
+  assert.match(authoritativeContractSql, /PRODUCT_OUT_OF_PERIOD/i);
+  assert.match(authoritativeContractSql, /ORDER_VALIDATION_FAILED/i);
+  assert.match(authoritativeContractSql, /public catalog snapshot to include configured mango-tea options/i);
+});
+
+test("DD-008C real integration script covers command concurrency and refresh convergence", () => {
+  [
+    "Promise.all",
+    "submit_qr_order",
+    "record_order_payment",
+    "assign_order_family_course",
+    "record_table_tender",
+    "open_table_visit",
+    "transfer_table_visit",
+    "STALE_VERSION",
+    "course conflict",
+    "payment race",
+    "staffRefresh",
+    "cashierRefresh",
+    "audiences: [\"ops\"]",
+    "audiences: [\"ops\", \"cashier\"]",
+    "dd008c_issue_realtime_ticket",
+    "location:${LOCATION_ID}:${audience}:",
+    "manager STAFF workstation denied cashier realtime",
+    "forged cashier realtime subscription denied by RLS",
+    "revoked device denied realtime ticket",
+    "private refresh broadcast",
+    "SUBSCRIPTION_READY",
+    "payload.events",
+    "create_service_request",
+    "reconnect/refetch",
+    "Real password login"
+  ].forEach((evidence) => {
+    assert.match(dd008cIntegrationScript, new RegExp(escapeRegExp(evidence), "i"));
+  });
+
+  assert.doesNotMatch(dd008cIntegrationScript, /console\.log\([^)]*(serviceRoleKey|anonKey|deviceSecrets|password)/i);
 });
 
 function functionSql(functionName) {
@@ -568,6 +944,12 @@ function functionSql(functionName) {
 function authFunctionSql(functionName) {
   const match = authMigrationSql.match(new RegExp(`create or replace function public\\.${functionName}\\([\\s\\S]*?\\n\\$\\$;`, "i"));
   assert.ok(match, `Missing auth function ${functionName}`);
+  return match[0];
+}
+
+function authoritativeFunctionSql(functionName) {
+  const match = authoritativeMigrationSql.match(new RegExp(`create or replace function public\\.${functionName}\\([\\s\\S]*?\\n\\$\\$;`, "i"));
+  assert.ok(match, `Missing DD-008C function ${functionName}`);
   return match[0];
 }
 
@@ -587,6 +969,21 @@ function fakeJwt(payload) {
 
 function base64UrlJson(value) {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
+
+function memoryStorage(initialValues = {}) {
+  const values = new Map(Object.entries(initialValues));
+  return {
+    getItem(key) {
+      return values.has(key) ? values.get(key) : null;
+    },
+    setItem(key, value) {
+      values.set(key, String(value));
+    },
+    removeItem(key) {
+      values.delete(key);
+    }
+  };
 }
 
 function escapeRegExp(value) {

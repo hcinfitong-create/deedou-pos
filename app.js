@@ -1,7 +1,7 @@
 import { COUNTER_DRAFT_KEY, COUNTER_SEARCH_KEY, PRODUCT_KEY, STATE_KEY, stationAliases, stations, tables } from "./src/shared/config/index.js";
 import { copy } from "./src/shared/i18n/index.js";
 import { escapeAttr, escapeHtml, formatMoney, normalizeSearch, slugify } from "./src/shared/utils/index.js";
-import { BACKEND_MODES, getBackendConfig } from "./src/shared/backend/index.js";
+import { BACKEND_MODES, createAuthoritativeBackendApi, getBackendConfig } from "./src/shared/backend/index.js";
 import {
   createInitialStaffAuthState,
   createSupabasePasswordAuthApi,
@@ -104,10 +104,27 @@ let pendingVoidOrderId = "";
 let pendingSplitPlan = null;
 let cashierNotice = "";
 const backendConfig = getBackendConfig();
+if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+  state = defaultState();
+}
 const staffAuthApi = createSupabasePasswordAuthApi({ config: backendConfig, storage: localStorage, deviceStorage: localStorage });
+const authoritativeBackendApi = createAuthoritativeBackendApi({
+  config: backendConfig,
+  authApi: staffAuthApi,
+  deviceStorage: localStorage,
+  authStateRef: () => staffAuthState
+});
 let staffAuthState = createInitialStaffAuthState({ config: backendConfig, localStorage });
 let pendingStaffAuthKey = "";
 let supabaseCommandNotice = "";
+let supabaseSnapshotLoaded = false;
+let supabaseSnapshotLoading = false;
+let supabaseSnapshotError = "";
+let supabaseRefreshSubscription = null;
+let supabaseCustomerToken = "";
+let supabaseCustomerLoaded = false;
+let supabaseCustomerLoading = false;
+let supabaseCustomerError = "";
 
 const CASHIER_PAYMENT_METHODS = Object.freeze([
   { method: "CASH", label: "Cash", buttonClass: "primary" },
@@ -117,28 +134,59 @@ const CASHIER_PAYMENT_METHODS = Object.freeze([
   { method: "MOMO", label: "MoMo (demo)", buttonClass: "ghost" },
   { method: "ZALOPAY", label: "ZaloPay (demo)", buttonClass: "ghost" }
 ]);
+const SUPABASE_COMMAND_INTENTS_KEY = "deedou_supabase_command_intents";
 
 const bus = "BroadcastChannel" in window ? new BroadcastChannel("deedou-pos") : null;
 if (bus) {
   bus.onmessage = () => {
-    products = loadProducts();
-    state = loadState();
-    render();
+    handleExternalBusinessSignal();
   };
 }
 
 window.addEventListener("hashchange", render);
-window.addEventListener("storage", () => {
-  products = loadProducts();
-  state = loadState();
-  render();
+window.addEventListener("storage", (event) => {
+  handleExternalBusinessSignal(event);
 });
 document.addEventListener("click", handleCourseWorkflowClick);
 if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+  products = [];
   staffAuthApi.onAuthStateChange(syncStaffAuthSession);
   restoreStaffAuthSession();
 }
 render();
+
+function handleExternalBusinessSignal(event = {}) {
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    if (event.key && ![STATE_KEY, PRODUCT_KEY, "deedou_products"].includes(event.key)) {
+      render();
+      return;
+    }
+    refreshSupabaseAuthoritativeStateFromRoute();
+    return;
+  }
+  try {
+    products = loadProducts();
+    state = loadState();
+    render();
+  } catch {
+    render();
+  }
+}
+
+function refreshSupabaseAuthoritativeStateFromRoute() {
+  const current = route();
+  if (current.name === "customer") {
+    supabaseCustomerLoaded = false;
+    ensureSupabasePublicTableState(current.token, { force: true });
+    return;
+  }
+  if (isStaffRoute(current.name)) {
+    supabaseSnapshotLoaded = false;
+    ensureSupabaseOperationalState({ force: true });
+    return;
+  }
+  render();
+}
 
 function loadState() {
   const saved = localStorage.getItem(STATE_KEY);
@@ -162,9 +210,8 @@ function loadCounterDraft() {
 }
 
 function saveCounterDraft() {
-  if (blockSupabaseLocalCommand("COUNTER_DRAFT")) {
-    counterDraft = loadCounterDraft();
-    return false;
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    return true;
   }
   localStorage.setItem(COUNTER_DRAFT_KEY, JSON.stringify(counterDraft));
   return true;
@@ -277,6 +324,38 @@ function loadProducts() {
   return structuredClone(defaultProducts).map(normalizeProduct);
 }
 
+function normalizeSupabaseCatalogProduct(item = {}) {
+  return normalizeProduct({
+    id: item.id,
+    kind: item.kind,
+    category: item.category,
+    vi: item.vi ?? item.nameVi ?? item.name_vi,
+    en: item.en ?? item.nameEn ?? item.name_en,
+    descVi: item.descVi ?? item.desc_vi ?? "",
+    descEn: item.descEn ?? item.desc_en ?? "",
+    price: item.price ?? item.priceVnd ?? item.price_vnd ?? 0,
+    image: item.image ?? item.imageUrl ?? item.image_url ?? "",
+    color: item.color || "#dcefe5",
+    art: item.art || "plate",
+    available: item.available !== false,
+    periods: Array.isArray(item.periods) ? item.periods : [],
+    station: "MENU",
+    components: (item.components || []).map((component) => ({
+      vi: component.vi ?? component.nameVi ?? component.name_vi,
+      en: component.en ?? component.nameEn ?? component.name_en,
+      qty: component.qty,
+      station: "MENU_COMPONENT"
+    })),
+    variants: item.variants || [],
+    modifierGroups: item.modifierGroups || item.modifiers || []
+  });
+}
+
+function applySupabaseCatalogProducts(catalogProducts) {
+  if (!Array.isArray(catalogProducts)) return;
+  products = catalogProducts.map(normalizeSupabaseCatalogProduct).filter((item) => item.available);
+}
+
 function normalizeProduct(item) {
   const base = defaultProducts.find((defaultItem) => defaultItem.id === item.id);
   const category = categoryAliases[item.category] || item.category;
@@ -302,20 +381,14 @@ function normalizeProduct(item) {
 }
 
 function saveProducts() {
-  if (blockSupabaseLocalCommand("MENU_SAVE")) {
-    products = loadProducts();
-    return false;
-  }
+  if (blockSupabaseLocalCommand("MENU_SAVE")) return false;
   localStorage.setItem(PRODUCT_KEY, JSON.stringify(products));
   broadcast();
   return true;
 }
 
 function saveState() {
-  if (blockSupabaseLocalCommand("STATE_SAVE")) {
-    state = loadState();
-    return false;
-  }
+  if (blockSupabaseLocalCommand("STATE_SAVE")) return false;
   refreshAllPaymentProjections();
   localStorage.setItem(STATE_KEY, JSON.stringify(state));
   broadcast();
@@ -328,8 +401,101 @@ function broadcast() {
 
 function blockSupabaseLocalCommand(commandName = "LOCAL_COMMAND") {
   if (backendConfig.mode !== BACKEND_MODES.SUPABASE) return false;
-  supabaseCommandNotice = `${commandName}: server command not available until DD-008C. Local demo storage was not mutated.`;
+  supabaseCommandNotice = `${commandName}: command must run through DeeDou server authority in SUPABASE mode. Local demo storage was not mutated.`;
   return true;
+}
+
+function commandFailureMessage(result = {}) {
+  return [result.category || "BACKEND_UNAVAILABLE", result.reason || "COMMAND_FAILED"].filter(Boolean).join(": ");
+}
+
+async function runSupabaseAuthoritativeCommand(commandName, operation, options = {}) {
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE) return false;
+  const intent = options.intent || null;
+  const idempotencyKey = intent ? pendingCommandKey(commandName, intent) : nextCommandKey(commandName);
+  try {
+    const result = await operation(idempotencyKey);
+    if (intent && isTerminalCommandResult(result)) clearPendingCommandKey(commandName, intent);
+    if (!result?.ok) {
+      supabaseCommandNotice = `${commandName}: ${commandFailureMessage(result)}`;
+      render();
+      return false;
+    }
+    supabaseCommandNotice = `${commandName}: OK`;
+    supabaseSnapshotLoaded = false;
+    await ensureSupabaseOperationalState({ force: true });
+    return true;
+  } catch (error) {
+    supabaseCommandNotice = `${commandName}: ${error?.message || "BACKEND_UNAVAILABLE"}`;
+    render();
+  }
+  return false;
+}
+
+function nextCommandKey(prefix) {
+  const suffix = crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+  return `${prefix}-${suffix}`;
+}
+
+function pendingCommandKey(commandName, intent) {
+  const intents = loadCommandIntents();
+  const fingerprint = commandIntentFingerprint(commandName, intent);
+  if (!intents[fingerprint]) {
+    intents[fingerprint] = nextCommandKey(commandName);
+    saveCommandIntents(intents);
+  }
+  return intents[fingerprint];
+}
+
+function clearPendingCommandKey(commandName, intent) {
+  const intents = loadCommandIntents();
+  const fingerprint = commandIntentFingerprint(commandName, intent);
+  if (!intents[fingerprint]) return;
+  delete intents[fingerprint];
+  saveCommandIntents(intents);
+}
+
+function isTerminalCommandResult(result) {
+  return !!result && result.category !== "BACKEND_UNAVAILABLE";
+}
+
+function commandIntentFingerprint(commandName, intent) {
+  return `${commandName}:${JSON.stringify(stableCommandValue(intent))}`;
+}
+
+function stableCommandValue(value) {
+  if (Array.isArray(value)) return value.map(stableCommandValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.keys(value).sort().reduce((result, key) => {
+    result[key] = stableCommandValue(value[key]);
+    return result;
+  }, {});
+}
+
+function loadCommandIntents() {
+  try {
+    const saved = localStorage.getItem(SUPABASE_COMMAND_INTENTS_KEY);
+    const parsed = saved ? JSON.parse(saved) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveCommandIntents(intents) {
+  try {
+    localStorage.setItem(SUPABASE_COMMAND_INTENTS_KEY, JSON.stringify(intents));
+  } catch {
+    // A lost local cache should not block the authoritative command.
+  }
+}
+
+function cartLinesForCommand(lines = []) {
+  return (lines || []).map((line) => ({
+    productId: line.id,
+    qty: line.qty,
+    selection: line.selection || line.configuredOptions || {}
+  }));
 }
 
 function route() {
@@ -343,18 +509,26 @@ function route() {
 
 function render() {
   const current = route();
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE && current.name === "customer") {
+    prepareSupabaseCustomerRoute(current.token);
+  }
   const staffAccess = evaluateCurrentStaffRoute(current.name);
   document.getElementById("app").innerHTML = shell(current, staffAccess);
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE && current.name === "customer" && !supabaseCustomerError) {
+    ensureSupabasePublicTableState(current.token);
+  }
   if (shouldRenderStaffAuthGate(current.name, staffAccess)) {
     bindStaffAuthGate(current.name);
     ensureStaffAuthorization(current.name);
     return;
   }
-  if (shouldRenderSupabaseReadOnly(current.name, staffAccess)) {
-    bindSupabaseReadOnlyRoute(current.name);
+  if (shouldUseSupabaseAuthoritativeState(current.name, staffAccess) && !supabaseSnapshotLoaded) {
+    bindGlobal();
     ensureStaffAuthorization(current.name);
+    if (!supabaseSnapshotError) ensureSupabaseOperationalState();
     return;
   }
+  if (shouldUseSupabaseAuthoritativeState(current.name, staffAccess) && !supabaseSnapshotError) ensureSupabaseOperationalState();
   if (current.name === "customer") bindCustomer(current.token);
   if (current.name === "staff") bindStaff();
   if (current.name === "cashier") bindCashier();
@@ -395,12 +569,13 @@ function pageFor(active, current, staffAccess) {
   if (shouldRenderStaffAuthGate(active, staffAccess)) {
     return renderStaffAuthGate({ routeName: active, authState: staffAuthState, access: staffAccess, config: backendConfig });
   }
-  if (shouldRenderSupabaseReadOnly(active, staffAccess)) return supabaseReadOnlyPage(active);
+  if (shouldUseSupabaseAuthoritativeState(active, staffAccess) && !supabaseSnapshotLoaded) return supabaseLoadingPage(active);
   if (active === "cashier") return cashierPage();
   if (active === "staff") return staffPage();
   if (active === "bar") return renderStationPage({ orders: state.orders, stationGroup: "BAR", stations });
   if (active === "kitchen") return renderStationPage({ orders: state.orders, stationGroup: "KITCHEN", stations });
   if (active === "dessert") return renderStationPage({ orders: state.orders, stationGroup: "DESSERT", stations });
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE && active === "admin") return supabaseAdminDeferredPage();
   return adminPage();
 }
 
@@ -412,7 +587,7 @@ function shouldRenderStaffAuthGate(routeName, staffAccess) {
   return backendConfig.mode === BACKEND_MODES.SUPABASE && isStaffRoute(routeName) && staffAccess?.ok !== true;
 }
 
-function shouldRenderSupabaseReadOnly(routeName, staffAccess) {
+function shouldUseSupabaseAuthoritativeState(routeName, staffAccess) {
   return backendConfig.mode === BACKEND_MODES.SUPABASE && isStaffRoute(routeName) && staffAccess?.ok === true;
 }
 
@@ -474,6 +649,7 @@ async function refreshStaffAuthorization(routeName, authKey = "") {
       hasDeviceCredential: Boolean(readStoredDeviceCredential(localStorage)),
       error: ""
     };
+    if (authorization.ok) ensureSupabaseOperationalState({ force: true });
   } catch (error) {
     if (pendingStaffAuthKey !== nextKey) return;
     staffAuthState = {
@@ -485,6 +661,116 @@ async function refreshStaffAuthorization(routeName, authKey = "") {
     };
   }
   render();
+}
+
+async function ensureSupabaseOperationalState(options = {}) {
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE || !staffAuthState.session || staffAuthState.authorization?.ok !== true) return;
+  if (supabaseSnapshotLoading) return;
+  if (supabaseSnapshotLoaded && !options.force) return;
+  supabaseSnapshotLoading = true;
+  supabaseSnapshotError = "";
+  try {
+    const result = await authoritativeBackendApi.fetchStaffSnapshot({
+      locationId: staffAuthState.locationId,
+      workstationMode: staffAuthState.authorization?.workstationMode || staffAuthState.workstationMode
+    });
+    if (!result.ok) {
+      supabaseSnapshotError = commandFailureMessage(result);
+      supabaseSnapshotLoaded = false;
+    } else {
+      applySupabaseSnapshot(result.payload);
+      subscribeSupabaseRefresh();
+    }
+  } catch (error) {
+    supabaseSnapshotError = error?.message || "BACKEND_UNAVAILABLE";
+    supabaseSnapshotLoaded = false;
+  }
+  supabaseSnapshotLoading = false;
+  render();
+}
+
+function applySupabaseSnapshot(payload = {}) {
+  applySupabaseCatalogProducts(payload.products);
+  state = normalizeState({
+    ...defaultState(),
+    orders: payload.orders || [],
+    events: payload.events || [],
+    tableSessions: payload.tableSessions || [],
+    sequence: state.sequence || 1
+  });
+  supabaseSnapshotLoaded = true;
+  supabaseSnapshotError = "";
+}
+
+function prepareSupabaseCustomerRoute(token) {
+  if (supabaseCustomerToken === token) return;
+  supabaseCustomerToken = token;
+  supabaseCustomerLoaded = false;
+  supabaseCustomerError = "";
+  state = normalizeState({
+    ...defaultState(),
+    cart: state.cart || [],
+    sequence: state.sequence || 1
+  });
+}
+
+async function ensureSupabasePublicTableState(token, options = {}) {
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE || !token) return;
+  if (supabaseCustomerLoading) return;
+  if (supabaseCustomerLoaded && !options.force) return;
+  supabaseCustomerLoading = true;
+  supabaseCustomerError = "";
+  try {
+    const result = await authoritativeBackendApi.fetchPublicTableSnapshot(token);
+    if (!result.ok) {
+      supabaseCustomerError = commandFailureMessage(result);
+      supabaseCustomerLoaded = false;
+    } else {
+      applySupabasePublicSnapshot(result.payload);
+    }
+  } catch (error) {
+    supabaseCustomerError = error?.message || "BACKEND_UNAVAILABLE";
+    supabaseCustomerLoaded = false;
+  }
+  supabaseCustomerLoading = false;
+  render();
+}
+
+function applySupabasePublicSnapshot(payload = {}) {
+  const tableSession = payload.tableSession ? [payload.tableSession] : payload.tableSessions || [];
+  applySupabaseCatalogProducts(payload.products);
+  state = normalizeState({
+    ...defaultState(),
+    cart: state.cart || [],
+    orders: payload.orders || [],
+    events: payload.events || [],
+    tableSessions: tableSession,
+    sequence: state.sequence || 1
+  });
+  supabaseCustomerLoaded = true;
+  supabaseCustomerError = "";
+}
+
+function subscribeSupabaseRefresh() {
+  if (supabaseRefreshSubscription || backendConfig.mode !== BACKEND_MODES.SUPABASE) return;
+  supabaseRefreshSubscription = authoritativeBackendApi.subscribeLocationRefresh({
+    locationId: staffAuthState.locationId || DEFAULT_LOCATION_ID,
+    onRefresh: () => {
+      supabaseSnapshotLoaded = false;
+      ensureSupabaseOperationalState({ force: true });
+    },
+    onError: (error) => {
+      supabaseSnapshotError = error?.message || "REALTIME_UNAVAILABLE";
+    }
+  });
+}
+
+function resetSupabaseOperationalState() {
+  supabaseSnapshotLoaded = false;
+  supabaseSnapshotLoading = false;
+  supabaseSnapshotError = "";
+  supabaseRefreshSubscription?.unsubscribe?.();
+  supabaseRefreshSubscription = null;
 }
 
 async function restoreStaffAuthSession() {
@@ -518,6 +804,7 @@ async function restoreStaffAuthSession() {
 
 function syncStaffAuthSession({ session } = {}) {
   if (backendConfig.mode !== BACKEND_MODES.SUPABASE) return;
+  resetSupabaseOperationalState();
   staffAuthState = {
     ...staffAuthState,
     status: session ? "SIGNED_IN_STALE" : "SIGNED_OUT",
@@ -533,7 +820,7 @@ function syncStaffAuthSession({ session } = {}) {
   render();
 }
 
-function supabaseReadOnlyPage(routeName) {
+function supabaseLoadingPage(routeName) {
   const policy = getStaffRoutePolicy(routeName);
   const staffContext = staffAuthState.staffContext?.find((row) => row.locationId === staffAuthState.locationId) || staffAuthState.staffContext?.[0];
   return `
@@ -543,7 +830,7 @@ function supabaseReadOnlyPage(routeName) {
           <div>
             <div class="kicker">SUPABASE MODE</div>
             <h1>${escapeHtml(policy?.label || routeName)} đã xác thực</h1>
-            <p class="muted">DD-008B chỉ bật Auth/RBAC. Các lệnh order, payment, KDS, table, service, course, menu và admin sẽ fail-closed cho đến DD-008C.</p>
+            <p class="muted">${escapeHtml(supabaseSnapshotError || "Đang tải dữ liệu vận hành từ server DeeDou.")}</p>
           </div>
           <button class="ghost" data-auth-logout>Logout</button>
         </div>
@@ -554,18 +841,25 @@ function supabaseReadOnlyPage(routeName) {
           <span class="station">${escapeHtml(staffAuthState.authorization?.workstationMode || policy?.workstationMode || "")}</span>
         </div>
         ${supabaseCommandNotice ? `<p class="notice">${escapeHtml(supabaseCommandNotice)}</p>` : ""}
-        <button class="primary" data-supabase-command="DD008C_PENDING">Test server command availability</button>
+        <button class="ghost" data-supabase-refresh>Refresh</button>
       </div>
     </section>
   `;
 }
 
-function bindSupabaseReadOnlyRoute() {
-  bindGlobal();
-  document.querySelectorAll("[data-supabase-command]").forEach((button) => button.addEventListener("click", () => {
-    blockSupabaseLocalCommand(button.dataset.supabaseCommand || "SUPABASE_COMMAND");
-    render();
-  }));
+function bindSupabaseReadOnlyRoute() {}
+
+function supabaseAdminDeferredPage() {
+  return `
+    <section class="page admin-page">
+      <div class="panel section-pad auth-gate">
+        <div class="kicker">SUPABASE MODE</div>
+        <h1>Admin DeeDou</h1>
+        <p class="muted">Menu/admin mutation RPCs are deferred; localStorage admin changes are disabled in SUPABASE mode.</p>
+        ${supabaseCommandNotice ? `<p class="notice">${escapeHtml(supabaseCommandNotice)}</p>` : ""}
+      </div>
+    </section>
+  `;
 }
 
 function customerPage(token) {
@@ -590,6 +884,7 @@ function customerPage(token) {
           </div>
           <div class="hero-media" aria-hidden="true"></div>
         </section>
+        ${backendConfig.mode === BACKEND_MODES.SUPABASE && supabaseCustomerError ? `<p class="notice">${escapeHtml(supabaseCustomerError)}</p>` : ""}
         <div class="menu-filter">
           <div class="tabs main-tabs" aria-label="Menu lớn">
             ${menuKinds.map((kind) => `<button class="tab main-tab ${activeKind === kind.id ? "active" : ""}" data-kind="${kind.id}">${kind[lang]}</button>`).join("")}
@@ -876,10 +1171,10 @@ function tablePaymentPanel(table, orders) {
       </label>
       ${splitPlan ? renderSplitPlan(splitPlan) : ""}
       <div class="split-actions table-payment-actions">
-        <button class="ghost" data-table-prebill="${escapeAttr(table.code)}">Pre-bill</button>
+        ${backendConfig.mode === BACKEND_MODES.SUPABASE ? "" : `<button class="ghost" data-table-prebill="${escapeAttr(table.code)}">Pre-bill</button>`}
         ${renderPaymentMethodButtons({ actionAttr: "data-table-pay", targetId: table.code, disabled: paymentDisabled })}
         <button class="ghost" data-table-split="${escapeAttr(table.code)}" ${disabled}>Split 2</button>
-        <button class="danger" data-table-void="${escapeAttr(table.code)}">Void bill</button>
+        ${backendConfig.mode === BACKEND_MODES.SUPABASE ? "" : `<button class="danger" data-table-void="${escapeAttr(table.code)}">Void bill</button>`}
       </div>
       ${renderPaymentDemoNote()}
       ${orders.map(renderPaymentHistory).join("")}
@@ -1416,11 +1711,7 @@ function bindStaff() {
   document.querySelectorAll("[data-serve-line]").forEach((button) => button.addEventListener("click", () => serveReadyLine(button.dataset.serveOrder, button.dataset.serveLine, button.dataset.serveQty)));
   document.querySelectorAll("[data-serve-all]").forEach((button) => button.addEventListener("click", () => serveAllReadyLines(button.dataset.serveAll)));
   document.querySelectorAll("[data-event]").forEach((button) => button.addEventListener("click", () => {
-    const event = state.events.find((item) => item.id === button.dataset.event);
-    if (event) event.done = true;
-    audit("EVENT_DONE", `Handled ${event?.type || "event"}`);
-    saveState();
-    render();
+    resolveServiceRequest(button.dataset.event);
   }));
 }
 
@@ -1466,7 +1757,7 @@ function bindCashier() {
   document.querySelector("[data-counter-submit]")?.addEventListener("click", submitCounterOrder);
   document.getElementById("counter-search")?.addEventListener("input", (event) => {
     counterSearch = event.target.value;
-    localStorage.setItem(COUNTER_SEARCH_KEY, counterSearch);
+    if (backendConfig.mode !== BACKEND_MODES.SUPABASE) localStorage.setItem(COUNTER_SEARCH_KEY, counterSearch);
     render();
   });
   document.getElementById("counter-note")?.addEventListener("input", (event) => {
@@ -1672,6 +1963,11 @@ function bindGlobal() {
     render();
   }));
   document.querySelectorAll("[data-auth-logout]").forEach((button) => button.addEventListener("click", logoutStaff));
+  document.querySelectorAll("[data-supabase-refresh]").forEach((button) => button.addEventListener("click", () => {
+    supabaseSnapshotError = "";
+    supabaseSnapshotLoaded = false;
+    ensureSupabaseOperationalState({ force: true });
+  }));
 }
 
 function bindOptionPickers() {
@@ -1743,8 +2039,32 @@ function deleteProduct(id) {
   render();
 }
 
-function submitOrder(token) {
+async function submitOrder(token) {
   if (!canSubmitCart(state.cart, productById)) return;
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const note = document.getElementById("note")?.value || "";
+    const items = cartLinesForCommand(state.cart);
+    const intent = { token, items, note };
+    const idempotencyKey = pendingCommandKey("submit_qr_order", intent);
+    const result = await authoritativeBackendApi.submitQrOrder({
+      qrToken: token,
+      items,
+      note,
+      idempotencyKey
+    });
+    if (isTerminalCommandResult(result)) clearPendingCommandKey("submit_qr_order", intent);
+    if (!result.ok) {
+      supabaseCommandNotice = `submit_qr_order: ${commandFailureMessage(result)}`;
+    } else {
+      state.cart = clearCart();
+      const order = result.payload?.order;
+      if (order) state.orders = [order, ...state.orders.filter((item) => item.id !== order.id)];
+      supabaseCommandNotice = "submit_qr_order: OK";
+      await ensureSupabasePublicTableState(token, { force: true });
+    }
+    render();
+    return;
+  }
   const table = tables.find((item) => item.token === token) || tables[0];
   if (blockUnsafeTableSessionMutation("ORDER_SUBMIT_BLOCKED", table.code)) return;
   const note = document.getElementById("note")?.value || "";
@@ -1798,7 +2118,21 @@ function submitOrder(token) {
   render();
 }
 
-function serviceRequest(token, type) {
+async function serviceRequest(token, type) {
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const intent = { token, type };
+    const idempotencyKey = pendingCommandKey("create_service_request", intent);
+    const result = await authoritativeBackendApi.createServiceRequest({
+      qrToken: token,
+      type,
+      idempotencyKey
+    });
+    if (isTerminalCommandResult(result)) clearPendingCommandKey("create_service_request", intent);
+    supabaseCommandNotice = result.ok ? "create_service_request: OK" : `create_service_request: ${commandFailureMessage(result)}`;
+    if (result.ok) await ensureSupabasePublicTableState(token, { force: true });
+    render();
+    return;
+  }
   const table = tables.find((item) => item.token === token) || tables[0];
   const repair = currentTableSessionRepair();
   const activeSession = repair.ok === false ? null : getActiveTableSession(repair.tableSessions, table.code);
@@ -1808,7 +2142,32 @@ function serviceRequest(token, type) {
   render();
 }
 
-function openTableSession(tableCode) {
+async function resolveServiceRequest(eventId) {
+  const event = state.events.find((item) => item.id === eventId);
+  if (!event) return;
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const expectedVersion = Number.isSafeInteger(Number(event.version)) ? Number(event.version) : null;
+    await runSupabaseAuthoritativeCommand("complete_service_request", (idempotencyKey) => authoritativeBackendApi.completeServiceRequest({
+      requestId: eventId,
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { eventId, expectedVersion } });
+    return;
+  }
+  event.done = true;
+  audit("EVENT_DONE", `Handled ${event?.type || "event"}`);
+  saveState();
+  render();
+}
+
+async function openTableSession(tableCode) {
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    await runSupabaseAuthoritativeCommand("open_table_visit", (idempotencyKey) => authoritativeBackendApi.openTableVisit({
+      tableCode,
+      idempotencyKey
+    }), { intent: { tableCode } });
+    return;
+  }
   if (blockUnsafeTableSessionMutation("TABLE_SESSION_OPEN_BLOCKED", tableCode)) return;
   const table = tables.find((item) => item.code === tableCode);
   if (!table) return;
@@ -1826,7 +2185,17 @@ function openTableSession(tableCode) {
   render();
 }
 
-function closeActiveTableSession(sessionId) {
+async function closeActiveTableSession(sessionId) {
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const session = state.tableSessions.find((item) => item.id === sessionId);
+    const expectedVersion = session?.version;
+    await runSupabaseAuthoritativeCommand("close_table_visit", (idempotencyKey) => authoritativeBackendApi.closeTableVisit({
+      tableSessionId: sessionId,
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { sessionId, expectedVersion } });
+    return;
+  }
   if (blockUnsafeTableSessionMutation("TABLE_SESSION_CLOSE_BLOCKED", sessionId)) return;
   const result = closeTableSession(state.tableSessions, sessionId, {
     orders: state.orders,
@@ -1849,7 +2218,18 @@ function closeActiveTableSession(sessionId) {
   render();
 }
 
-function transferActiveTableSession(sessionId, toTableCode) {
+async function transferActiveTableSession(sessionId, toTableCode) {
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const session = state.tableSessions.find((item) => item.id === sessionId);
+    const expectedVersion = session?.version;
+    await runSupabaseAuthoritativeCommand("transfer_table_visit", (idempotencyKey) => authoritativeBackendApi.transferTableVisit({
+      tableSessionId: sessionId,
+      toTableCode,
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { sessionId, toTableCode, expectedVersion } });
+    return;
+  }
   if (blockUnsafeTableSessionMutation("TABLE_SESSION_TRANSFER_BLOCKED", `${sessionId} -> ${toTableCode}`)) return;
   const destination = tables.find((table) => table.code === toTableCode);
   const result = transferTableSession({
@@ -1879,9 +2259,9 @@ function transferActiveTableSession(sessionId, toTableCode) {
 
 function openCounterOrder(tableCode) {
   activeCashierTable = tableCode;
-  localStorage.setItem("deedou_cashier_table", activeCashierTable);
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE) localStorage.setItem("deedou_cashier_table", activeCashierTable);
   counterSearch = "";
-  localStorage.setItem(COUNTER_SEARCH_KEY, counterSearch);
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE) localStorage.setItem(COUNTER_SEARCH_KEY, counterSearch);
   counterDraft = { active: true, table: tableCode, items: [], note: "" };
   saveCounterDraft();
   render();
@@ -1902,16 +2282,41 @@ function decCounterItem(idOrKey) {
 function cancelCounterOrder() {
   counterDraft = emptyCounterDraft();
   counterSearch = "";
-  localStorage.setItem(COUNTER_SEARCH_KEY, counterSearch);
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE) localStorage.setItem(COUNTER_SEARCH_KEY, counterSearch);
   saveCounterDraft();
   render();
 }
 
-function submitCounterOrder() {
+async function submitCounterOrder() {
   if (!counterDraft.active || !counterDraft.items.length || !canSubmitCart(counterDraft.items, productById)) return;
   const tableCode = counterDraft.table;
   const table = tables.find((item) => item.code === tableCode);
   const isTakeaway = tableCode === "TAKEAWAY";
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const fulfillmentType = isTakeaway ? FULFILLMENT_TYPES.TAKEAWAY : FULFILLMENT_TYPES.DINE_IN;
+    const items = cartLinesForCommand(counterDraft.items);
+    const note = counterDraft.note || (isTakeaway ? "Counter takeaway order" : "Counter order");
+    const intent = { tableCode: isTakeaway ? "" : tableCode, fulfillmentType, items, note };
+    const idempotencyKey = pendingCommandKey("create_staff_order", intent);
+    const result = await authoritativeBackendApi.createStaffOrder({
+      tableCode: isTakeaway ? "" : tableCode,
+      fulfillmentType,
+      items,
+      note,
+      idempotencyKey
+    });
+    if (isTerminalCommandResult(result)) clearPendingCommandKey("create_staff_order", intent);
+    if (!result.ok) {
+      supabaseCommandNotice = `create_staff_order: ${commandFailureMessage(result)}`;
+      render();
+      return;
+    }
+    counterDraft = emptyCounterDraft();
+    counterSearch = "";
+    supabaseCommandNotice = "create_staff_order: OK";
+    await ensureSupabaseOperationalState({ force: true });
+    return;
+  }
   const orderNo = nextOrderNo();
   const items = expandOrderLines(counterDraft.items, productById);
   if (!items.length) return;
@@ -1962,7 +2367,7 @@ function submitCounterOrder() {
   audit("COUNTER_ORDER_SUBMIT", `${orderNo} ${tableCode} ${formatMoney(total)}`);
   counterDraft = emptyCounterDraft();
   counterSearch = "";
-  localStorage.setItem(COUNTER_SEARCH_KEY, counterSearch);
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE) localStorage.setItem(COUNTER_SEARCH_KEY, counterSearch);
   saveCounterDraft();
   saveState();
   render();
@@ -1970,7 +2375,7 @@ function submitCounterOrder() {
 
 function selectCashierTable(tableCode) {
   activeCashierTable = tableCode;
-  localStorage.setItem("deedou_cashier_table", tableCode);
+  if (backendConfig.mode !== BACKEND_MODES.SUPABASE) localStorage.setItem("deedou_cashier_table", tableCode);
   render();
 }
 
@@ -1989,6 +2394,17 @@ function adjustBillQty(orderId, lineIndex, delta) {
   const oldQty = chargedQty(line);
   const nextQty = clampBillQty(oldQty + delta, line.qty);
   if (nextQty === oldQty) return;
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const expectedVersion = expectedOrderVersion(order);
+    runSupabaseAuthoritativeCommand("update_order_line_bill_qty", (idempotencyKey) => authoritativeBackendApi.updateOrderLineBillQty({
+      orderId,
+      lineId: line.lineId,
+      billQty: nextQty,
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, lineId: line.lineId, billQty: nextQty, expectedVersion } });
+    return;
+  }
   line.billQty = nextQty;
   recalcOrderTotal(order);
   refreshOrderPaymentProjection(order);
@@ -2047,8 +2463,23 @@ function nextTenderGroupId(scope) {
   return `TG-${String(scope || "ORDER").replace(/[^A-Za-z0-9]/g, "")}-${Date.now().toString(36).toUpperCase()}`;
 }
 
+function tenderGroupIdForCommand(idempotencyKey) {
+  return `TG-${String(idempotencyKey || "ORDER").replace(/[^A-Za-z0-9]/g, "").slice(-32).toUpperCase()}`;
+}
+
 function nextPaymentId(prefix, order, suffix = "") {
   return `${prefix}-${Date.now().toString(36).toUpperCase()}-${String(order.id || "ORDER").slice(-6)}-${(order.payments || []).length}${suffix}`;
+}
+
+function expectedOrderVersion(order) {
+  const value = Number(order?.version);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+function activeTableSessionForCode(tableCode) {
+  const repair = currentTableSessionRepair();
+  if (repair.ok === false) return null;
+  return getActiveTableSession(repair.tableSessions, tableCode);
 }
 
 function applyOrderPayment(order, method, amountVnd, options = {}) {
@@ -2094,7 +2525,7 @@ function payableTableOrders(tableCode) {
   return tableOrders(tableCode).filter((order) => orderBalance(order) > 0);
 }
 
-function payTable(tableCode, method) {
+async function payTable(tableCode, method) {
   if (tableCode === "TAKEAWAY") {
     reportPaymentFailure("TABLE_PAYMENT_FAILED", tableCode, { reason: "TAKEAWAY_REQUIRES_ORDER_PAYMENT" });
     saveState();
@@ -2108,6 +2539,22 @@ function payTable(tableCode, method) {
   if (!amount) {
     saveState();
     render();
+    return;
+  }
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const session = activeTableSessionForCode(tableCode);
+    if (!session) {
+      supabaseCommandNotice = "record_table_tender: INVALID_STATE: SESSION_NOT_OPEN";
+      render();
+      return;
+    }
+    await runSupabaseAuthoritativeCommand("record_table_tender", (idempotencyKey) => authoritativeBackendApi.recordTableTender({
+      tableSessionId: session.id,
+      method,
+      amountVnd: amount,
+      idempotencyKey
+    }), { intent: { tableSessionId: session.id, method, amountVnd: amount } });
+    pendingSplitPlan = null;
     return;
   }
   const result = applyTablePayment(tableCode, method, amount, { tenderGroupId: nextTenderGroupId(`TABLE-${tableCode}`) });
@@ -2159,16 +2606,48 @@ function splitTableInTwo(tableCode) {
     tenderGroupId: nextTenderGroupId(`SPLIT-${tableCode}`),
     shares: split.shares.map((share) => ({ ...share, paid: false, method: "", paidAt: "" }))
   };
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    render();
+    return;
+  }
   audit("TABLE_SPLIT_PLAN", `${tableCode} split 2: ${split.shares.map((share) => formatMoney(share.amountVnd)).join(" + ")}`);
   saveState();
   render();
 }
 
-function paySplitShare(shareNo, method) {
+async function paySplitShare(shareNo, method) {
   if (!pendingSplitPlan) return;
   const share = pendingSplitPlan.shares.find((item) => item.shareNo === Number(shareNo));
   if (!share || share.paid) return;
   const note = `Split share ${share.shareNo}`;
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const handled = pendingSplitPlan.scope === "ORDER"
+      ? await runSupabaseAuthoritativeCommand("record_order_payment", (idempotencyKey) => authoritativeBackendApi.recordOrderPayment({
+        orderId: pendingSplitPlan.orderId,
+        method,
+        amountVnd: share.amountVnd,
+        tenderGroupId: pendingSplitPlan.tenderGroupId,
+        idempotencyKey
+      }), { intent: { splitPlan: pendingSplitPlan.tenderGroupId, shareNo: share.shareNo, method, amountVnd: share.amountVnd } })
+      : await runSupabaseAuthoritativeCommand("record_table_tender", (idempotencyKey) => {
+        const session = activeTableSessionForCode(pendingSplitPlan.tableCode);
+        if (!session) return Promise.resolve({ ok: false, category: "INVALID_STATE", reason: "SESSION_NOT_OPEN" });
+        return authoritativeBackendApi.recordTableTender({
+          tableSessionId: session.id,
+          method,
+          amountVnd: share.amountVnd,
+          idempotencyKey
+        });
+      }, { intent: { splitPlan: pendingSplitPlan.tenderGroupId, tableCode: pendingSplitPlan.tableCode, shareNo: share.shareNo, method, amountVnd: share.amountVnd } });
+    if (handled) {
+      share.paid = true;
+      share.method = method;
+      share.paidAt = new Date().toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+      if (pendingSplitPlan.shares.every((item) => item.paid)) pendingSplitPlan = null;
+      render();
+    }
+    return;
+  }
   const result = pendingSplitPlan.scope === "ORDER"
     ? applySingleOrderSplitShare(pendingSplitPlan.orderId, method, share.amountVnd, pendingSplitPlan.tenderGroupId, note)
     : applyTablePayment(pendingSplitPlan.tableCode, method, share.amountVnd, { tenderGroupId: pendingSplitPlan.tenderGroupId, note });
@@ -2198,6 +2677,11 @@ function applySingleOrderSplitShare(orderId, method, amountVnd, tenderGroupId, n
 }
 
 function preBillTable(tableCode) {
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    blockSupabaseLocalCommand("TABLE_PRE_BILL");
+    render();
+    return;
+  }
   if (tableCode !== "TAKEAWAY" && blockUnsafeTableSessionMutation("TABLE_PRE_BILL_BLOCKED", tableCode)) return;
   const orders = tableOrders(tableCode);
   if (!orders.length) return;
@@ -2208,6 +2692,11 @@ function preBillTable(tableCode) {
 }
 
 function voidTable(tableCode) {
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    blockSupabaseLocalCommand("TABLE_VOID");
+    render();
+    return;
+  }
   if (tableCode !== "TAKEAWAY" && blockUnsafeTableSessionMutation("TABLE_VOID_BLOCKED", tableCode)) return;
   const orders = tableOrders(tableCode);
   if (!orders.length) return;
@@ -2234,7 +2723,7 @@ function voidTable(tableCode) {
   render();
 }
 
-function payOrder(orderId, method) {
+async function payOrder(orderId, method) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   const balance = orderBalance(order);
@@ -2243,6 +2732,16 @@ function payOrder(orderId, method) {
   if (!amount) {
     saveState();
     render();
+    return;
+  }
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    await runSupabaseAuthoritativeCommand("record_order_payment", (idempotencyKey) => authoritativeBackendApi.recordOrderPayment({
+      orderId,
+      method,
+      amountVnd: amount,
+      tenderGroupId: tenderGroupIdForCommand(idempotencyKey),
+      idempotencyKey
+    }), { intent: { orderId, method, amountVnd: amount } });
     return;
   }
   const result = applyOrderPayment(order, method, amount, { note: "Order payment" });
@@ -2271,12 +2770,21 @@ function splitOrderInTwo(orderId) {
     tenderGroupId: nextTenderGroupId(`SPLIT-${order.id}`),
     shares: split.shares.map((share) => ({ ...share, paid: false, method: "", paidAt: "" }))
   };
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    render();
+    return;
+  }
   audit("SPLIT_PLAN", `${order.orderNo} split 2: ${split.shares.map((share) => formatMoney(share.amountVnd)).join(" + ")}`);
   saveState();
   render();
 }
 
 function preBill(orderId) {
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    blockSupabaseLocalCommand("PRE_BILL");
+    render();
+    return;
+  }
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   audit("PRE_BILL", `${order.orderNo} ${orderLocationLabel(order)} ${formatMoney(orderBalance(order))}`);
@@ -2307,7 +2815,7 @@ function confirmVoidOrder(orderId) {
   voidOrder(orderId, reasonInput?.value || "");
 }
 
-function voidOrder(orderId, reason = "") {
+async function voidOrder(orderId, reason = "") {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   const allowed = canVoidOrder(order);
@@ -2320,6 +2828,17 @@ function voidOrder(orderId, reason = "") {
     return;
   }
   const voidReason = reason.trim() || "Thu ngân hủy lượt gọi";
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    pendingVoidOrderId = "";
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("void_order", (idempotencyKey) => authoritativeBackendApi.voidOrder({
+      orderId,
+      reason: voidReason,
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, reason: voidReason, expectedVersion } });
+    return;
+  }
   order.status = "VOIDED";
   order.voidReason = voidReason;
   order.items.forEach((item) => item.status = "CANCELLED");
@@ -2331,9 +2850,17 @@ function voidOrder(orderId, reason = "") {
   render();
 }
 
-function voidPayment(orderId, paymentId) {
+async function voidPayment(orderId, paymentId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    await runSupabaseAuthoritativeCommand("void_order_payment", (idempotencyKey) => authoritativeBackendApi.voidOrderPayment({
+      orderId,
+      paymentId,
+      idempotencyKey
+    }), { intent: { orderId, paymentId } });
+    return;
+  }
   const result = recordPaymentVoid(order, {
     id: nextPaymentId("VOID", order, `-${paymentId}`),
     paymentId,
@@ -2352,7 +2879,7 @@ function voidPayment(orderId, paymentId) {
   render();
 }
 
-function refundPayment(orderId, paymentId) {
+async function refundPayment(orderId, paymentId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   const max = remainingRefundableForPayment(order, paymentId);
@@ -2360,6 +2887,15 @@ function refundPayment(orderId, paymentId) {
   if (!amount) {
     saveState();
     render();
+    return;
+  }
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    await runSupabaseAuthoritativeCommand("refund_order_payment", (idempotencyKey) => authoritativeBackendApi.refundOrderPayment({
+      orderId,
+      paymentId,
+      amountVnd: amount,
+      idempotencyKey
+    }), { intent: { orderId, paymentId, amountVnd: amount } });
     return;
   }
   const result = recordRefund(order, {
@@ -2381,7 +2917,7 @@ function refundPayment(orderId, paymentId) {
   render();
 }
 
-function updateOrderStatus(orderId, status) {
+async function updateOrderStatus(orderId, status) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   if (normalizeOrderStatus(status) === "PAID" && paymentSummaryForOrder(order).paymentStatus !== "PAID") {
@@ -2389,6 +2925,16 @@ function updateOrderStatus(orderId, status) {
     audit("ORDER_PAID_BLOCKED", `${order.orderNo}: PAYMENT_NOT_SETTLED`);
     saveState();
     render();
+    return;
+  }
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("set_order_status", (idempotencyKey) => authoritativeBackendApi.setOrderStatus({
+      orderId,
+      status,
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, status, expectedVersion } });
     return;
   }
   const transition = applyOrderStatusTransition(order, status);
@@ -2400,9 +2946,20 @@ function updateOrderStatus(orderId, status) {
   render();
 }
 
-function serveReadyLine(orderId, lineId, qty) {
+async function serveReadyLine(orderId, lineId, qty) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("serve_order_line", (idempotencyKey) => authoritativeBackendApi.serveOrderLine({
+      orderId,
+      lineId,
+      qty: Number(qty || 1),
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, lineId, qty: Number(qty || 1), expectedVersion } });
+    return;
+  }
   const update = serveLineQuantity(order, lineId, Number(qty || 1));
   if (!update.ok) return;
   refreshOrderPaymentProjection(order);
@@ -2412,9 +2969,18 @@ function serveReadyLine(orderId, lineId, qty) {
   render();
 }
 
-function serveAllReadyLines(orderId) {
+async function serveAllReadyLines(orderId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("serve_all_ready", (idempotencyKey) => authoritativeBackendApi.serveAllReady({
+      orderId,
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, expectedVersion } });
+    return;
+  }
   const update = serveAllReady(order);
   if (!update.ok) return;
   refreshOrderPaymentProjection(order);
@@ -2424,9 +2990,20 @@ function serveAllReadyLines(orderId) {
   render();
 }
 
-function updateStationStatus(orderId, stationCode, status, lineIds = []) {
+async function updateStationStatus(orderId, stationCode, status, lineIds = []) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("update_kds_line_prep", (idempotencyKey) => authoritativeBackendApi.updateKdsLinePrep({
+      orderId,
+      lineIds,
+      nextPrepStatus: status,
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, lineIds, status, expectedVersion } });
+    return;
+  }
   const update = applyPrepStatusTransition(order, { stationCode, lineIds }, status);
   if (!update.ok) return;
   refreshOrderPaymentProjection(order);
@@ -2435,12 +3012,24 @@ function updateStationStatus(orderId, stationCode, status, lineIds = []) {
   render();
 }
 
-function assignCourseToFamily(orderId, familyLineId) {
+async function assignCourseToFamily(orderId, familyLineId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
   const input = [...document.querySelectorAll("[data-course-value]")].find((node) => {
     return node.dataset.courseValue === orderId && node.dataset.courseFamily === familyLineId;
   });
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const course = input?.value || "";
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("assign_order_family_course", (idempotencyKey) => authoritativeBackendApi.assignFamilyCourse({
+      orderId,
+      familyLineId,
+      course,
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, familyLineId, course, expectedVersion } });
+    return;
+  }
   const result = assignServiceFamilyCourse(order, familyLineId, input?.value || "");
   if (!result.ok) {
     audit("COURSE_ASSIGN_BLOCKED", `${order.orderNo} ${familyLineId}: ${result.reason}`);
@@ -2454,9 +3043,19 @@ function assignCourseToFamily(orderId, familyLineId) {
   render();
 }
 
-function holdOrderFamily(orderId, familyLineId) {
+async function holdOrderFamily(orderId, familyLineId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("hold_order_family", (idempotencyKey) => authoritativeBackendApi.holdFamily({
+      orderId,
+      familyLineId,
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, familyLineId, expectedVersion } });
+    return;
+  }
   const result = holdServiceFamily(order, familyLineId);
   if (!result.ok) {
     audit("LINE_HOLD_BLOCKED", `${order.orderNo} ${familyLineId}: ${result.reason}`);
@@ -2470,9 +3069,19 @@ function holdOrderFamily(orderId, familyLineId) {
   render();
 }
 
-function fireOrderFamily(orderId, familyLineId) {
+async function fireOrderFamily(orderId, familyLineId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("fire_order_family", (idempotencyKey) => authoritativeBackendApi.fireFamily({
+      orderId,
+      familyLineId,
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, familyLineId, expectedVersion } });
+    return;
+  }
   const result = fireServiceFamily(order, familyLineId);
   if (!result.ok) {
     audit("LINE_FIRE_BLOCKED", `${order.orderNo} ${familyLineId}: ${result.reason}`);
@@ -2486,9 +3095,19 @@ function fireOrderFamily(orderId, familyLineId) {
   render();
 }
 
-function fireWholeCourse(orderId, course) {
+async function fireWholeCourse(orderId, course) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) return;
+  if (backendConfig.mode === BACKEND_MODES.SUPABASE) {
+    const expectedVersion = expectedOrderVersion(order);
+    await runSupabaseAuthoritativeCommand("fire_order_course", (idempotencyKey) => authoritativeBackendApi.fireCourse({
+      orderId,
+      course,
+      expectedVersion,
+      idempotencyKey
+    }), { intent: { orderId, course, expectedVersion } });
+    return;
+  }
   const result = fireOrderCourse(order, course);
   if (!result.ok) {
     audit("COURSE_FIRE_BLOCKED", `${order.orderNo} course ${course}: ${result.reason}`);

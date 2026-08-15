@@ -6,10 +6,10 @@ This map adapts the requested feature-module architecture to the current static 
 
 - Browser-only static app.
 - Hash routes in `index.html`.
-- State stored in `localStorage`.
-- Cross-tab sync through `BroadcastChannel`.
+- `LOCAL_DEMO` state is stored in `localStorage` and cross-tab sync uses `BroadcastChannel`.
 - Supabase/PostgreSQL foundation files exist for DD-008A. DD-008B adds staff auth/RBAC gates for `SUPABASE` mode.
-- `LOCAL_DEMO` remains local-first. No authoritative backend business mutations, React, Next.js, or build system yet.
+- DD-008C adds server-authoritative command RPCs plus refresh-hint convergence for `SUPABASE` operational/payment mutations.
+- There is still no React, Next.js, or build system.
 
 ## Dependency Direction
 
@@ -418,6 +418,8 @@ Owns:
 - Backend mode/config normalization.
 - Public/publishable Supabase client setup boundary.
 - Connection state and backend health probe helpers.
+- Browser-side adapter methods for approved authoritative query/command RPCs.
+- Location-scoped refresh-hint subscription and refetch trigger plumbing.
 - Supabase local development documentation.
 
 Current location:
@@ -425,12 +427,13 @@ Current location:
 - `src/shared/backend/index.js`
 - `src/shared/backend/config.js`
 - `src/shared/backend/connection.js`
+- `src/shared/backend/commands.js`
 
 Does not own:
 
 - Order/payment/table-session/KDS/service-request business rules.
 - Staff login, RBAC, PIN, or permission UI.
-- Authoritative writes or production realtime behavior.
+- Supabase Auth/session lifecycle; that belongs to `shared/auth`.
 - Service role keys, database credentials, JWT secrets, or private keys.
 
 Notes:
@@ -438,11 +441,15 @@ Notes:
 - Default mode is `LOCAL_DEMO`.
 - `SUPABASE` mode must be explicitly configured with public URL plus publishable key.
 - Connection state must not report `ONLINE` from browser network status alone.
-- DD-008B owns staff auth/RBAC and fail-closed staff route presentation. DD-008C/D own authoritative business command RPCs, realtime, and reconnect workflows.
+- DD-008C command adapters call transactional SQL RPCs and normalize results; they do not implement pricing, payment, station, or table-session rules in JavaScript.
+- Realtime remains a refresh hint. The client refetches authoritative snapshots after hints instead of trusting event payloads as state.
+- Admin/menu write cutover remains deferred.
 
 ### shared/db
 
-Supabase/PostgreSQL schema foundation exists under `supabase/`, but it is not runtime-authoritative yet.
+Supabase/PostgreSQL migrations and contracts live under `supabase/`.
+
+DD-008C makes the approved operational/payment command RPCs authoritative for `SUPABASE` mode while preserving `LOCAL_DEMO` localStorage behavior.
 
 ### shared/auth
 
@@ -469,7 +476,7 @@ Does not own:
 
 ### shared/realtime
 
-Not created yet. Current `BroadcastChannel` logic remains in the app shell until a durable realtime boundary is needed.
+Not created yet. DD-008C keeps refresh-hint subscription inside `shared/backend` because it is coupled to the Supabase command/query adapter. Current `BroadcastChannel` logic remains a local-demo/local-tab optimization in the app shell.
 
 ### shared/types
 
@@ -483,7 +490,14 @@ DD-008A adds committed Supabase local development infrastructure:
 - `supabase/migrations/20260812000000_dd008a_backend_foundation.sql`
 - `supabase/seed.sql`
 
-The schema prepares tables, RLS, public-safe projections, idempotency support, and append-oriented audit/payment foundations. No server runtime or production deployment is added.
+The schema prepares tables, RLS, public-safe projections, idempotency support, and append-oriented audit/payment foundations.
+
+DD-008C adds:
+
+- `supabase/migrations/20260815080000_dd008c_authoritative_commands_realtime.sql`
+- `supabase/tests/dd008c_authoritative_commands_contract.sql`
+
+The new command migration adds version guards, deterministic command replay/conflict handling, append-only payment mutations, table-session command guards, KDS prep commands, and location-scoped refresh hints. No server runtime or production deployment is added.
 
 Future candidates:
 

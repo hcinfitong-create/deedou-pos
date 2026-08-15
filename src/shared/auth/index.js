@@ -306,6 +306,7 @@ export function createSupabasePasswordAuthApi(options = {}) {
     get client() {
       return client;
     },
+    getClient,
     getSessionInfo: currentSessionInfo,
     restoreSession: currentSessionInfo,
     async signInWithPassword({ email, password } = {}) {

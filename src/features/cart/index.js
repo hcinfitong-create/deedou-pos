@@ -7,6 +7,18 @@ import {
 } from "../product-options/index.js";
 import { escapeAttr, escapeHtml, formatMoney } from "../../shared/utils/index.js";
 
+let customerNoteDraft = "";
+let customerNoteTableCode = "";
+let customerCartHadItems = false;
+
+if (typeof document !== "undefined") {
+  document.addEventListener("input", (event) => {
+    const target = event.target;
+    if (target?.id !== "note") return;
+    customerNoteDraft = String(target.value || "");
+  });
+}
+
 export function addCartItem(cart, idOrKey, productById, maxQty = 10, selection = null) {
   const existingLine = findCartLine(cart, idOrKey, productById);
   if (existingLine && !productById(idOrKey)) {
@@ -65,6 +77,14 @@ export function canSubmitCart(cart, productById = null) {
 export function renderCartPanel({ table, cart, lang, copy, productById, orderStatusHtml = "" }) {
   const validLines = (cart || []).filter((line) => !!productById(line.id));
   const total = cartSubtotal(validLines, productById);
+  const tableCode = String(table?.code || "");
+  const hasItems = validLines.length > 0;
+
+  if (customerNoteTableCode && customerNoteTableCode !== tableCode) customerNoteDraft = "";
+  if (!hasItems && customerCartHadItems) customerNoteDraft = "";
+  customerNoteTableCode = tableCode;
+  customerCartHadItems = hasItems;
+
   return `
     <aside class="panel cart">
       <h2>${copy.cart}</h2>
@@ -74,7 +94,7 @@ export function renderCartPanel({ table, cart, lang, copy, productById, orderSta
       </div>
       <label>
         <span class="muted">${copy.note}</span>
-        <textarea id="note" placeholder="Less spicy, no sugar..."></textarea>
+        <textarea id="note" placeholder="Less spicy, no sugar...">${escapeHtml(customerNoteDraft)}</textarea>
       </label>
       <div class="total"><span>${copy.total}</span><strong>${formatMoney(total)}</strong></div>
       <div class="actions">

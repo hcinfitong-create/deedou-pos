@@ -14,3 +14,10 @@ export {
   probeBackendConnection,
   subscribeConnectionState
 } from "./connection.js";
+
+export {
+  COMMAND_FAILURE_CATEGORIES,
+  commandFailure,
+  createAuthoritativeBackendApi,
+  normalizeCommandResult
+} from "./commands.js";

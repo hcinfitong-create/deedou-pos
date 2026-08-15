@@ -74,6 +74,11 @@ jobs:
           DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008b_auth_rbac_contract.sql
 
+      - name: Run DD-008C authoritative command database contract
+        run: |
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008c_authoritative_commands_contract.sql
+
       - name: Stop Supabase local stack
         if: always()
         run: npx supabase stop
@@ -120,6 +125,48 @@ jobs:
         if: always()
         run: npx supabase stop
 
+  dd008c-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Confirm Node
+        run: node --version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Confirm pinned Supabase CLI
+        run: npx supabase --version
+
+      - name: Start Supabase local stack
+        run: npx supabase start
+
+      - name: Reset database from migrations and seed
+        run: npx supabase db reset
+
+      - name: Run DD-008C command concurrency and realtime integration
+        env:
+          DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+        run: npm run dd008c:command-realtime
+
+      - name: Stop Supabase local stack
+        if: always()
+        run: npx supabase stop
+
   browser-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -156,17 +203,17 @@ jobs:
       - name: Reset database from migrations and seed
         run: npx supabase db reset
 
-      - name: Run DD-008B exact-head browser smoke
+      - name: Run DD-008C exact-head browser smoke
         env:
           DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
-        run: npm run dd008b:browser-smoke
+        run: npm run dd008c:browser-smoke
 
-      - name: Upload DD-008B browser smoke failure screenshot
+      - name: Upload DD-008C browser smoke failure screenshot
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: dd008b-browser-smoke-failure
-          path: artifacts/dd008b-browser-smoke/
+          name: dd008c-browser-smoke-failure
+          path: artifacts/dd008c-browser-smoke/
           if-no-files-found: ignore
 
       - name: Stop Supabase local stack
