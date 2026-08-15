@@ -67,6 +67,7 @@ const cashierClient = await loginRuntimeUser("cashier");
 const staffClient = await loginRuntimeUser("staff");
 const kitchenClient = await loginRuntimeUser("kitchen");
 const refresh = await subscribeRefreshHints(staffClient);
+await assertRefreshStreamReady(refresh.events);
 
 const concurrentOrders = await Promise.all([
   command(publicClient, "submit_qr_order", {
@@ -402,6 +403,26 @@ async function subscribeRefreshHints(client) {
       ]);
     }
   };
+}
+
+async function assertRefreshStreamReady(events) {
+  const probeId = `${runId}_refresh_probe`;
+  runPsql(`
+insert into public.dd008c_refresh_hints (location_id, topic, audience, entity_type, entity_id, payload)
+values (
+  ${lit(LOCATION_ID)},
+  ${lit(`location:${LOCATION_ID}:ops`)},
+  'ops',
+  'probe',
+  ${lit(probeId)},
+  jsonb_build_object('reason', 'SUBSCRIPTION_READY')
+);
+`);
+  await waitForRefresh(
+    events,
+    (event) => refreshEntityId(event) === probeId && refreshReason(event) === "SUBSCRIPTION_READY",
+    "refresh subscription readiness"
+  );
 }
 
 async function subscribeChannel(channel, label) {
