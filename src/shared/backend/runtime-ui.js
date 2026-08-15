@@ -52,7 +52,7 @@ document.addEventListener("input", handleInput);
 
 const appRoot = document.getElementById("app");
 if (appRoot && "MutationObserver" in window) {
-  new MutationObserver(() => queueMicrotask(renderRuntimeUi)).observe(appRoot, { childList: true, subtree: true });
+  new MutationObserver(() => queueMicrotask(renderRuntimeUi)).observe(appRoot, { childList: true });
 }
 queueMicrotask(renderRuntimeUi);
 
