@@ -41,6 +41,8 @@ export {
   sanitizeOperationalDiagnostic
 } from "./resilience.js";
 
+export { createReconnectCoordinator } from "./reconnect.js";
+
 export {
   LEGACY_EXPORT_SCHEMA_VERSION,
   LEGACY_EXPORT_SOURCE,
