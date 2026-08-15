@@ -36,7 +36,8 @@ values
   ('00000000-0000-0000-0000-000000000000', '20000000-0000-4000-8000-000000000001', 'authenticated', 'authenticated', 'dd008c-cashier@example.invalid', crypt('local-only-dd008c-cashier', gen_salt('bf')), now(), now(), now(), '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, false),
   ('00000000-0000-0000-0000-000000000000', '20000000-0000-4000-8000-000000000002', 'authenticated', 'authenticated', 'dd008c-floor@example.invalid', crypt('local-only-dd008c-floor', gen_salt('bf')), now(), now(), now(), '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, false),
   ('00000000-0000-0000-0000-000000000000', '20000000-0000-4000-8000-000000000003', 'authenticated', 'authenticated', 'dd008c-kitchen@example.invalid', crypt('local-only-dd008c-kitchen', gen_salt('bf')), now(), now(), now(), '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, false),
-  ('00000000-0000-0000-0000-000000000000', '20000000-0000-4000-8000-000000000004', 'authenticated', 'authenticated', 'dd008c-bar@example.invalid', crypt('local-only-dd008c-bar', gen_salt('bf')), now(), now(), now(), '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, false)
+  ('00000000-0000-0000-0000-000000000000', '20000000-0000-4000-8000-000000000004', 'authenticated', 'authenticated', 'dd008c-bar@example.invalid', crypt('local-only-dd008c-bar', gen_salt('bf')), now(), now(), now(), '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, false),
+  ('00000000-0000-0000-0000-000000000000', '20000000-0000-4000-8000-000000000005', 'authenticated', 'authenticated', 'dd008c-manager@example.invalid', crypt('local-only-dd008c-manager', gen_salt('bf')), now(), now(), now(), '{"provider":"email","providers":["email"]}'::jsonb, '{}'::jsonb, false)
 on conflict (id) do nothing;
 
 insert into public.staff_profiles (id, auth_user_id, display_name, active)
@@ -44,7 +45,8 @@ values
   ('dd008c-staff-cashier', '20000000-0000-4000-8000-000000000001', 'DD-008C Cashier', true),
   ('dd008c-staff-floor', '20000000-0000-4000-8000-000000000002', 'DD-008C Floor', true),
   ('dd008c-staff-kitchen', '20000000-0000-4000-8000-000000000003', 'DD-008C Kitchen', true),
-  ('dd008c-staff-bar', '20000000-0000-4000-8000-000000000004', 'DD-008C Bar', true)
+  ('dd008c-staff-bar', '20000000-0000-4000-8000-000000000004', 'DD-008C Bar', true),
+  ('dd008c-staff-manager', '20000000-0000-4000-8000-000000000005', 'DD-008C Manager', true)
 on conflict (id) do nothing;
 
 insert into public.staff_location_assignments (staff_profile_id, location_id, active)
@@ -52,7 +54,8 @@ values
   ('dd008c-staff-cashier', 'deedou-demo', true),
   ('dd008c-staff-floor', 'deedou-demo', true),
   ('dd008c-staff-kitchen', 'deedou-demo', true),
-  ('dd008c-staff-bar', 'deedou-demo', true)
+  ('dd008c-staff-bar', 'deedou-demo', true),
+  ('dd008c-staff-manager', 'deedou-demo', true)
 on conflict (staff_profile_id, location_id) do update set active = excluded.active;
 
 insert into public.staff_role_assignments (staff_profile_id, location_id, role_id, active)
@@ -60,7 +63,8 @@ values
   ('dd008c-staff-cashier', 'deedou-demo', 'CASHIER', true),
   ('dd008c-staff-floor', 'deedou-demo', 'FLOOR_STAFF', true),
   ('dd008c-staff-kitchen', 'deedou-demo', 'KITCHEN', true),
-  ('dd008c-staff-bar', 'deedou-demo', 'BAR', true)
+  ('dd008c-staff-bar', 'deedou-demo', 'BAR', true),
+  ('dd008c-staff-manager', 'deedou-demo', 'MANAGER', true)
 on conflict (staff_profile_id, location_id, role_id) do update set active = excluded.active;
 
 insert into public.workstation_devices (id, location_id, label, mode, credential_hash, active, registered_by_staff_profile_id)
@@ -417,20 +421,11 @@ begin
   on conflict (key) do update set value = excluded.value;
 
   select * into v_result
-  from public.refund_order_payment('deedou-demo', 'dd008c-order-pending', 'not-a-payment', 1000, 'dd008c-refund-unknown', 'CASHIER', 'dd008c-cashier-device')
+  from public.refund_order_payment('deedou-demo', 'dd008c-order-pending', v_payment_id, 1000, 'dd008c-refund-cashier-denied', 'CASHIER', 'dd008c-cashier-device')
   limit 1;
-  if v_result.ok <> false or v_result.reason <> 'PAYMENT_NOT_FOUND' then
-    raise exception 'expected unknown payment refund blocked, got %/%', v_result.category, v_result.reason;
+  if v_result.ok <> false or v_result.category <> 'FORBIDDEN' or v_result.reason <> 'PERMISSION_DENIED' then
+    raise exception 'expected cashier refund denied by RBAC, got %/%', v_result.category, v_result.reason;
   end if;
-
-  select * into v_result
-  from public.refund_order_payment('deedou-demo', 'dd008c-order-pending', v_payment_id, 200000, 'dd008c-refund-over', 'CASHIER', 'dd008c-cashier-device')
-  limit 1;
-  if v_result.ok <> false or v_result.reason <> 'REFUND_EXCEEDS_REMAINING' then
-    raise exception 'expected over-refund blocked, got %/%', v_result.category, v_result.reason;
-  end if;
-
-  perform public.refund_order_payment('deedou-demo', 'dd008c-order-pending', v_payment_id, 50000, 'dd008c-refund-partial', 'CASHIER', 'dd008c-cashier-device');
 end $$;
 
 reset role;
@@ -445,6 +440,72 @@ begin
     and type = 'PAYMENT';
   if v_payment_count <> 1 then
     raise exception 'expected duplicate payment replay to create one payment, got %', v_payment_count;
+  end if;
+end $$;
+
+set local role authenticated;
+set local request.jwt.claim.sub = '20000000-0000-4000-8000-000000000005';
+set local request.jwt.claim.role = 'authenticated';
+
+do $$
+declare
+  v_result record;
+  v_payment_id text;
+begin
+  select value into v_payment_id from dd008c_contract_ids where key = 'pending-payment';
+  if v_payment_id is null then
+    raise exception 'expected pending-payment id captured before refund checks';
+  end if;
+
+  select * into v_result
+  from public.refund_order_payment('deedou-demo', 'dd008c-order-pending', 'not-a-payment', 1000, 'dd008c-refund-unknown', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> false or v_result.category <> 'VALIDATION_ERROR' or v_result.reason <> 'PAYMENT_NOT_FOUND' then
+    raise exception 'expected unknown payment refund blocked, got %/%', v_result.category, v_result.reason;
+  end if;
+
+  select * into v_result
+  from public.refund_order_payment('deedou-demo', 'dd008c-order-pending', v_payment_id, 200000, 'dd008c-refund-over', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> false or v_result.category <> 'VALIDATION_ERROR' or v_result.reason <> 'REFUND_EXCEEDS_REMAINING' then
+    raise exception 'expected over-refund blocked, got %/%', v_result.category, v_result.reason;
+  end if;
+
+  select * into v_result
+  from public.refund_order_payment('deedou-demo', 'dd008c-order-pending', v_payment_id, 50000, 'dd008c-refund-partial', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> true then
+    raise exception 'expected manager targeted refund accepted, got %/%', v_result.category, v_result.reason;
+  end if;
+end $$;
+
+reset role;
+
+do $$
+declare
+  v_payment_id text;
+  v_payment_count integer;
+  v_refund_count integer;
+  v_refund_amount bigint;
+  v_refund_payment_id text;
+begin
+  select value into v_payment_id from dd008c_contract_ids where key = 'pending-payment';
+
+  select count(*) into v_payment_count
+  from public.payment_transactions
+  where order_id = 'dd008c-order-pending'
+    and type = 'PAYMENT';
+  if v_payment_count <> 1 then
+    raise exception 'expected one original payment after refund checks, got %', v_payment_count;
+  end if;
+
+  select count(*), coalesce(sum(amount_vnd), 0), min(related_payment_id)
+  into v_refund_count, v_refund_amount, v_refund_payment_id
+  from public.payment_transactions
+  where order_id = 'dd008c-order-pending'
+    and type = 'REFUND';
+  if v_refund_count <> 1 or v_refund_payment_id <> v_payment_id or v_refund_amount <> 50000 then
+    raise exception 'expected one 50000 refund against %, got count % related % amount %', v_payment_id, v_refund_count, v_refund_payment_id, v_refund_amount;
   end if;
 end $$;
 
