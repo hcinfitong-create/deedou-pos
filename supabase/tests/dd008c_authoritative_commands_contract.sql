@@ -382,7 +382,6 @@ do $$
 declare
   v_result record;
   v_payment_id text;
-  v_payment_count integer;
 begin
   select * into v_result
   from public.record_order_payment('deedou-demo', 'dd008c-order-pending', 'CASH', 0, '', 'dd008c-pay-zero', 'CASHIER', 'dd008c-cashier-device')
@@ -398,16 +397,24 @@ begin
     raise exception 'expected overpayment rejected, got %/%', v_result.category, v_result.reason;
   end if;
 
-  perform public.record_order_payment('deedou-demo', 'dd008c-order-pending', 'CASH', 198000, '', 'dd008c-pay-full', 'CASHIER', 'dd008c-cashier-device');
-  perform public.record_order_payment('deedou-demo', 'dd008c-order-pending', 'CASH', 198000, '', 'dd008c-pay-full', 'CASHIER', 'dd008c-cashier-device');
-
-  select count(*), min(id) into v_payment_count, v_payment_id
-  from public.payment_transactions
-  where order_id = 'dd008c-order-pending'
-    and type = 'PAYMENT';
-  if v_payment_count <> 1 then
-    raise exception 'expected duplicate payment replay to create one payment, got %', v_payment_count;
+  select * into v_result
+  from public.record_order_payment('deedou-demo', 'dd008c-order-pending', 'CASH', 198000, '', 'dd008c-pay-full', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> true then
+    raise exception 'expected full payment accepted, got %/%', v_result.category, v_result.reason;
   end if;
+  v_payment_id := v_result.entity_id;
+
+  select * into v_result
+  from public.record_order_payment('deedou-demo', 'dd008c-order-pending', 'CASH', 198000, '', 'dd008c-pay-full', 'CASHIER', 'dd008c-cashier-device')
+  limit 1;
+  if v_result.ok <> true or v_result.entity_id <> v_payment_id then
+    raise exception 'expected duplicate payment replay to return same payment, got %/%/%', v_result.ok, v_result.reason, v_result.entity_id;
+  end if;
+
+  insert into dd008c_contract_ids (key, value)
+  values ('pending-payment', v_payment_id)
+  on conflict (key) do update set value = excluded.value;
 
   select * into v_result
   from public.refund_order_payment('deedou-demo', 'dd008c-order-pending', 'not-a-payment', 1000, 'dd008c-refund-unknown', 'CASHIER', 'dd008c-cashier-device')
@@ -427,6 +434,19 @@ begin
 end $$;
 
 reset role;
+
+do $$
+declare
+  v_payment_count integer;
+begin
+  select count(*) into v_payment_count
+  from public.payment_transactions
+  where order_id = 'dd008c-order-pending'
+    and type = 'PAYMENT';
+  if v_payment_count <> 1 then
+    raise exception 'expected duplicate payment replay to create one payment, got %', v_payment_count;
+  end if;
+end $$;
 
 set local role authenticated;
 set local request.jwt.claim.sub = '20000000-0000-4000-8000-000000000001';

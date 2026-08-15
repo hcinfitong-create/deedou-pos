@@ -804,6 +804,7 @@ test("DD-008C real integration script covers command concurrency and refresh con
     "dd008c_refresh_hints",
     "dd008c_emit_refresh",
     "SUBSCRIPTION_READY",
+    "payload.events",
     "create_service_request",
     "reconnect/refetch",
     "Real password login"

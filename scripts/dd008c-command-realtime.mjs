@@ -243,7 +243,7 @@ await command(publicClient, "create_service_request", {
 });
 const reconnectedSnapshot = await locationSnapshot(staffClient, "STAFF", deviceSecrets.staff);
 assert(
-  reconnectedSnapshot.serviceRequests.some((request) => request.type === "REQUEST_BILL" && request.status === "OPEN"),
+  reconnectedSnapshot.serviceRequests.some((request) => request.type === "REQUEST_BILL" && request.done === false),
   "reconnect/refetch did not converge unresolved service request"
 );
 
@@ -346,7 +346,11 @@ async function locationSnapshot(client, mode, deviceCredential) {
   return {
     orders: Array.isArray(payload.orders) ? payload.orders : [],
     tableSessions: Array.isArray(payload.tableSessions) ? payload.tableSessions : [],
-    serviceRequests: Array.isArray(payload.serviceRequests) ? payload.serviceRequests : []
+    serviceRequests: Array.isArray(payload.serviceRequests)
+      ? payload.serviceRequests
+      : Array.isArray(payload.events)
+        ? payload.events
+        : []
   };
 }
 
