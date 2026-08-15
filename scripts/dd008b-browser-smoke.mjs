@@ -338,7 +338,8 @@ async function runOperationalRealtimeE2E(activeBrowser, baseUrl, users, errorSin
     label: "SUPABASE E2E customer",
     deviceCredential: "",
     workstationMode: "",
-    locationId: ids.locationA
+    locationId: ids.locationA,
+    timezoneId: "Asia/Ho_Chi_Minh"
   });
   const staffContext = await createSupabaseContext(activeBrowser, {
     label: "SUPABASE E2E staff",
@@ -386,12 +387,22 @@ async function runOperationalRealtimeE2E(activeBrowser, baseUrl, users, errorSin
         "separate browser contexts issued ops/cashier realtime tickets"
       );
 
-      await customerPage.goto(`${baseUrl}/index.html?v=dd008c-operational-e2e#/t/beach-a01-47VLmz`, { waitUntil: "domcontentloaded" });
-      await assertAppReady(customerPage, "SUPABASE E2E customer");
-      await customerPage.locator("#note").fill(note);
-      await customerPage.locator('[data-add="fried-rice"]').first().click();
-      await customerPage.locator("[data-submit]").first().click();
-      await waitForBodyIncludes(customerPage, "submit_qr_order: OK", "customer QR submit succeeded");
+      await withFailureDiagnostics(customerPage, "SUPABASE operational realtime E2E customer menu", errorSink, async () => {
+        await customerPage.clock.setFixedTime(new Date("2026-08-15T20:00:00+07:00"));
+        await customerPage.goto(`${baseUrl}/index.html?v=dd008c-operational-e2e#/t/beach-a01-47VLmz`, { waitUntil: "domcontentloaded" });
+        await assertAppReady(customerPage, "SUPABASE E2E customer");
+        await customerPage.locator("#note").fill(note);
+        const friedRiceAdd = customerPage.locator('[data-add="fried-rice"]').first();
+        try {
+          await friedRiceAdd.waitFor({ state: "visible", timeout: 10000 });
+        } catch (error) {
+          const renderedText = await bodyText(customerPage).catch(() => "");
+          throw new Error(`evening kitchen fixture missing: fried-rice was not visible under deterministic Asia/Ho_Chi_Minh evening clock. ${error?.message || ""} Body: ${sanitizeDiagnosticText(renderedText).slice(0, 500)}`);
+        }
+        await friedRiceAdd.click();
+        await customerPage.locator("[data-submit]").first().click();
+        await waitForBodyIncludes(customerPage, "submit_qr_order: OK", "customer QR submit succeeded");
+      });
 
       const staffCard = staffPage.locator(".order-card").filter({ hasText: note }).first();
       await staffCard.waitFor({ timeout: 30000 });
@@ -503,7 +514,7 @@ async function expectDeniedLogin(activeBrowser, baseUrl, errorSink, options) {
 }
 
 async function createSupabaseContext(activeBrowser, options) {
-  const context = await activeBrowser.newContext();
+  const context = await activeBrowser.newContext(options.timezoneId ? { timezoneId: options.timezoneId } : {});
   await context.addInitScript(({ config, storage }) => {
     window.DEEDOU_BACKEND_CONFIG = config;
     window.__DEEDOU_BACKEND_CONFIG__ = config;
