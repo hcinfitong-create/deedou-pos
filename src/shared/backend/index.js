@@ -26,9 +26,13 @@ export {
 export {
   COMMAND_FAILURE_CATEGORIES,
   commandFailure,
-  createAuthoritativeBackendApi,
   normalizeCommandResult
 } from "./commands.js";
+
+export {
+  OPERATIONAL_STATE_EVENT,
+  createAuthoritativeBackendApi
+} from "./authoritative.js";
 
 export {
   AUTH_HEALTH_STATES,
