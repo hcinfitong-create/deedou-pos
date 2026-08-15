@@ -408,10 +408,8 @@ async function subscribeRefreshHints(client) {
 async function assertRefreshStreamReady(events) {
   const probeId = `${runId}_refresh_probe`;
   runPsql(`
-insert into public.dd008c_refresh_hints (location_id, topic, audience, entity_type, entity_id, payload)
-values (
+select public.dd008c_emit_refresh(
   ${lit(LOCATION_ID)},
-  ${lit(`location:${LOCATION_ID}:ops`)},
   'ops',
   'probe',
   ${lit(probeId)},

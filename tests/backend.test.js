@@ -802,6 +802,8 @@ test("DD-008C real integration script covers command concurrency and refresh con
     "STALE_VERSION",
     "postgres_changes",
     "dd008c_refresh_hints",
+    "dd008c_emit_refresh",
+    "SUBSCRIPTION_READY",
     "create_service_request",
     "reconnect/refetch",
     "Real password login"
