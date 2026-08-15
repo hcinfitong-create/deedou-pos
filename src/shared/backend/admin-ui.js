@@ -30,7 +30,7 @@ document.addEventListener("click", handleClick);
 
 const appRoot = document.getElementById("app");
 if (appRoot && "MutationObserver" in window) {
-  new MutationObserver(() => queueMicrotask(render)).observe(appRoot, { childList: true, subtree: true });
+  new MutationObserver(() => queueMicrotask(render)).observe(appRoot, { childList: true });
 }
 queueMicrotask(render);
 
