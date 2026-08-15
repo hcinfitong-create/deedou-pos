@@ -46,7 +46,7 @@ begin
     )
   $policy$;
 exception
-  when duplicate_object or undefined_schema or undefined_table or undefined_function then null;
+  when duplicate_object or invalid_schema_name or undefined_table or undefined_function then null;
 end $$;
 
 do $$
