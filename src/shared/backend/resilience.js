@@ -101,6 +101,7 @@ export function createOperationalStateController(options = {}) {
       authState = Object.values(AUTH_HEALTH_STATES).includes(nextAuthState)
         ? nextAuthState
         : AUTH_HEALTH_STATES.ERROR;
+      if ([AUTH_HEALTH_STATES.UNAUTHENTICATED, AUTH_HEALTH_STATES.ERROR].includes(authState)) reconnecting = false;
       reason = safeCode(nextReason, `AUTH_${authState}`);
       return emit();
     },
@@ -108,6 +109,7 @@ export function createOperationalStateController(options = {}) {
       realtimeState = Object.values(REALTIME_HEALTH_STATES).includes(nextRealtimeState)
         ? nextRealtimeState
         : REALTIME_HEALTH_STATES.ERROR;
+      if ([REALTIME_HEALTH_STATES.ERROR, REALTIME_HEALTH_STATES.DISCONNECTED].includes(realtimeState)) reconnecting = false;
       reason = safeCode(nextReason, `REALTIME_${realtimeState}`);
       return emit();
     },
@@ -122,7 +124,10 @@ export function createOperationalStateController(options = {}) {
       lastCommandFailureCode = safeCode(category, "BACKEND_UNAVAILABLE");
       lastCorrelationId = safeCorrelationId(correlationId);
       reason = safeCode(nextReason, lastCommandFailureCode);
-      if (lastCommandFailureCode === "UNAUTHENTICATED") authState = AUTH_HEALTH_STATES.UNAUTHENTICATED;
+      if (lastCommandFailureCode === "UNAUTHENTICATED") {
+        authState = AUTH_HEALTH_STATES.UNAUTHENTICATED;
+        reconnecting = false;
+      }
       return emit();
     },
     clearCommandFailure() {
