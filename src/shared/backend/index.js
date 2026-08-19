@@ -29,10 +29,8 @@ export {
   normalizeCommandResult
 } from "./commands.js";
 
-export {
-  OPERATIONAL_STATE_EVENT,
-  createAuthoritativeBackendApi
-} from "./authoritative.js";
+export { OPERATIONAL_STATE_EVENT } from "./authoritative.js";
+export { createAuthoritativeBackendApi } from "./authoritative-router.js";
 
 export { createAdminBackendApi } from "./admin.js";
 
