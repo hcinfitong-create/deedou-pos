@@ -638,7 +638,7 @@ test("DD-008C merge gates run on Node 22 and include exact-head integration/brow
   assert.match(ciWorkflow, /dd008c-integration:/i);
   assert.match(ciWorkflow, /npm run dd008c:command-realtime/i);
   assert.match(ciWorkflow, /browser-smoke:/i);
-  assert.match(ciWorkflow, /npx playwright install --with-deps chromium/i);
+  assert.match(ciWorkflow, /npx playwright install chromium/i);
   assert.match(ciWorkflow, /npx supabase start/i);
   assert.match(ciWorkflow, /npx supabase db reset/i);
   assert.match(ciWorkflow, /npm run dd008c:browser-smoke/i);

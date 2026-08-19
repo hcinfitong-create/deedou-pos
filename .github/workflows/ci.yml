@@ -57,10 +57,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
+      - name: Confirm PostgreSQL client
+        run: psql --version
 
       - name: Confirm pinned Supabase CLI
         run: npx supabase --version
@@ -124,10 +122,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
+      - name: Confirm PostgreSQL client
+        run: psql --version
 
       - name: Confirm pinned Supabase CLI
         run: npx supabase --version
@@ -166,10 +162,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
+      - name: Confirm PostgreSQL client
+        run: psql --version
 
       - name: Confirm pinned Supabase CLI
         run: npx supabase --version
@@ -211,10 +205,8 @@ jobs:
       - name: Install Chromium
         run: npx playwright install chromium
 
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
+      - name: Confirm PostgreSQL client
+        run: psql --version
 
       - name: Confirm pinned Supabase CLI
         run: npx supabase --version
@@ -264,10 +256,8 @@ jobs:
       - name: Install Chromium
         run: npx playwright install chromium
 
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
+      - name: Confirm PostgreSQL client
+        run: psql --version
 
       - name: Confirm pinned Supabase CLI
         run: npx supabase --version
