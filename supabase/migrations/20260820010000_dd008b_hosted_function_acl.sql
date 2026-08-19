@@ -3,8 +3,15 @@
 -- through default privileges. Normalize DeeDou to deny-by-default, then grant only the
 -- intended DD-008B RPC surface.
 
+-- PostgreSQL grants EXECUTE on new functions to PUBLIC by default. That built-in
+-- default is global to the creating role, so it must be revoked without IN SCHEMA.
+alter default privileges for role postgres
+  revoke execute on functions from public;
+
+-- Hosted Supabase also adds explicit browser-role grants for new public functions.
+-- Remove those schema-scoped additions while retaining service_role access.
 alter default privileges for role postgres in schema public
-  revoke execute on functions from public, anon, authenticated;
+  revoke execute on functions from anon, authenticated;
 
 -- Internal helpers: callable only from privileged/server-side SQL paths.
 revoke all on function public.hash_device_credential(text) from public, anon, authenticated;
