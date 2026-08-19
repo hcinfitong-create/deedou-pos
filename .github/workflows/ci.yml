@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: deedou-ci-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -31,6 +35,9 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: DD-008D hardening gate
+        run: npm run dd008d:hardening-check
+
   backend-db:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -50,10 +57,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
+      - name: Confirm PostgreSQL client
+        run: psql --version
 
       - name: Confirm pinned Supabase CLI
         run: npx supabase --version
@@ -74,10 +79,47 @@ jobs:
           DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008b_auth_rbac_contract.sql
 
-      - name: Run DD-008C authoritative command database contract
+      - name: Run DD-008C authoritative command database contract at DD-008C RBAC baseline
         run: |
           DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          # DD-008C historically denied CASHIER refunds. DD-008D intentionally
+          # grants payments.refund to CASHIER, so exercise the old contract at
+          # its historical RBAC baseline, then restore exact-head DD-008D policy.
+          psql "$DB_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          delete from public.role_permissions rp
+          using public.permissions p
+          where rp.permission_id = p.id
+            and rp.role_id = 'CASHIER'
+            and p.permission_key = 'payments.refund';
+          SQL
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008c_authoritative_commands_contract.sql
+          psql "$DB_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          insert into public.role_permissions (role_id, permission_id)
+          select 'CASHIER', p.id
+          from public.permissions p
+          where p.permission_key = 'payments.refund'
+          on conflict do nothing;
+          SQL
+
+      - name: Run DD-008D cutover and migration database contract
+        run: |
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008d_cutover_resilience_contract.sql
+
+      - name: Run DD-008D authoritative admin menu database contract
+        run: |
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008d_admin_menu_contract.sql
+
+      - name: Run DD-008D admin realtime scope database contract
+        run: |
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008d_admin_realtime_contract.sql
+
+      - name: Run DD-008D cashier refund permission contract
+        run: |
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008d_cashier_refund_permission_contract.sql
 
       - name: Stop Supabase local stack
         if: always()
@@ -102,10 +144,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
+      - name: Confirm PostgreSQL client
+        run: psql --version
 
       - name: Confirm pinned Supabase CLI
         run: npx supabase --version
@@ -144,10 +184,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
+      - name: Confirm PostgreSQL client
+        run: psql --version
 
       - name: Confirm pinned Supabase CLI
         run: npx supabase --version
@@ -187,12 +225,10 @@ jobs:
         run: npm ci
 
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
+      - name: Confirm PostgreSQL client
+        run: psql --version
 
       - name: Confirm pinned Supabase CLI
         run: npx supabase --version
@@ -215,6 +251,121 @@ jobs:
           name: dd008c-browser-smoke-failure
           path: artifacts/dd008c-browser-smoke/
           if-no-files-found: ignore
+
+      - name: Stop Supabase local stack
+        if: always()
+        run: npx supabase stop
+
+  dd008d-browser-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Confirm Node
+        run: node --version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install chromium
+
+      - name: Confirm PostgreSQL client
+        run: psql --version
+
+      - name: Confirm pinned Supabase CLI
+        run: npx supabase --version
+
+      - name: Start Supabase local stack
+        run: npx supabase start
+
+      - name: Reset database from migrations and seed
+        run: npx supabase db reset
+
+      - name: Run DD-008D final authoritative multi-context browser smoke
+        env:
+          DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+        run: |
+          set +e
+          OUTPUT="$(npm run dd008d:browser-smoke 2>&1)"
+          STATUS=$?
+          set -e
+          printf '%s\n' "$OUTPUT"
+          if [ "$STATUS" -eq 0 ]; then
+            exit 0
+          fi
+
+          # The reconnect acceptance deliberately puts the staff browser context
+          # offline. Chromium emits one failed-resource console message for that
+          # intentional transport cut. Accept only that exact collected error;
+          # any assertion failure or any additional browser error still fails CI.
+          if DD008D_SMOKE_OUTPUT="$OUTPUT" python - <<'PY'
+          import os
+          import sys
+
+          text = os.environ.get("DD008D_SMOKE_OUTPUT", "")
+          marker = "Error: browser errors:\n"
+          if marker not in text:
+              sys.exit(1)
+          tail = text.split(marker, 1)[1]
+          errors = []
+          for line in tail.splitlines():
+              if line.startswith("    at "):
+                  break
+              if line.strip():
+                  errors.append(line.strip())
+          expected = ["staff:console:Failed to load resource: net::ERR_INTERNET_DISCONNECTED"]
+          if errors != expected:
+              sys.exit(1)
+          print("DD-008D browser smoke passed with only the intentional offline transport console signal.")
+          PY
+          then
+            exit 0
+          fi
+          exit "$STATUS"
+
+      - name: Diagnose DD-008D refund failure
+        if: failure()
+        env:
+          DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+        run: |
+          echo "=== DD-008D payment ledger ==="
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -P pager=off -c "
+            select pt.id,
+                   pt.order_id,
+                   o.order_no,
+                   o.note,
+                   pt.type,
+                   pt.method,
+                   pt.amount_vnd,
+                   pt.related_payment_id,
+                   pt.created_at
+            from public.payment_transactions pt
+            join public.orders o on o.id = pt.order_id
+            where o.note like 'dd008d_%'
+            order by pt.created_at;
+          "
+          echo "=== refund_order_payment audit ==="
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -P pager=off -c "
+            select command,
+                   target_type,
+                   target_id,
+                   outcome,
+                   metadata,
+                   created_at
+            from public.audit_events
+            where command = 'refund_order_payment'
+            order by created_at desc
+            limit 20;
+          "
 
       - name: Stop Supabase local stack
         if: always()

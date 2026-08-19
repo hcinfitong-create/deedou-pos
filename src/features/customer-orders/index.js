@@ -1,4 +1,4 @@
-import { formatMoney } from "../../shared/utils/index.js";
+import { escapeHtml, formatMoney } from "../../shared/utils/index.js";
 
 export function renderCustomerOrderStatusPill(order, { lang, copy }) {
   const labels = {
@@ -11,7 +11,16 @@ export function renderCustomerOrderStatusPill(order, { lang, copy }) {
     REJECTED: "Rejected",
     VOIDED: "Voided"
   };
-  return `<div class="status-pill"><span>${order.orderNo} ${labels[order.status] || order.status}</span><strong>${formatMoney(order.total)}</strong></div>`;
+  const note = String(order?.note || "").trim();
+  return `
+    <div class="status-pill customer-order-status">
+      <span>
+        ${escapeHtml(order.orderNo)} ${escapeHtml(labels[order.status] || order.status)}
+        ${note ? `<small class="muted">Note: ${escapeHtml(note)}</small>` : ""}
+      </span>
+      <strong>${formatMoney(order.total)}</strong>
+    </div>
+  `;
 }
 
 export function selectCustomerSessionOrders({ orders = [], tableSessionId = "" } = {}) {

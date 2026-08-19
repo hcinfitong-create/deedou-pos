@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
+  AUTH_HEALTH_STATES,
   BACKEND_MODES,
   CONNECTION_STATES,
   createAuthoritativeBackendApi,
   createBackendClient,
+  createOperationalStateController,
   getBackendConfig,
   getBackendMode,
   getConnectionState,
@@ -199,6 +201,9 @@ test("DD-008C command result normalization preserves deterministic failure categ
 
 test("DD-008C shared backend adapter uses the managed Supabase client and injects workstation context", async () => {
   const calls = [];
+  const operationalController = createOperationalStateController({ mode: BACKEND_MODES.SUPABASE });
+  operationalController.markBackendProbe({ ok: true, reason: "TEST_BACKEND_OK" });
+  operationalController.markAuth(AUTH_HEALTH_STATES.AUTHENTICATED, "TEST_AUTH_OK");
   const api = createAuthoritativeBackendApi({
     config: {
       mode: BACKEND_MODES.SUPABASE,
@@ -217,7 +222,8 @@ test("DD-008C shared backend adapter uses the managed Supabase client and inject
     authStateRef: () => ({
       locationId: "deedou-demo",
       authorization: { workstationMode: "CASHIER" }
-    })
+    }),
+    operationalController
   });
 
   const result = await api.recordOrderPayment({
@@ -632,7 +638,7 @@ test("DD-008C merge gates run on Node 22 and include exact-head integration/brow
   assert.match(ciWorkflow, /dd008c-integration:/i);
   assert.match(ciWorkflow, /npm run dd008c:command-realtime/i);
   assert.match(ciWorkflow, /browser-smoke:/i);
-  assert.match(ciWorkflow, /npx playwright install --with-deps chromium/i);
+  assert.match(ciWorkflow, /npx playwright install chromium/i);
   assert.match(ciWorkflow, /npx supabase start/i);
   assert.match(ciWorkflow, /npx supabase db reset/i);
   assert.match(ciWorkflow, /npm run dd008c:browser-smoke/i);
