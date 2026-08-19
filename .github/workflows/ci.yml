@@ -31,7 +31,7 @@ jobs:
       - name: Unit tests
         run: npm test
 
-      - name: DD-008D production hardening gate
+      - name: DD-008D hardening gate
         run: npm run dd008d:production-check
 
   backend-db:
