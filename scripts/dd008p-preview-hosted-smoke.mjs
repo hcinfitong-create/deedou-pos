@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 const previewUrl = requireEnv("DEEDOU_PREVIEW_URL").replace(/\/+$/, "");
 const apiUrl = requireEnv("DEEDOU_HOSTED_SUPABASE_URL");
 const publishableKey = requireEnv("DEEDOU_HOSTED_SUPABASE_PUBLISHABLE_KEY");
+const vercelBypassSecret = requireEnv("VERCEL_AUTOMATION_BYPASS_SECRET");
 requireEnv("DEEDOU_HOSTED_BOOTSTRAP_URL");
 
 const sourcePath = "scripts/dd008d-browser-smoke.mjs";
@@ -15,9 +16,7 @@ const launcherBlobSha = "666413bda14307f72ab404ab407b8641dc4c15e1";
 const originalSource = await readFile(sourcePath, "utf8");
 
 try {
-  const vercelOidcToken = await githubOidcToken();
-  process.env.DEEDOU_VERCEL_TRUSTED_OIDC_TOKEN = vercelOidcToken;
-  await waitForPreviewRuntimeConfig(vercelOidcToken);
+  await waitForPreviewRuntimeConfig();
 
   let patchedSource = originalSource;
   patchedSource = replaceExact(
@@ -49,13 +48,14 @@ try {
 }`,
 `async function createBrowserContext(spec = {}) {
   const context = await browser.newContext({ timezoneId: spec.timezoneId || "Asia/Ho_Chi_Minh" });
-  const vercelOidcToken = String(process.env.DEEDOU_VERCEL_TRUSTED_OIDC_TOKEN || "");
-  if (!vercelOidcToken) throw new Error("Vercel trusted OIDC token unavailable");
+  const vercelBypassSecret = String(process.env.VERCEL_AUTOMATION_BYPASS_SECRET || "");
+  if (!vercelBypassSecret) throw new Error("Vercel automation bypass secret unavailable");
   await context.route(\`${previewUrl}/**\`, async (route) => {
     await route.continue({
       headers: {
         ...route.request().headers(),
-        "x-vercel-trusted-oidc-idp-token": vercelOidcToken
+        "x-vercel-protection-bypass": vercelBypassSecret,
+        "x-vercel-set-bypass-cookie": "true"
       }
     });
   });
@@ -88,7 +88,7 @@ try {
 
   console.log(`DD008_PREVIEW_TARGET=${previewUrl}`);
   console.log(`DD008_REUSED_PR31_LAUNCHER_BLOB=${actualBlobSha}`);
-  console.log("DD008_VERCEL_TRUSTED_OIDC=PASS");
+  console.log("DD008_VERCEL_AUTOMATION_BYPASS=PASS");
 
   const result = spawnSync(process.execPath, [launcherPath], {
     cwd: process.cwd(),
@@ -98,12 +98,11 @@ try {
   if (result.error) throw result.error;
   if (result.status !== 0) process.exitCode = result.status || 1;
 } finally {
-  delete process.env.DEEDOU_VERCEL_TRUSTED_OIDC_TOKEN;
   await writeFile(sourcePath, originalSource, "utf8").catch(() => {});
   await unlink(launcherPath).catch(() => {});
 }
 
-async function waitForPreviewRuntimeConfig(vercelOidcToken) {
+async function waitForPreviewRuntimeConfig() {
   const startedAt = Date.now();
   let last = "not attempted";
   while (Date.now() - startedAt < 120_000) {
@@ -111,7 +110,8 @@ async function waitForPreviewRuntimeConfig(vercelOidcToken) {
       const response = await fetch(`${previewUrl}/api/runtime-config`, {
         headers: {
           "cache-control": "no-cache",
-          "x-vercel-trusted-oidc-idp-token": vercelOidcToken
+          "x-vercel-protection-bypass": vercelBypassSecret,
+          "x-vercel-set-bypass-cookie": "true"
         }
       });
       const body = await response.text();
@@ -132,19 +132,6 @@ async function waitForPreviewRuntimeConfig(vercelOidcToken) {
   throw new Error(`Preview runtime config did not become ready: ${last}`);
 }
 
-async function githubOidcToken() {
-  const requestUrl = String(process.env.ACTIONS_ID_TOKEN_REQUEST_URL || "").trim();
-  const requestToken = String(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN || "").trim();
-  if (!requestUrl || !requestToken) throw new Error("GitHub OIDC environment unavailable");
-  const response = await fetch(requestUrl, {
-    headers: { authorization: `Bearer ${requestToken}` }
-  });
-  if (!response.ok) throw new Error(`GitHub OIDC request failed: ${response.status}`);
-  const body = await response.json();
-  if (!body?.value) throw new Error("GitHub OIDC token missing");
-  return body.value;
-}
-
 function gitBlobSha(content) {
   const bytes = Buffer.byteLength(content, "utf8");
   return createHash("sha1")
@@ -163,6 +150,7 @@ function replaceExact(text, expected, replacement) {
 function safeMessage(error) {
   return String(error?.message || error || "UNKNOWN")
     .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[JWT_REDACTED]")
+    .replace(/x-vercel-protection-bypass\s*[:=]\s*[^\s,;]+/gi, "x-vercel-protection-bypass=[REDACTED]")
     .slice(0, 240);
 }
 
