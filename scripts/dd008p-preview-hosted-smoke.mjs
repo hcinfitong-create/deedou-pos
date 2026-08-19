@@ -54,8 +54,7 @@ try {
     await route.continue({
       headers: {
         ...route.request().headers(),
-        "x-vercel-protection-bypass": vercelBypassSecret,
-        "x-vercel-set-bypass-cookie": "true"
+        "x-vercel-protection-bypass": vercelBypassSecret
       }
     });
   });
@@ -110,8 +109,7 @@ async function waitForPreviewRuntimeConfig() {
       const response = await fetch(`${previewUrl}/api/runtime-config`, {
         headers: {
           "cache-control": "no-cache",
-          "x-vercel-protection-bypass": vercelBypassSecret,
-          "x-vercel-set-bypass-cookie": "true"
+          "x-vercel-protection-bypass": vercelBypassSecret
         }
       });
       const body = await response.text();
