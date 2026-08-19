@@ -69,6 +69,52 @@ try {
   return context;
 }`
   );
+  patchedSource = replaceExact(
+    patchedSource,
+`  const heldFamily = staffPage.locator(".order-card").filter({ hasText: note1 }).first().locator(".course-family").filter({ hasText: /Seafood Fried Rice|Cơm chiên hải sản/ }).first();
+  await heldFamily.locator("[data-line-fire]").click();
+  const kitchenTicket = kitchenPage.locator(".ticket").filter({ hasText: note1 }).first();
+  await kitchenTicket.waitFor({ timeout: 30_000 });`,
+`  const staffBarLine = staffPage.locator(".order-card").filter({ hasText: note1 }).first().locator("li").filter({ hasText: /Mango Tea|Trà xoài/ }).first();
+  await waitFor(async () => {
+    const text = await staffBarLine.innerText().catch(() => "");
+    return /\\bREADY\\b/.test(text);
+  }, "staff BAR READY convergence before Fire", 30_000);
+
+  const heldFamily = staffPage.locator(".order-card").filter({ hasText: note1 }).first().locator(".course-family").filter({ hasText: /Seafood Fried Rice|Cơm chiên hải sản/ }).first();
+  const fireResponsePromise = staffPage.waitForResponse((response) => (
+    response.request().method() === "POST"
+    && response.url().includes("/rest/v1/rpc/fire_order_family")
+  ), { timeout: 10_000 }).catch(() => null);
+  await heldFamily.locator("[data-line-fire]").click();
+  const fireResponse = await fireResponsePromise;
+  let safeFireResult = { httpStatus: null, ok: null, category: "", reason: "" };
+  if (fireResponse) {
+    const body = await fireResponse.json().catch(() => null);
+    const row = Array.isArray(body) ? body[0] : body;
+    safeFireResult = {
+      httpStatus: fireResponse.status(),
+      ok: typeof row?.ok === "boolean" ? row.ok : null,
+      category: String(row?.category || ""),
+      reason: String(row?.reason || "")
+    };
+  }
+  console.log("DD008_PREVIEW_FIRE_RPC_RESULT=" + JSON.stringify(safeFireResult));
+  if (safeFireResult.ok === false) {
+    const diagnostic = await callHostedBootstrap("diagnose", { runId }).catch(() => null);
+    console.log("DD008_PREVIEW_FIRE_SERVER_DIAG=" + JSON.stringify(diagnostic?.diagnostic || {}));
+    throw new Error("Fire RPC rejected: " + safeFireResult.category + ":" + safeFireResult.reason);
+  }
+
+  const kitchenTicket = kitchenPage.locator(".ticket").filter({ hasText: note1 }).first();
+  try {
+    await kitchenTicket.waitFor({ timeout: 30_000 });
+  } catch (error) {
+    const diagnostic = await callHostedBootstrap("diagnose", { runId }).catch(() => null);
+    console.log("DD008_PREVIEW_FIRE_SERVER_DIAG=" + JSON.stringify(diagnostic?.diagnostic || {}));
+    throw error;
+  }`
+  );
 
   await writeFile(sourcePath, patchedSource, "utf8");
 
