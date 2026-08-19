@@ -22,6 +22,7 @@ jobs:
       DEEDOU_HOSTED_SUPABASE_PUBLISHABLE_KEY: sb_publishable_AYxnh5BiiFk7EKMmskFxRg_TKzTGYvy
       DEEDOU_HOSTED_BOOTSTRAP_URL: https://nwyhxdcslxxjirsmqnxo.supabase.co/functions/v1/dd008-hosted-smoke-bootstrap
       DEEDOU_PREVIEW_URL: https://deedou-pos-git-agent-dd008p-pr-bb01ce-hcinfitong-3230s-projects.vercel.app
+      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
