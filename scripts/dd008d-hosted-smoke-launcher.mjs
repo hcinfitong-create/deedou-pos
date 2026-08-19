@@ -60,6 +60,51 @@ source = replaceExact(source,
 `  assert(Number(psqlScalar(\`select count(*) from public.command_deduplication where location_id='\${LOCATION_ID}' and command='dd008d_set_product_availability' and command_key='\${sql(idemKey)}'\`)) === 1, "duplicate idempotency created more than one dedup record");`,
 `  // Hosted DB contracts already prove one dedup row; the browser gate proves replay returns the same authoritative timestamp.`);
 
+source = replaceExact(source,
+`async function serveAllReadyForNote(page, note, expectedCount) {
+  let served = 0;
+  while (served < expectedCount) {
+    const card = page.locator(".order-card").filter({ hasText: note }).first();
+    await card.waitFor({ timeout: 30_000 });
+    const button = card.locator("[data-serve-line]").first();
+    await button.waitFor({ timeout: 30_000 });
+    await button.click();
+    served += 1;
+    await sleep(100);
+  }
+}`,
+`async function serveAllReadyForNote(page, note, expectedCount) {
+  let served = 0;
+  while (served < expectedCount) {
+    const card = page.locator(".order-card").filter({ hasText: note }).first();
+    await card.waitFor({ timeout: 30_000 });
+    const button = card.locator("[data-serve-line]").first();
+    await button.waitFor({ timeout: 30_000 });
+    const lineId = await button.getAttribute("data-serve-line");
+    assert(lineId, "serve action missing line id");
+    await button.click();
+    await waitFor(async () => {
+      const refreshed = page.locator(".order-card").filter({ hasText: note }).first();
+      return await refreshed.locator(\`[data-serve-line="\${lineId}"]\`).count() === 0;
+    }, \`serve line \${lineId} convergence\`, 15_000);
+    served += 1;
+  }
+}`);
+
+source = replaceExact(source,
+`  await waitOrderStatus(runtimeClients.cashier, firstOrder.id, "SERVED", accounts.cashier);`,
+`  try {
+    await waitOrderStatus(runtimeClients.cashier, firstOrder.id, "SERVED", accounts.cashier);
+  } catch (error) {
+    const snapshot = await staffSnapshot(runtimeClients.cashier, accounts.cashier);
+    const order = snapshot.orders.find((candidate) => candidate.id === firstOrder.id);
+    console.log("DD008_HOSTED_SERVE_DIAG=" + JSON.stringify({
+      status: order?.status || "MISSING",
+      items: (order?.items || []).map((item) => ({ lineId: item.lineId, id: item.id, servedQty: item.servedQty, qty: item.qty, prepStatus: item.prepStatus, status: item.status }))
+    }));
+    throw error;
+  }`);
+
 const hostedHelpers = `
 async function provisionHostedFixture() {
   const result = await callHostedBootstrap("setup", {
