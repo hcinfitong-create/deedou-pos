@@ -15,7 +15,9 @@ const launcherBlobSha = "666413bda14307f72ab404ab407b8641dc4c15e1";
 const originalSource = await readFile(sourcePath, "utf8");
 
 try {
-  await waitForPreviewRuntimeConfig();
+  const vercelOidcToken = await githubOidcToken();
+  process.env.DEEDOU_VERCEL_TRUSTED_OIDC_TOKEN = vercelOidcToken;
+  await waitForPreviewRuntimeConfig(vercelOidcToken);
 
   let patchedSource = originalSource;
   patchedSource = replaceExact(
@@ -47,6 +49,16 @@ try {
 }`,
 `async function createBrowserContext(spec = {}) {
   const context = await browser.newContext({ timezoneId: spec.timezoneId || "Asia/Ho_Chi_Minh" });
+  const vercelOidcToken = String(process.env.DEEDOU_VERCEL_TRUSTED_OIDC_TOKEN || "");
+  if (!vercelOidcToken) throw new Error("Vercel trusted OIDC token unavailable");
+  await context.route(\`${previewUrl}/**\`, async (route) => {
+    await route.continue({
+      headers: {
+        ...route.request().headers(),
+        "x-vercel-trusted-oidc-idp-token": vercelOidcToken
+      }
+    });
+  });
   await context.addInitScript(({ deviceSecret, mode }) => {
     if (deviceSecret) localStorage.setItem("deedou_device_credential", deviceSecret);
     if (mode) localStorage.setItem("deedou_workstation_mode", mode);
@@ -76,6 +88,7 @@ try {
 
   console.log(`DD008_PREVIEW_TARGET=${previewUrl}`);
   console.log(`DD008_REUSED_PR31_LAUNCHER_BLOB=${actualBlobSha}`);
+  console.log("DD008_VERCEL_TRUSTED_OIDC=PASS");
 
   const result = spawnSync(process.execPath, [launcherPath], {
     cwd: process.cwd(),
@@ -85,17 +98,21 @@ try {
   if (result.error) throw result.error;
   if (result.status !== 0) process.exitCode = result.status || 1;
 } finally {
+  delete process.env.DEEDOU_VERCEL_TRUSTED_OIDC_TOKEN;
   await writeFile(sourcePath, originalSource, "utf8").catch(() => {});
   await unlink(launcherPath).catch(() => {});
 }
 
-async function waitForPreviewRuntimeConfig() {
+async function waitForPreviewRuntimeConfig(vercelOidcToken) {
   const startedAt = Date.now();
   let last = "not attempted";
   while (Date.now() - startedAt < 120_000) {
     try {
       const response = await fetch(`${previewUrl}/api/runtime-config`, {
-        headers: { "cache-control": "no-cache" }
+        headers: {
+          "cache-control": "no-cache",
+          "x-vercel-trusted-oidc-idp-token": vercelOidcToken
+        }
       });
       const body = await response.text();
       const safe = !/service_role|SUPABASE_SECRET|DATABASE_URL|DB_PASSWORD|JWT_SECRET/i.test(body);
@@ -113,6 +130,19 @@ async function waitForPreviewRuntimeConfig() {
     await new Promise((resolveWait) => setTimeout(resolveWait, 2_000));
   }
   throw new Error(`Preview runtime config did not become ready: ${last}`);
+}
+
+async function githubOidcToken() {
+  const requestUrl = String(process.env.ACTIONS_ID_TOKEN_REQUEST_URL || "").trim();
+  const requestToken = String(process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN || "").trim();
+  if (!requestUrl || !requestToken) throw new Error("GitHub OIDC environment unavailable");
+  const response = await fetch(requestUrl, {
+    headers: { authorization: `Bearer ${requestToken}` }
+  });
+  if (!response.ok) throw new Error(`GitHub OIDC request failed: ${response.status}`);
+  const body = await response.json();
+  if (!body?.value) throw new Error("GitHub OIDC token missing");
+  return body.value;
 }
 
 function gitBlobSha(content) {
