@@ -224,8 +224,13 @@ try {
   await refundButton.click();
   await waitFor(async () => {
     const snapshot = await staffSnapshot(runtimeClients.cashier, accounts.cashier);
-    return snapshot.orders.find((order) => order.id === firstOrder.id)?.paymentStatus === "PARTIALLY_REFUNDED";
-  }, "targeted refund projection");
+    const refundedOrder = snapshot.orders.find((order) => order.id === firstOrder.id);
+    return refundedOrder?.payments?.some((payment) => (
+      payment.type === "REFUND"
+      && payment.relatedPaymentId === originalPayment.id
+      && Number(payment.amountVnd) === 1000
+    ));
+  }, "targeted refund ledger projection");
   assert(psqlScalar(`select status from public.table_sessions where id='${sql(sessionId)}'`) === "CLOSED", "refund reopened closed table visit");
   assert(await kitchenPage.locator(".ticket").filter({ hasText: note1 }).count() === 0, "refund reopened kitchen workflow");
   assert(await barPage.locator(".ticket").filter({ hasText: note1 }).count() === 0, "refund reopened bar workflow");
