@@ -2,7 +2,7 @@ name: DeeDou CI
 
 on:
   push:
-    branches: [main, "fix/**", "feature/**", "feat/**"]
+    branches: [main]
   pull_request:
     branches: [main]
 
