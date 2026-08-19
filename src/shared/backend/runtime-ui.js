@@ -202,6 +202,22 @@ function handleInput(event) {
   migrationState.serverPreviewSignature = "";
   migrationState.serverResult = null;
   migrationState.message = "";
+  syncMigrationActionState();
+}
+
+function syncMigrationActionState() {
+  const serverPreview = document.querySelector("[data-dd008d-server-preview]");
+  if (serverPreview) {
+    serverPreview.disabled = !(
+      migrationState.bundle
+      && migrationState.importKey
+      && config.mode === BACKEND_MODES.SUPABASE
+    );
+  }
+  const importButton = document.querySelector("[data-dd008d-import]");
+  if (importButton) importButton.disabled = true;
+  const result = document.querySelector("[data-dd008d-result]");
+  result?.remove();
 }
 
 function buildExportState() {
