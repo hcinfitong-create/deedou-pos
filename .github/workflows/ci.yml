@@ -99,6 +99,11 @@ jobs:
           DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008d_admin_realtime_contract.sql
 
+      - name: Run DD-008D cashier refund permission contract
+        run: |
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008d_cashier_refund_permission_contract.sql
+
       - name: Stop Supabase local stack
         if: always()
         run: npx supabase stop
