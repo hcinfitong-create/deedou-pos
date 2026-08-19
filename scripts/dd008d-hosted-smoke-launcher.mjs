@@ -82,7 +82,24 @@ source = replaceExact(source,
     await button.waitFor({ timeout: 30_000 });
     const lineId = await button.getAttribute("data-serve-line");
     assert(lineId, "serve action missing line id");
+    const responsePromise = page.waitForResponse((response) => (
+      response.request().method() === "POST"
+      && response.url().includes("/rest/v1/rpc/serve_order_line")
+    ), { timeout: 10_000 }).catch(() => null);
     await button.click();
+    const serveResponse = await responsePromise;
+    let safeRpcResult = { httpStatus: null, ok: null, category: "", reason: "" };
+    if (serveResponse) {
+      const body = await serveResponse.json().catch(() => null);
+      const row = Array.isArray(body) ? body[0] : body;
+      safeRpcResult = {
+        httpStatus: serveResponse.status(),
+        ok: typeof row?.ok === "boolean" ? row.ok : null,
+        category: String(row?.category || ""),
+        reason: String(row?.reason || "")
+      };
+    }
+    console.log("DD008_HOSTED_SERVE_RPC_RESULT=" + JSON.stringify({ lineId, ...safeRpcResult }));
     await sleep(800);
     const notice = await page.locator(".notice").last().innerText().catch(() => "");
     console.log(\`DD008_HOSTED_SERVE_NOTICE=\${lineId}:\${String(notice).replace(/\\s+/g, " ").slice(0, 220)}\`);
