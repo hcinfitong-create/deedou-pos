@@ -74,6 +74,12 @@ source = replaceExact(source,
   }
 }`,
 `async function serveAllReadyForNote(page, note, expectedCount) {
+  const readyCard = page.locator(".order-card").filter({ hasText: note }).first();
+  await readyCard.waitFor({ timeout: 30_000 });
+  await waitFor(async () => (
+    await readyCard.locator("[data-serve-line]").count()
+  ) >= expectedCount, \`staff ready convergence for \${expectedCount} line(s)\`, 30_000);
+
   let served = 0;
   while (served < expectedCount) {
     const card = page.locator(".order-card").filter({ hasText: note }).first();
