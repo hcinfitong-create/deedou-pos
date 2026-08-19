@@ -32,7 +32,7 @@ jobs:
         run: npm test
 
       - name: DD-008D hardening gate
-        run: npm run dd008d:production-check
+        run: npm run dd008d:hardening-check
 
   backend-db:
     runs-on: ubuntu-latest
