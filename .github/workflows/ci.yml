@@ -273,6 +273,41 @@ jobs:
           DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
         run: npm run dd008d:browser-smoke
 
+      - name: Diagnose DD-008D refund failure
+        if: failure()
+        env:
+          DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+        run: |
+          echo "=== DD-008D payment ledger ==="
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -P pager=off -c "
+            select pt.id,
+                   pt.order_id,
+                   o.order_no,
+                   o.note,
+                   pt.type,
+                   pt.method,
+                   pt.amount_vnd,
+                   pt.related_payment_id,
+                   pt.created_at
+            from public.payment_transactions pt
+            join public.orders o on o.id = pt.order_id
+            where o.note like 'dd008d_%'
+            order by pt.created_at;
+          "
+          echo "=== refund_order_payment audit ==="
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -P pager=off -c "
+            select command,
+                   target_type,
+                   target_id,
+                   outcome,
+                   metadata,
+                   created_at
+            from public.audit_events
+            where command = 'refund_order_payment'
+            order by created_at desc
+            limit 20;
+          "
+
       - name: Stop Supabase local stack
         if: always()
         run: npx supabase stop
