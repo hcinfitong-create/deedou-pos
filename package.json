@@ -10,7 +10,7 @@
     "dd008b:browser-smoke": "node scripts/dd008b-browser-smoke.mjs",
     "dd008c:command-realtime": "node scripts/dd008c-command-realtime.mjs",
     "dd008c:browser-smoke": "node scripts/dd008b-browser-smoke.mjs",
-    "dd008d:production-check": "node scripts/dd008d-production-hardening.mjs",
+    "dd008d:hardening-check": "node scripts/dd008d-production-hardening.mjs",
     "dd008d:browser-smoke": "node scripts/dd008d-browser-smoke.mjs"
   },
   "engines": {
