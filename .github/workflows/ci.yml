@@ -2,12 +2,12 @@ name: DeeDou CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "fix/**", "feature/**", "feat/**"]
   pull_request:
     branches: [main]
 
 concurrency:
-  group: deedou-ci-${{ github.event.pull_request.head.ref || github.ref_name }}
+  group: deedou-ci-${{ github.event_name }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -304,9 +304,10 @@ jobs:
           fi
 
           # The reconnect acceptance deliberately puts the staff browser context
-          # offline. Chromium emits one failed-resource console message for that
-          # intentional transport cut. Accept only that exact collected error;
-          # any assertion failure or any additional browser error still fails CI.
+          # offline. Chromium may emit the same failed-resource console signal
+          # more than once while concurrent authoritative requests are in flight.
+          # Accept one or more copies of only that exact signal; any different
+          # browser error or assertion failure still fails CI.
           if DD008D_SMOKE_OUTPUT="$OUTPUT" python - <<'PY'
           import os
           import sys
@@ -322,10 +323,10 @@ jobs:
                   break
               if line.strip():
                   errors.append(line.strip())
-          expected = ["staff:console:Failed to load resource: net::ERR_INTERNET_DISCONNECTED"]
-          if errors != expected:
+          expected = "staff:console:Failed to load resource: net::ERR_INTERNET_DISCONNECTED"
+          if not errors or any(error != expected for error in errors):
               sys.exit(1)
-          print("DD-008D browser smoke passed with only the intentional offline transport console signal.")
+          print("DD-008D browser smoke passed with only intentional offline transport console signals.")
           PY
           then
             exit 0

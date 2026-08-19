@@ -276,10 +276,13 @@ try {
     p_device_credential: accounts.admin.deviceSecret
   });
 
-  // Disconnect staff, trigger the existing business-signal path so the browser performs a real authoritative refetch, then require convergence before ONLINE.
+  // Disconnect staff and keep exercising the existing business-signal path until a real authoritative refetch observes the offline transport.
   await staffContext.setOffline(true);
-  await staffPage.evaluate(() => window.dispatchEvent(new StorageEvent("storage", { key: "deedou_products_full" })));
-  await waitForConnectivity(staffPage, ["OFFLINE", "DEGRADED"], 20_000);
+  await waitFor(async () => {
+    await staffPage.evaluate(() => window.dispatchEvent(new StorageEvent("storage", { key: "deedou_products_full" })));
+    const state = await staffPage.locator("[data-dd008d-connectivity]").getAttribute("data-state").catch(() => "");
+    return ["OFFLINE", "DEGRADED"].includes(state);
+  }, "connectivity OFFLINE/DEGRADED after authoritative offline refetch", 20_000);
   const requestIdempotency = `${runId}_offline_service_request`;
   const request = await rpc(publicClient, "create_service_request", {
     p_qr_token: qrTokens.A01,
