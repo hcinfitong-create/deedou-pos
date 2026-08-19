@@ -86,10 +86,16 @@ source = replaceExact(source,
     await sleep(800);
     const notice = await page.locator(".notice").last().innerText().catch(() => "");
     console.log(\`DD008_HOSTED_SERVE_NOTICE=\${lineId}:\${String(notice).replace(/\\s+/g, " ").slice(0, 220)}\`);
-    await waitFor(async () => {
-      const refreshed = page.locator(".order-card").filter({ hasText: note }).first();
-      return await refreshed.locator(\`[data-serve-line="\${lineId}"]\`).count() === 0;
-    }, \`serve line \${lineId} convergence\`, 15_000);
+    try {
+      await waitFor(async () => {
+        const refreshed = page.locator(".order-card").filter({ hasText: note }).first();
+        return await refreshed.locator(\`[data-serve-line="\${lineId}"]\`).count() === 0;
+      }, \`serve line \${lineId} convergence\`, 15_000);
+    } catch (error) {
+      const diagnostic = await callHostedBootstrap("diagnose", { runId });
+      console.log("DD008_HOSTED_SERVE_SERVER_DIAG=" + JSON.stringify(diagnostic?.diagnostic || {}));
+      throw error;
+    }
     served += 1;
   }
 }`);
