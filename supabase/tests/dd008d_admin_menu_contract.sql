@@ -39,10 +39,16 @@ values
   ('dd008d-dev-admin-wrong-mode', 'deedou-demo', 'DD-008D Wrong Mode', 'CASHIER', public.hash_device_credential('dd008d-admin-cashier-device'), true, 'dd008d-staff-admin')
 on conflict (id) do nothing;
 
+-- Fixture setup must run as the test/database owner. The authenticated role is
+-- deliberately denied raw product writes and may mutate availability only via RPC.
 update public.products
 set available = true,
     updated_at = '2026-08-16T00:00:00Z'::timestamptz
 where location_id = 'deedou-demo' and id = 'fried-rice';
+
+update public.products
+set available = false
+where location_id = 'deedou-demo' and id = 'espresso';
 
 set local role authenticated;
 set local request.jwt.claim.sub = '30000000-0000-4000-8000-000000000002';
@@ -63,8 +69,7 @@ begin
     raise exception 'expected wrong-mode admin menu read forbidden, got %/%', v_result.category, v_result.reason;
   end if;
 
-  -- ADMIN snapshot includes both available and unavailable products.
-  update public.products set available = false where location_id = 'deedou-demo' and id = 'espresso';
+  -- ADMIN snapshot includes both available and unavailable products without raw-table access.
   select * into v_result
   from public.dd008d_get_admin_menu_snapshot('deedou-demo', 'ADMIN', 'dd008d-admin-menu-device')
   limit 1;
