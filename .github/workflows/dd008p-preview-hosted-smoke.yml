@@ -1,0 +1,42 @@
+name: DD-008P Vercel Preview Hosted Browser Smoke
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: dd008p-preview-hosted-smoke-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  hosted-preview-browser-smoke:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'hcinfitong-create' && github.event.pull_request.number == 32
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      DEEDOU_HOSTED_SUPABASE_URL: https://nwyhxdcslxxjirsmqnxo.supabase.co
+      DEEDOU_HOSTED_SUPABASE_PUBLISHABLE_KEY: sb_publishable_AYxnh5BiiFk7EKMmskFxRg_TKzTGYvy
+      DEEDOU_HOSTED_BOOTSTRAP_URL: https://nwyhxdcslxxjirsmqnxo.supabase.co/functions/v1/dd008-hosted-smoke-bootstrap
+      DEEDOU_PREVIEW_URL: https://deedou-pos-git-agent-dd008p-pr-bb01ce-hcinfitong-3230s-projects.vercel.app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install chromium
+
+      - name: Run Vercel Preview authoritative browser acceptance
+        run: node scripts/dd008p-preview-hosted-smoke.mjs
