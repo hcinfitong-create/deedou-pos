@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
+  AUTH_HEALTH_STATES,
   BACKEND_MODES,
   CONNECTION_STATES,
   createAuthoritativeBackendApi,
   createBackendClient,
+  createOperationalStateController,
   getBackendConfig,
   getBackendMode,
   getConnectionState,
@@ -199,6 +201,9 @@ test("DD-008C command result normalization preserves deterministic failure categ
 
 test("DD-008C shared backend adapter uses the managed Supabase client and injects workstation context", async () => {
   const calls = [];
+  const operationalController = createOperationalStateController({ mode: BACKEND_MODES.SUPABASE });
+  operationalController.markBackendProbe({ ok: true, reason: "TEST_BACKEND_OK" });
+  operationalController.markAuth(AUTH_HEALTH_STATES.AUTHENTICATED, "TEST_AUTH_OK");
   const api = createAuthoritativeBackendApi({
     config: {
       mode: BACKEND_MODES.SUPABASE,
@@ -217,7 +222,8 @@ test("DD-008C shared backend adapter uses the managed Supabase client and inject
     authStateRef: () => ({
       locationId: "deedou-demo",
       authorization: { workstationMode: "CASHIER" }
-    })
+    }),
+    operationalController
   });
 
   const result = await api.recordOrderPayment({
