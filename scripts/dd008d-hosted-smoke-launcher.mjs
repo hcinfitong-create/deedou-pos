@@ -83,6 +83,9 @@ source = replaceExact(source,
     const lineId = await button.getAttribute("data-serve-line");
     assert(lineId, "serve action missing line id");
     await button.click();
+    await sleep(800);
+    const notice = await page.locator(".notice").last().innerText().catch(() => "");
+    console.log(\`DD008_HOSTED_SERVE_NOTICE=\${lineId}:\${String(notice).replace(/\\s+/g, " ").slice(0, 220)}\`);
     await waitFor(async () => {
       const refreshed = page.locator(".order-card").filter({ hasText: note }).first();
       return await refreshed.locator(\`[data-serve-line="\${lineId}"]\`).count() === 0;
