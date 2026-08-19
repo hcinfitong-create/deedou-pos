@@ -210,6 +210,7 @@ try {
   await closeButton.waitFor({ timeout: 20_000 });
   await closeButton.click();
   await waitFor(async () => psqlScalar(`select status from public.table_sessions where id='${sql(sessionId)}'`) === "CLOSED", "table visit closed");
+  await waitConnectivityOnline(cashierPage);
 
   // Targeted refund after close must not reopen visit or KDS workflow.
   const settled = await staffSnapshot(runtimeClients.cashier, accounts.cashier);
