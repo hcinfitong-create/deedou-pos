@@ -40,7 +40,7 @@ values
 on conflict (id) do nothing;
 
 -- Fixture setup must run as the test/database owner. The authenticated role is
--- deliberately denied raw product writes and may mutate availability only via RPC.
+-- deliberately denied raw product reads/writes and must use authoritative RPCs.
 update public.products
 set available = true,
     updated_at = '2026-08-16T00:00:00Z'::timestamptz
@@ -82,9 +82,13 @@ begin
   if v_count <> 1 then
     raise exception 'admin menu must include unavailable products';
   end if;
-
-  select updated_at into v_updated_at
-  from public.products where location_id = 'deedou-demo' and id = 'fried-rice';
+  select (product->>'updatedAt')::timestamptz into v_updated_at
+  from jsonb_array_elements(v_result.payload->'products') product
+  where product->>'id' = 'fried-rice'
+  limit 1;
+  if v_updated_at is null then
+    raise exception 'admin snapshot missing optimistic updatedAt for fried-rice';
+  end if;
 
   -- Disable via authoritative command.
   select * into v_result
@@ -95,10 +99,9 @@ begin
   if v_result.ok <> true or (v_result.payload->'product'->>'available')::boolean <> false then
     raise exception 'expected fried-rice disabled, got %/%/%', v_result.category, v_result.reason, v_result.payload;
   end if;
-  select updated_at into v_after_disable
-  from public.products where location_id = 'deedou-demo' and id = 'fried-rice';
-  if v_after_disable = v_updated_at then
-    raise exception 'availability mutation must bump updated_at';
+  v_after_disable := (v_result.payload->'product'->>'updatedAt')::timestamptz;
+  if v_after_disable is null or v_after_disable = v_updated_at then
+    raise exception 'availability mutation must return a bumped updatedAt token';
   end if;
 
   -- Same idempotency key/same payload is a replay, not another mutation.
@@ -110,8 +113,8 @@ begin
   if v_result.ok <> true then
     raise exception 'expected idempotency replay accepted, got %/%', v_result.category, v_result.reason;
   end if;
-  if (select updated_at from public.products where id = 'fried-rice') <> v_after_disable then
-    raise exception 'idempotency replay mutated product again';
+  if (v_result.payload->'product'->>'updatedAt')::timestamptz <> v_after_disable then
+    raise exception 'idempotency replay returned a different mutation token';
   end if;
 
   -- Public QR menu reflects authoritative unavailable state.
