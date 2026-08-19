@@ -379,18 +379,20 @@ async function loginRoute(page, route, spec) {
   await page.goto(`${BASE_URL}/#/${route}`, { waitUntil: "domcontentloaded" });
   const form = page.locator("[data-auth-login]");
   await form.waitFor({ timeout: 20_000 });
+  await waitForAuthGateReady(page, `login gate ${spec.mode}`);
   await form.locator('input[name="email"]').fill(spec.email);
   await form.locator('input[name="password"]').fill(spec.password);
   await form.locator('input[name="locationId"]').fill(LOCATION_ID);
   await form.locator('select[name="workstationMode"]').selectOption(spec.mode);
   await form.locator('button[type="submit"]').click();
-  await form.waitFor({ state: "detached", timeout: 30_000 });
+  await page.waitForFunction(() => !document.querySelector("[data-auth-login]"), null, { timeout: 30_000 });
 }
 
 async function loginAdmin(page, spec) {
   await page.goto(`${BASE_URL}/#/admin`, { waitUntil: "domcontentloaded" });
   const form = page.locator("[data-auth-login]");
   await form.waitFor({ timeout: 20_000 });
+  await waitForAuthGateReady(page, "login gate ADMIN");
   await form.locator('input[name="email"]').fill(spec.email);
   await form.locator('input[name="password"]').fill(spec.password);
   await form.locator('input[name="locationId"]').fill(LOCATION_ID);
@@ -398,6 +400,18 @@ async function loginAdmin(page, spec) {
   await form.locator('button[type="submit"]').click();
   await page.locator("[data-dd008d-admin-menu]").waitFor({ timeout: 30_000 });
   await page.locator("[data-dd008d-migration-panel]").waitFor({ timeout: 30_000 });
+}
+
+async function waitForAuthGateReady(page, label) {
+  const checkingText = "Đang kiểm tra quyền truy cập.";
+  await page.waitForFunction((text) => !document.body.innerText.includes(text), checkingText, { timeout: 25_000 });
+  await page.locator("#app").waitFor({ timeout: 15_000 });
+  await page.waitForFunction(() => {
+    const text = document.querySelector("#app")?.innerText || "";
+    return text.trim().length > 20;
+  }, null, { timeout: 15_000 });
+  const body = await page.locator("body").innerText();
+  assert(!body.includes("Cannot GET"), `${label}: app route failed to render`);
 }
 
 async function openCustomer(page, token) {
