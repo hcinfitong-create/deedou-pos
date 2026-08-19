@@ -61,6 +61,19 @@ source = replaceExact(source,
 `  // Hosted DB contracts already prove one dedup row; the browser gate proves replay returns the same authoritative timestamp.`);
 
 source = replaceExact(source,
+`function assertNoPageErrors() {
+  const failures = pages.flatMap((page) => page.__errors.map((error) => \`\${page.__label}:\${error}\`));
+  if (failures.length) throw new Error(\`browser errors:\\n\${failures.join("\\n")}\`);
+}`,
+`function assertNoPageErrors() {
+  const expectedOffline = "staff:console:Failed to load resource: net::ERR_INTERNET_DISCONNECTED";
+  const failures = pages
+    .flatMap((page) => page.__errors.map((error) => \`\${page.__label}:\${error}\`))
+    .filter((failure) => failure !== expectedOffline);
+  if (failures.length) throw new Error(\`browser errors:\\n\${failures.join("\\n")}\`);
+}`);
+
+source = replaceExact(source,
 `async function serveAllReadyForNote(page, note, expectedCount) {
   let served = 0;
   while (served < expectedCount) {
