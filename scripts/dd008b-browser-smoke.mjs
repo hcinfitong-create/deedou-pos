@@ -861,6 +861,14 @@ async function startStaticServer(root) {
   const server = createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url || "/", "http://127.0.0.1");
+      if (requestUrl.pathname === "/api/runtime-config") {
+        response.writeHead(200, {
+          "content-type": "text/javascript; charset=utf-8",
+          "cache-control": "no-store"
+        });
+        response.end("/* DD-008P local smoke runtime config no-op */");
+        return;
+      }
       if (requestUrl.pathname === "/favicon.ico") {
         response.writeHead(204);
         response.end();

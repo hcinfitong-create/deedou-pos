@@ -528,6 +528,14 @@ async function startStaticServer() {
   const active = createServer(async (req, res) => {
     try {
       const pathname = new URL(req.url, BASE_URL).pathname;
+      if (pathname === "/api/runtime-config") {
+        res.writeHead(200, {
+          "content-type": "text/javascript; charset=utf-8",
+          "cache-control": "no-store"
+        });
+        res.end("/* DD-008P local smoke runtime config no-op */");
+        return;
+      }
       const filePath = resolve(root, pathname === "/" ? "index.html" : `.${pathname}`);
       if (!filePath.startsWith(root)) throw new Error("invalid path");
       const body = await readFile(filePath);
