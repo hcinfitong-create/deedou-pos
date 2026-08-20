@@ -32,8 +32,7 @@ const STAFF_ACTION_COPY = {
   ACCEPTED: { label: "Accept", tone: "primary" },
   REJECTED: { label: "Reject", tone: "danger" },
   READY: { label: "Ready", tone: "primary" },
-  SERVED: { label: "Served", tone: "primary" },
-  PAID: { label: "Paid and close", tone: "primary" }
+  SERVED: { label: "Served", tone: "primary" }
 };
 
 export function staffOrderMetrics({ orders = [], events = [], tableSessions = [] } = {}) {
@@ -121,7 +120,7 @@ export function ordersByStaffColumn(orders = []) {
 
 export function staffOrderActions(order) {
   return getAllowedOrderStatusTransitions(order?.status).filter((status) => {
-    return !["IN_PREPARATION", "SERVED"].includes(status);
+    return !["IN_PREPARATION", "SERVED", "PAID"].includes(status);
   }).map((status) => ({
     status,
     ...(STAFF_ACTION_COPY[status] || { label: status, tone: "primary" })
