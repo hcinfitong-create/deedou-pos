@@ -12,7 +12,11 @@ queueMicrotask(maybeLoadTableAdminUi);
 function maybeLoadTableAdminUi() {
   if (loadStarted || !isAdminRoute()) return;
   const adminPage = document.querySelector("#app .admin-page");
-  if (!adminPage || adminPage.querySelector(".auth-gate")) return;
+  if (!adminPage) return;
+
+  const loginForm = adminPage.querySelector("[data-auth-login]");
+  const checkingAuthority = (adminPage.textContent || "").includes("Đang kiểm tra quyền truy cập.");
+  if (loginForm || checkingAuthority) return;
 
   loadStarted = true;
   import("./table-admin-ui.js").catch(() => {
