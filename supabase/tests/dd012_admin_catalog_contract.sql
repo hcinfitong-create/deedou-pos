@@ -196,8 +196,8 @@ begin
   select count(*) into v_count
   from jsonb_array_elements(v_result.payload->'products') product
   where product->>'id' = 'dd012-latte'
-    and product->>'nameVi' = 'Latte biển'
-    and (product->>'priceVnd')::integer = 65000;
+    and product->>'vi' = 'Latte biển'
+    and (product->>'price')::integer = 65000;
   if v_result.ok <> true or v_count <> 1 then
     raise exception 'public menu did not reflect authoritative product update';
   end if;
