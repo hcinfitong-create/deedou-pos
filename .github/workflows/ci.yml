@@ -74,10 +74,15 @@ jobs:
           DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008a_contract.sql
 
-      - name: Run DD-008B auth and RBAC database contract
+      - name: Run DD-008B auth and RBAC database contract at DD-011 AAL2 baseline
         run: |
           DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          # DD-008B predates MFA and tests RBAC/workstation behavior. Supply an
+          # AAL2 claim to this disposable local Postgres session while running
+          # the original historical contract unchanged.
+          export PGOPTIONS='-c request.jwt.claims={"aal":"aal2"}'
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008b_auth_rbac_contract.sql
+          unset PGOPTIONS
 
       - name: Run DD-008C authoritative command database contract at DD-008C RBAC baseline
         run: |
@@ -156,7 +161,7 @@ jobs:
       - name: Reset database from migrations and seed
         run: npx supabase db reset
 
-      - name: Run DD-008B real Supabase Auth integration
+      - name: Run DD-008B real Supabase Auth integration with DD-011 TOTP AAL2
         env:
           DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
         run: npm run dd008b:auth-integration

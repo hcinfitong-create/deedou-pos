@@ -29,5 +29,12 @@ enable_signup = false
 enable_signup = true
 enable_confirmations = false
 
+# DD-011 local integration: exercise real TOTP enrollment/challenge/verify so
+# privileged admin RPC tests obtain a genuine Supabase AAL2 JWT. This affects
+# only the disposable local CLI Auth service, not hosted staging/production.
+[auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
+
 [edge_runtime]
 enabled = false
