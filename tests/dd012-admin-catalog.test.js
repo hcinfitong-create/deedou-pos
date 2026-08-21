@@ -125,6 +125,22 @@ test("DD-012 create adapter sends typed product core through authoritative conte
   assert.equal(call.params.p_idempotency_key, "dd012-create-1");
 });
 
+test("DD-012 create adapter never truncates an invalid fractional VND price", async () => {
+  const { api, calls } = harness();
+  await api.createProduct({
+    id: "fractional-price",
+    kind: "DRINK",
+    category: "drink-coffee",
+    nameVi: "Fractional",
+    nameEn: "Fractional",
+    priceVnd: 12.5,
+    stationCode: "BAR",
+    periods: ["morning"],
+    idempotencyKey: "dd012-fractional"
+  });
+  assert.equal(calls[0].params.p_price_vnd, null);
+});
+
 test("DD-012 update adapter carries optimistic updatedAt and does not mutate availability", async () => {
   const { api, calls } = harness();
   const result = await api.updateProduct({
