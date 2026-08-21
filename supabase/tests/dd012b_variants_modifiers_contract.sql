@@ -89,6 +89,7 @@ declare
   v_order_id text;
   v_order_price integer;
   v_snapshot jsonb;
+  v_order_item jsonb;
   v_count integer;
 begin
   select * into v_result
@@ -236,10 +237,15 @@ begin
     raise exception 'configured QR order failed: %/%/%', v_result.category, v_result.reason, v_result.payload;
   end if;
   v_order_id := v_result.entity_id;
-  select price_vnd, option_snapshot into v_order_price, v_snapshot
-  from public.order_lines
-  where order_id = v_order_id and is_component = false
+  select item into v_order_item
+  from jsonb_array_elements(v_result.payload->'order'->'items') item
+  where coalesce((item->>'isComponent')::boolean, false) = false
   limit 1;
+  if v_order_item is null then
+    raise exception 'configured order payload missing billable line';
+  end if;
+  v_order_price := (v_order_item->>'price')::integer;
+  v_snapshot := v_order_item->'optionSnapshot';
   if v_order_price <> 53000 then
     raise exception 'configured price expected 53000, got %', v_order_price;
   end if;
@@ -248,7 +254,7 @@ begin
     raise exception 'configured option snapshot missing: %', v_snapshot;
   end if;
 
-  -- Live edits advance tokens but must not rewrite the submitted order snapshot or price.
+  -- Live edits advance tokens; persistence immutability is asserted after RESET ROLE.
   perform pg_sleep(0.01);
   select * into v_result
   from public.dd012_update_variant(
@@ -266,13 +272,6 @@ begin
   ) limit 1;
   if v_result.ok <> true then raise exception 'option update failed: %/%', v_result.category, v_result.reason; end if;
   v_option_normal_updated_at := (v_result.payload->'modifierOption'->>'updatedAt')::timestamptz;
-
-  if (select price_vnd from public.order_lines where order_id = v_order_id and is_component = false limit 1) <> v_order_price then
-    raise exception 'historical configured price was rewritten';
-  end if;
-  if (select option_snapshot from public.order_lines where order_id = v_order_id and is_component = false limit 1) <> v_snapshot then
-    raise exception 'historical option snapshot was rewritten';
-  end if;
 
   -- The only available variant cannot be disabled while variant rows exist.
   select * into v_result
@@ -310,9 +309,37 @@ begin
     'dd012b-unassign-sugar', 'ADMIN', 'dd012b-admin-device'
   ) limit 1;
   if v_result.ok <> true then raise exception 'modifier group unassign failed'; end if;
+
+  perform set_config('dd012b.order_id', v_order_id, true);
+  perform set_config('dd012b.order_price', v_order_price::text, true);
+  perform set_config('dd012b.option_snapshot', v_snapshot::text, true);
 end $$;
 
 reset role;
+
+-- Privileged contract assertion only: application roles remain unable to read order_lines directly.
+do $$
+declare
+  v_order_id text := current_setting('dd012b.order_id', true);
+  v_expected_price integer := current_setting('dd012b.order_price', true)::integer;
+  v_expected_snapshot jsonb := current_setting('dd012b.option_snapshot', true)::jsonb;
+  v_current_price integer;
+  v_current_snapshot jsonb;
+begin
+  select price_vnd, option_snapshot
+  into v_current_price, v_current_snapshot
+  from public.order_lines
+  where order_id = v_order_id and is_component = false
+  limit 1;
+
+  if v_current_price <> v_expected_price then
+    raise exception 'historical configured price was rewritten';
+  end if;
+  if v_current_snapshot <> v_expected_snapshot then
+    raise exception 'historical option snapshot was rewritten';
+  end if;
+end $$;
+
 set local role authenticated;
 set local request.jwt.claim.sub = '40000000-0000-4000-8000-000000000015';
 set local request.jwt.claim.role = 'authenticated';
