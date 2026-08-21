@@ -33,6 +33,7 @@ export { OPERATIONAL_STATE_EVENT } from "./authoritative.js";
 export { createAuthoritativeBackendApi } from "./authoritative-router.js";
 
 export { createAdminBackendApi } from "./admin.js";
+export { createAdminOptionsBackendApi } from "./admin-options.js";
 
 export {
   AUTH_HEALTH_STATES,

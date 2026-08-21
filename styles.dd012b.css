@@ -1,0 +1,63 @@
+.dd012b-admin-options {
+  display: grid;
+  gap: 20px;
+}
+
+.dd012b-product-picker {
+  max-width: 520px;
+}
+
+.dd012b-product-picker label,
+.dd012b-assignment label {
+  display: grid;
+  gap: 6px;
+}
+
+.dd012b-section,
+.dd012b-options {
+  display: grid;
+  gap: 12px;
+}
+
+.dd012b-section {
+  padding-top: 8px;
+  border-top: 1px solid var(--line, #ddd);
+}
+
+.dd012b-create-row,
+.dd012b-row {
+  margin-top: 0;
+}
+
+.dd012b-group {
+  display: grid;
+  gap: 14px;
+}
+
+.dd012b-assignment {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 0;
+}
+
+.dd012b-assignment label {
+  min-width: 150px;
+}
+
+.dd012b-options {
+  padding-top: 10px;
+  border-top: 1px dashed var(--line, #ddd);
+}
+
+@media (max-width: 760px) {
+  .dd012b-assignment {
+    align-items: stretch;
+  }
+
+  .dd012b-assignment label,
+  .dd012b-assignment button {
+    width: 100%;
+  }
+}
