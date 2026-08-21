@@ -2,6 +2,12 @@
 
 begin;
 
+-- Keep the contract portable to clean hosted staging after DD-008P fixture cleanup.
+-- The fixture is transaction-scoped and is removed by the final rollback.
+insert into public.locations (id, name)
+values ('deedou-demo', 'DD-010A Contract')
+on conflict (id) do nothing;
+
 insert into auth.users (
   instance_id, id, aud, role, email, encrypted_password, email_confirmed_at,
   created_at, updated_at, raw_app_meta_data, raw_user_meta_data, is_super_admin
