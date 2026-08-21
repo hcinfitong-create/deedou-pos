@@ -161,7 +161,7 @@ jobs:
       - name: Reset database from migrations and seed
         run: npx supabase db reset
 
-      - name: Run DD-011 real Supabase Auth + TOTP integration
+      - name: Run DD-008B real Supabase Auth integration with DD-011 TOTP AAL2
         env:
           DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
         run: npm run dd008b:auth-integration
