@@ -77,9 +77,11 @@ try {
   const initialResolve = await resolveToken(initialToken);
   assert(initialResolve.length === 1 && initialResolve[0].code === "A95" && initialResolve[0].zone === "Beach", `initial QR resolve failed: ${JSON.stringify(initialResolve)}`);
 
+  const initialSnapshotResponse = waitRpcResponse(customerPage, "dd008c_get_public_table_snapshot", 12_000);
   await customerPage.goto(initialUrl, { waitUntil: "domcontentloaded" });
+  const initialSnapshot = await requireRpcResponse(initialSnapshotResponse, customerPage, "customer route A95");
+  assert(initialSnapshot.ok === true && initialSnapshot.payload?.table?.code === "A95" && initialSnapshot.payload?.table?.zone === "Beach", `customer browser snapshot did not resolve A95: ${JSON.stringify(initialSnapshot.payload || {})}`);
   await waitForAppRender(customerPage);
-  assert((await customerPage.locator("body").innerText()).includes("A95"), "customer QR route did not render A95");
   console.log("DD010A_PREVIEW_CUSTOMER_ROUTE=PASS");
 
   const source = adminPage.locator(`[data-dd010a-drag-table="${cssEscape(a95.id)}"]`);
@@ -111,9 +113,11 @@ try {
   assert((await resolveToken(beforeRotateToken)).length === 0, "old QR still resolves after rotation");
   const rotatedResolve = await resolveToken(rotatedToken);
   assert(rotatedResolve.length === 1 && rotatedResolve[0].code === "A95", "new QR does not resolve after rotation");
+  const rotatedSnapshotResponse = waitRpcResponse(customerPage, "dd008c_get_public_table_snapshot", 12_000);
   await customerPage.goto(rotatedUrl, { waitUntil: "domcontentloaded" });
+  const rotatedSnapshot = await requireRpcResponse(rotatedSnapshotResponse, customerPage, "rotated customer route A95");
+  assert(rotatedSnapshot.ok === true && rotatedSnapshot.payload?.table?.code === "A95" && rotatedSnapshot.payload?.table?.zone === "Indoor", `rotated browser snapshot did not resolve moved A95: ${JSON.stringify(rotatedSnapshot.payload || {})}`);
   await waitForAppRender(customerPage);
-  assert((await customerPage.locator("body").innerText()).includes("A95"), "rotated QR route did not render A95");
   console.log("DD010A_PREVIEW_ROTATE_QR=PASS");
 
   await openManage(adminPage, "A95");
@@ -188,7 +192,7 @@ async function requireRpcResponse(responsePromise, page, label) {
   const row = Array.isArray(body) ? body[0] : body;
   const safe = { httpStatus: response.status(), ok: typeof row?.ok === "boolean" ? row.ok : null, category: String(row?.category || ""), reason: String(row?.reason || "") };
   console.log(`DD010A_PREVIEW_RPC=${JSON.stringify({ label, ...safe })}`);
-  return safe;
+  return { ...safe, payload: row?.payload && typeof row.payload === "object" ? row.payload : {} };
 }
 
 async function readCreateValues(panel) {
