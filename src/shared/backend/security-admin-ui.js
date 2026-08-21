@@ -37,7 +37,7 @@ function render() {
   }
   if (config.mode !== BACKEND_MODES.SUPABASE) return;
   const page = document.querySelector("#app .admin-page") || document.querySelector("#app .page");
-  if (!page || page.querySelector(".auth-gate")) {
+  if (!page || page.querySelector("[data-auth-login]")) {
     existing?.remove();
     return;
   }
