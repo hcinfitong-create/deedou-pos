@@ -73,6 +73,10 @@ begin
     raise exception 'expected direct authenticated workstation device writes to remain denied';
   end if;
 
+  if has_table_privilege('authenticated', 'public.audit_events', 'SELECT') then
+    raise exception 'expected direct authenticated audit table reads to remain denied';
+  end if;
+
   if has_function_privilege('anon', 'public.dd011_rotate_workstation_device(text,text,text,text)', 'EXECUTE') then
     raise exception 'expected anon rotate RPC denied';
   end if;
@@ -156,7 +160,6 @@ declare
   v_new_authz record;
   v_staff_count integer;
   v_device_count integer;
-  v_audit_count integer;
 begin
   select count(*) into v_staff_count
   from public.dd011_list_staff_admin('dd011-location', 'ADMIN', 'dd011-admin-token-000000000000000000000001');
@@ -239,7 +242,16 @@ begin
   if v_new_authz.ok <> false or v_new_authz.reason <> 'DEVICE_UNREGISTERED' then
     raise exception 'expected revoked rotated credential invalid immediately, got %/%', v_new_authz.ok, v_new_authz.reason;
   end if;
+end $$;
 
+reset role;
+
+-- Audit persistence is an internal database invariant. Verify it only after leaving
+-- the authenticated browser role; authenticated must not gain direct audit table access.
+do $$
+declare
+  v_audit_count integer;
+begin
   select count(*) into v_audit_count
   from public.audit_events
   where location_id = 'dd011-location'
@@ -248,8 +260,6 @@ begin
     raise exception 'expected DD011 security mutations audited, got %', v_audit_count;
   end if;
 end $$;
-
-reset role;
 
 -- AAL2 MANAGER cannot grant/revoke above its permission ceiling.
 set local role authenticated;
