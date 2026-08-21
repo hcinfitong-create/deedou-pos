@@ -80,6 +80,7 @@ jobs:
           # DD-008B predates MFA and tests RBAC/workstation behavior. DD-011
           # supplies AAL2 through a wrapper while preserving the historical
           # identity/location/role/device assertions in the original contract.
+          # Legacy contract source: supabase/tests/dd008b_auth_rbac_contract.sql
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd008b_auth_rbac_contract_dd011.sql
 
       - name: Run DD-008C authoritative command database contract at DD-008C RBAC baseline
