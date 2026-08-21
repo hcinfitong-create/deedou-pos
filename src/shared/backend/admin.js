@@ -297,7 +297,7 @@ function integer(value) {
 
 function integerOrNull(value) {
   const number = Number(value);
-  return Number.isFinite(number) ? Math.trunc(number) : null;
+  return Number.isInteger(number) ? number : null;
 }
 
 function stringArray(value) {
