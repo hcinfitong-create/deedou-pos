@@ -1,0 +1,51 @@
+name: DD-012C Vercel Preview Hosted Components Smoke
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+  issues: read
+  pull-requests: read
+  statuses: read
+
+concurrency:
+  group: dd012c-preview-hosted-smoke-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  hosted-preview-components-smoke:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'hcinfitong-create' && github.event.pull_request.head.ref == 'agent/dd012c-combo-components' && github.event.pull_request.number == 46
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      DEEDOU_PR_NUMBER: ${{ github.event.pull_request.number }}
+      DEEDOU_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      DEEDOU_HOSTED_SUPABASE_URL: https://nwyhxdcslxxjirsmqnxo.supabase.co
+      DEEDOU_HOSTED_SUPABASE_PUBLISHABLE_KEY: sb_publishable_AYxnh5BiiFk7EKMmskFxRg_TKzTGYvy
+      DEEDOU_HOSTED_BOOTSTRAP_URL: https://nwyhxdcslxxjirsmqnxo.supabase.co/functions/v1/dd008-hosted-smoke-bootstrap
+      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax gate
+        run: node --check scripts/dd012c-preview-hosted-smoke.mjs
+
+      - name: Install Chromium
+        run: npx playwright install chromium
+
+      - name: Run DD-012C Vercel Preview hosted component acceptance
+        run: node scripts/dd012c-preview-hosted-smoke.mjs
