@@ -1,0 +1,46 @@
+name: DD-008P Production Hosted Browser Smoke
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: dd008p-production-hosted-smoke
+  cancel-in-progress: false
+
+jobs:
+  production-authoritative-smoke:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'hcinfitong-create' && github.event.pull_request.head.ref == 'agent/dd008p-production-smoke'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      DEEDOU_PREVIEW_URL: https://deedou-pos.vercel.app
+      DEEDOU_HOSTED_SUPABASE_URL: https://nwohsyzpmogqjbmknwbl.supabase.co
+      DEEDOU_HOSTED_SUPABASE_PUBLISHABLE_KEY: sb_publishable_D2cuwXqryq_NowvOflVZOA_0z_0fkpy
+      DEEDOU_HOSTED_BOOTSTRAP_URL: https://nwohsyzpmogqjbmknwbl.supabase.co/functions/v1/dd008-hosted-smoke-bootstrap
+      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax gate
+        run: node --check scripts/dd008p-production-hosted-smoke.mjs
+
+      - name: Install Chromium
+        run: npx playwright install chromium
+
+      - name: Run production-authoritative browser acceptance
+        run: node scripts/dd008p-production-hosted-smoke.mjs
