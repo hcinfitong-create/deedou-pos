@@ -141,6 +141,66 @@ export function createAdminBackendApi(options = {}) {
         }
       });
     },
+    fetchTableLayout({ locationId } = {}) {
+      return rpc("dd010a_get_admin_table_layout", { locationId });
+    },
+    createPhysicalTable({ code, zone, seatCount = 4, shape = "RECTANGLE", layoutX = 0, layoutY = 0, layoutWidth = 2, layoutHeight = 2, displayOrder = 0, idempotencyKey, locationId } = {}) {
+      return rpc("dd010a_create_physical_table", {
+        locationId,
+        rpcParams: {
+          p_code: text(code),
+          p_zone: text(zone),
+          p_seat_count: integer(seatCount),
+          p_shape: text(shape).toUpperCase(),
+          p_layout_x: integer(layoutX),
+          p_layout_y: integer(layoutY),
+          p_layout_width: integer(layoutWidth),
+          p_layout_height: integer(layoutHeight),
+          p_display_order: integer(displayOrder),
+          p_idempotency_key: text(idempotencyKey)
+        }
+      });
+    },
+    updatePhysicalTable({ tableId, code, zone, seatCount, shape, layoutX, layoutY, layoutWidth, layoutHeight, displayOrder, expectedVersion, idempotencyKey, locationId } = {}) {
+      return rpc("dd010a_update_physical_table", {
+        locationId,
+        rpcParams: {
+          p_table_id: text(tableId),
+          p_code: text(code),
+          p_zone: text(zone),
+          p_seat_count: integer(seatCount),
+          p_shape: text(shape).toUpperCase(),
+          p_layout_x: integer(layoutX),
+          p_layout_y: integer(layoutY),
+          p_layout_width: integer(layoutWidth),
+          p_layout_height: integer(layoutHeight),
+          p_display_order: integer(displayOrder),
+          p_expected_version: integer(expectedVersion),
+          p_idempotency_key: text(idempotencyKey)
+        }
+      });
+    },
+    setPhysicalTableActive({ tableId, active, expectedVersion, idempotencyKey, locationId } = {}) {
+      return rpc("dd010a_set_physical_table_active", {
+        locationId,
+        rpcParams: {
+          p_table_id: text(tableId),
+          p_active: active === true,
+          p_expected_version: integer(expectedVersion),
+          p_idempotency_key: text(idempotencyKey)
+        }
+      });
+    },
+    rotatePhysicalTableQr({ tableId, expectedVersion, idempotencyKey, locationId } = {}) {
+      return rpc("dd010a_rotate_physical_table_qr", {
+        locationId,
+        rpcParams: {
+          p_table_id: text(tableId),
+          p_expected_version: integer(expectedVersion),
+          p_idempotency_key: text(idempotencyKey)
+        }
+      });
+    },
     subscribeMenuRefresh
   };
 }
@@ -184,6 +244,11 @@ function sanitizeReason(value) {
     .replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer_[REDACTED]")
     .replace(/[^A-Za-z0-9:_-]+/g, "_")
     .slice(0, 160);
+}
+
+function integer(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.trunc(number) : 0;
 }
 
 function text(value) {
