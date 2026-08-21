@@ -130,6 +130,50 @@ export function createAdminBackendApi(options = {}) {
     fetchMenu({ locationId } = {}) {
       return rpc("dd008d_get_admin_menu_snapshot", { locationId });
     },
+    createProduct({ id, kind, category, nameVi, nameEn, descVi = "", descEn = "", priceVnd, stationCode, periods = [], imageUrl = "", color = "", art = "", available = true, idempotencyKey, locationId } = {}) {
+      return rpc("dd012_create_product", {
+        locationId,
+        rpcParams: {
+          p_product_id: text(id),
+          p_kind: text(kind).toUpperCase(),
+          p_category: text(category).toLowerCase(),
+          p_name_vi: text(nameVi),
+          p_name_en: text(nameEn),
+          p_desc_vi: text(descVi),
+          p_desc_en: text(descEn),
+          p_price_vnd: integerOrNull(priceVnd),
+          p_station_code: text(stationCode).toUpperCase(),
+          p_periods: stringArray(periods),
+          p_image_url: text(imageUrl),
+          p_color: text(color),
+          p_art: text(art),
+          p_available: available !== false,
+          p_idempotency_key: text(idempotencyKey)
+        }
+      });
+    },
+    updateProduct({ id, kind, category, nameVi, nameEn, descVi = "", descEn = "", priceVnd, stationCode, periods = [], imageUrl = "", color = "", art = "", expectedUpdatedAt, idempotencyKey, locationId } = {}) {
+      return rpc("dd012_update_product", {
+        locationId,
+        rpcParams: {
+          p_product_id: text(id),
+          p_kind: text(kind).toUpperCase(),
+          p_category: text(category).toLowerCase(),
+          p_name_vi: text(nameVi),
+          p_name_en: text(nameEn),
+          p_desc_vi: text(descVi),
+          p_desc_en: text(descEn),
+          p_price_vnd: integerOrNull(priceVnd),
+          p_station_code: text(stationCode).toUpperCase(),
+          p_periods: stringArray(periods),
+          p_image_url: text(imageUrl),
+          p_color: text(color),
+          p_art: text(art),
+          p_expected_updated_at: expectedUpdatedAt || null,
+          p_idempotency_key: text(idempotencyKey)
+        }
+      });
+    },
     setProductAvailability({ productId, available, expectedUpdatedAt, idempotencyKey, locationId } = {}) {
       return rpc("dd008d_set_product_availability", {
         locationId,
@@ -249,6 +293,15 @@ function sanitizeReason(value) {
 function integer(value) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.trunc(number) : 0;
+}
+
+function integerOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.trunc(number) : null;
+}
+
+function stringArray(value) {
+  return Array.isArray(value) ? value.map(text).filter(Boolean) : [];
 }
 
 function text(value) {
