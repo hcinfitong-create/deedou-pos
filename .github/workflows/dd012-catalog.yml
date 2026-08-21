@@ -1,0 +1,47 @@
+name: DD-012 Catalog Contract
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: dd012-catalog-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  catalog-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Confirm PostgreSQL client
+        run: psql --version
+
+      - name: Confirm pinned Supabase CLI
+        run: npx supabase --version
+
+      - name: Start Supabase local stack
+        run: npx supabase start
+
+      - name: Reset database from migrations and seed
+        run: npx supabase db reset
+
+      - name: Run DD-012 Admin catalog product-core contract
+        run: |
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd012_admin_catalog_contract.sql
+
+      - name: Stop Supabase local stack
+        if: always()
+        run: npx supabase stop
