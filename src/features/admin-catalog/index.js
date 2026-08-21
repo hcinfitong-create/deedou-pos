@@ -14,7 +14,7 @@ export function normalizeAdminProduct(value = {}) {
     nameEn: text(value.nameEn ?? value.name_en),
     descVi: text(value.descVi ?? value.desc_vi),
     descEn: text(value.descEn ?? value.desc_en),
-    priceVnd: integer(value.priceVnd ?? value.price_vnd),
+    priceVnd: number(value.priceVnd ?? value.price_vnd),
     stationCode: text(value.stationCode ?? value.station_code).toUpperCase(),
     periods: normalizePeriods(value.periods),
     imageUrl: text(value.imageUrl ?? value.image_url),
@@ -47,9 +47,9 @@ function invalid(reason, product) {
   return { ok: false, reason, product };
 }
 
-function integer(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.trunc(number) : Number.NaN;
+function number(value) {
+  const result = Number(value);
+  return Number.isFinite(result) ? result : Number.NaN;
 }
 
 function text(value) {
