@@ -154,6 +154,74 @@
   gap: 8px;
 }
 
+.dd012-product-form,
+.dd012-product-editor {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dd012-product-form {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid rgba(23, 43, 35, 0.12);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.dd012-product-form label,
+.dd012-product-editor label {
+  display: grid;
+  gap: 5px;
+}
+
+.dd012-form-heading,
+.dd012-wide {
+  grid-column: 1 / -1;
+}
+
+.dd012-form-heading p {
+  margin: 3px 0 0;
+}
+
+.dd012-periods {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.dd012-periods > span {
+  width: 100%;
+}
+
+.dd012-periods label {
+  display: inline-flex;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 5px;
+}
+
+.dd012-periods input {
+  width: auto;
+  min-height: 0;
+}
+
+.dd012-product-card {
+  flex-wrap: wrap;
+}
+
+.dd012-product-summary {
+  flex: 1 1 260px;
+}
+
+.dd012-product-editor {
+  flex: 1 0 100%;
+  width: 100%;
+  padding-top: 12px;
+  border-top: 1px solid rgba(23, 43, 35, 0.1);
+}
+
 @media (max-width: 760px) {
   .dd008d-migration-grid {
     grid-template-columns: 1fr;
@@ -173,5 +241,15 @@
   .dd008d-admin-product-actions {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .dd012-product-form,
+  .dd012-product-editor {
+    grid-template-columns: 1fr;
+  }
+
+  .dd012-product-summary,
+  .dd012-product-editor {
+    width: 100%;
   }
 }
