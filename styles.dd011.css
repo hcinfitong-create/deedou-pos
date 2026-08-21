@@ -1,0 +1,17 @@
+.dd011-security-admin { margin-top: 14px; }
+.dd011-block { margin-top: 18px; padding-top: 16px; border-top: 1px solid rgba(0,0,0,.08); }
+.dd011-grid { display: grid; gap: 10px; margin-top: 12px; }
+.dd011-card { border: 1px solid rgba(0,0,0,.09); border-radius: 10px; padding: 12px; background: rgba(255,255,255,.55); }
+.dd011-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.dd011-actions form { display: flex; gap: 6px; align-items: center; }
+.dd011-inline-form { display: grid; grid-template-columns: minmax(160px,1fr) minmax(140px,1fr) auto; gap: 8px; margin-top: 10px; }
+.dd011-mfa-enroll { margin-top: 10px; }
+.dd011-mfa-qr { width: 220px; max-width: 100%; padding: 10px; background: #fff; border-radius: 10px; border: 1px solid rgba(0,0,0,.08); }
+.dd011-mfa-enroll form, [data-dd011-mfa-challenge] { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+.dd011-device-activation { margin-top: 16px; }
+.dd011-device-activation hr { border: 0; border-top: 1px solid rgba(0,0,0,.1); margin: 16px 0; }
+.dd011-security-admin code { overflow-wrap: anywhere; user-select: all; }
+@media (max-width: 760px) {
+  .dd011-inline-form { grid-template-columns: 1fr; }
+  .dd011-actions, .dd011-actions form, .dd011-mfa-enroll form, [data-dd011-mfa-challenge] { align-items: stretch; flex-direction: column; }
+}
