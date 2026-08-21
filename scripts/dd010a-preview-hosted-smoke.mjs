@@ -84,12 +84,8 @@ try {
   await waitForAppRender(customerPage);
   console.log("DD010A_PREVIEW_CUSTOMER_ROUTE=PASS");
 
-  const source = adminPage.locator(`[data-dd010a-drag-table="${cssEscape(a95.id)}"]`);
-  const target = adminPage.locator('[data-dd010a-drop-zone="Indoor"]');
-  await source.waitFor({ timeout: 20_000 });
-  await target.waitFor({ timeout: 20_000 });
   const updateResponse = waitRpcResponse(adminPage, "dd010a_update_physical_table", 12_000);
-  await source.dragTo(target, { targetPosition: { x: 180, y: 140 } });
+  await dispatchNativeDrag(adminPage, a95.id, "Indoor");
   const dragRpc = await requireRpcResponse(updateResponse, adminPage, "drag A95");
   assert(dragRpc.ok === true, `drag RPC rejected: ${JSON.stringify(dragRpc)}`);
   await waitFor(async () => (await tableArticle(adminPage, "A95").innerText().catch(() => "")).includes("Indoor"), "A95 UI zone Indoor", 30_000);
@@ -169,6 +165,23 @@ async function createTableViaUi(page, spec) {
   const id = await article.getAttribute("data-dd010a-table");
   assert(id, `${spec.code} article missing id`);
   return { id, result };
+}
+
+async function dispatchNativeDrag(page, tableId, zone) {
+  const result = await page.evaluate(({ tableId, zone }) => {
+    const source = document.querySelector(`[data-dd010a-drag-table="${CSS.escape(tableId)}"]`);
+    const target = document.querySelector(`[data-dd010a-drop-zone="${CSS.escape(zone)}"]`);
+    if (!source || !target) return { ok: false, source: Boolean(source), target: Boolean(target) };
+    const rect = target.getBoundingClientRect();
+    const dataTransfer = new DataTransfer();
+    const shared = { bubbles: true, cancelable: true, dataTransfer, clientX: rect.left + rect.width * 0.55, clientY: rect.top + rect.height * 0.45 };
+    source.dispatchEvent(new DragEvent("dragstart", shared));
+    target.dispatchEvent(new DragEvent("dragover", shared));
+    target.dispatchEvent(new DragEvent("drop", shared));
+    return { ok: true, transferred: dataTransfer.getData("text/plain") };
+  }, { tableId, zone });
+  assert(result.ok && result.transferred === tableId, `native drag dispatch failed: ${JSON.stringify(result)}`);
+  console.log("DD010A_PREVIEW_NATIVE_DRAG_EVENT=PASS");
 }
 
 function waitRpcResponse(page, functionName, timeout) {
@@ -353,7 +366,6 @@ function account(name, role, mode) {
 }
 
 function bypassHeaders() { return { "x-vercel-protection-bypass": vercelBypassSecret, "cache-control": "no-cache" }; }
-function cssEscape(value) { return String(value).replace(/["\\]/g, "\\$&"); }
 function classifyError(error) { const text = `${error?.code || ""} ${error?.message || ""}`.toLowerCase(); return text.includes("jwt") || text.includes("auth") ? "UNAUTHENTICATED" : text.includes("permission") || text.includes("forbidden") || text.includes("42501") ? "FORBIDDEN" : "BACKEND_UNAVAILABLE"; }
 function trackErrors(page, label) { page.__label = label; page.__errors = []; page.on("pageerror", (e) => page.__errors.push(`pageerror:${safeMessage(e)}`)); page.on("console", (m) => { if (m.type() === "error") page.__errors.push(`console:${m.text()}`); }); }
 function assertNoPageErrors(...pages) { const failures = pages.flatMap((page) => (page.__errors || []).map((error) => `${page.__label}:${error}`)); if (failures.length) throw new Error(`browser errors:\n${failures.join("\n")}`); }
