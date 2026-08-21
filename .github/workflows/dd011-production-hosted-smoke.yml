@@ -1,0 +1,53 @@
+name: DD-011 Production Hosted Security Smoke
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+  issues: read
+  pull-requests: read
+  statuses: read
+
+concurrency:
+  group: dd011-production-hosted-smoke
+  cancel-in-progress: false
+
+jobs:
+  production-security-smoke:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'hcinfitong-create' && github.event.pull_request.head.ref == 'agent/dd011-production-smoke' && github.event.pull_request.number == 39
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      DEEDOU_PR_NUMBER: ${{ github.event.pull_request.number }}
+      DEEDOU_EXPECTED_PR_NUMBER: "39"
+      DEEDOU_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      DEEDOU_PRODUCTION_URL: https://deedou-pos.vercel.app
+      DEEDOU_HOSTED_SUPABASE_URL: https://nwohsyzpmogqjbmknwbl.supabase.co
+      DEEDOU_HOSTED_SUPABASE_PUBLISHABLE_KEY: sb_publishable_D2cuwXqryq_NowvOflVZOA_0z_0fkpy
+      DEEDOU_HOSTED_BOOTSTRAP_URL: https://nwohsyzpmogqjbmknwbl.supabase.co/functions/v1/dd008-hosted-smoke-bootstrap
+      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax gate
+        run: node --check scripts/dd011-production-hosted-smoke.mjs
+
+      - name: Install Chromium
+        run: npx playwright install chromium
+
+      - name: Run DD-011 production hosted security acceptance
+        run: node scripts/dd011-production-hosted-smoke.mjs
