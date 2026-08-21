@@ -84,6 +84,10 @@ begin
   if has_function_privilege('authenticated', 'public.dd011_has_aal2()', 'EXECUTE') then
     raise exception 'expected AAL helper to remain internal';
   end if;
+
+  if has_function_privilege('authenticated', 'public.resolve_registered_device(text,text)', 'EXECUTE') then
+    raise exception 'expected device resolver helper to remain internal';
+  end if;
 end $$;
 
 -- AAL1 privileged operator: valid auth + role + device is still insufficient for mutations.
@@ -148,8 +152,8 @@ declare
   v_touch record;
   v_rotate record;
   v_revoke record;
-  v_old_count integer;
-  v_new_count integer;
+  v_old_authz record;
+  v_new_authz record;
   v_staff_count integer;
   v_device_count integer;
   v_audit_count integer;
@@ -205,12 +209,19 @@ begin
     raise exception 'expected rotation to issue a different credential, got %/%', v_rotate.ok, v_rotate.reason;
   end if;
 
-  select count(*) into v_old_count
-  from public.resolve_registered_device('dd011-location', v_register.device_credential);
-  select count(*) into v_new_count
-  from public.resolve_registered_device('dd011-location', v_rotate.device_credential);
-  if v_old_count <> 0 or v_new_count <> 1 then
-    raise exception 'expected old credential invalid and new credential valid after rotation, got %/%', v_old_count, v_new_count;
+  select * into v_old_authz
+  from public.authorize_staff_access(
+    'dd011-location', 'payments.read', 'CASHIER', v_register.device_credential
+  ) limit 1;
+  select * into v_new_authz
+  from public.authorize_staff_access(
+    'dd011-location', 'payments.read', 'CASHIER', v_rotate.device_credential
+  ) limit 1;
+  if v_old_authz.ok <> false
+     or v_old_authz.reason <> 'DEVICE_UNREGISTERED'
+     or v_new_authz.ok <> true then
+    raise exception 'expected old credential invalid and new credential authorized after rotation, got %/% and %/%',
+      v_old_authz.ok, v_old_authz.reason, v_new_authz.ok, v_new_authz.reason;
   end if;
 
   select * into v_revoke
@@ -221,10 +232,12 @@ begin
     raise exception 'expected AAL2 owner revoke, got %', v_revoke.reason;
   end if;
 
-  select count(*) into v_new_count
-  from public.resolve_registered_device('dd011-location', v_rotate.device_credential);
-  if v_new_count <> 0 then
-    raise exception 'expected revoked rotated credential invalid immediately';
+  select * into v_new_authz
+  from public.authorize_staff_access(
+    'dd011-location', 'payments.read', 'CASHIER', v_rotate.device_credential
+  ) limit 1;
+  if v_new_authz.ok <> false or v_new_authz.reason <> 'DEVICE_UNREGISTERED' then
+    raise exception 'expected revoked rotated credential invalid immediately, got %/%', v_new_authz.ok, v_new_authz.reason;
   end if;
 
   select count(*) into v_audit_count
