@@ -71,7 +71,7 @@ begin
   begin
     insert into public.modifier_groups (
       id, location_id, group_key, name_vi, name_en, required, multiple, min_select, max_select
-    ) values ('dd012b-raw-group', 'deedou-demo', 'raw', 'Raw', 'Raw', false, false, 0, 1);
+    ) values ('dd012b-raw-group', 'deedou-demo', 'dd012b_raw', 'Raw', 'Raw', false, false, 0, 1);
     raise exception 'authenticated direct modifier group insert unexpectedly succeeded';
   exception
     when insufficient_privilege then null;
@@ -146,7 +146,7 @@ begin
 
   select * into v_result
   from public.dd012_create_modifier_group(
-    'deedou-demo', 'dd012b-sugar', 'sugar', 'Đường', 'Sugar',
+    'deedou-demo', 'dd012b-sugar', 'dd012b_sugar', 'Đường', 'Sugar',
     true, true, 1, 2, 1,
     'dd012b-create-sugar', 'ADMIN', 'dd012b-admin-device'
   ) limit 1;
@@ -218,7 +218,7 @@ begin
   if v_count <> 1 then raise exception 'public variant projection missing'; end if;
   select count(*) into v_count
   from public.list_public_menu_modifier_groups('deedou-demo')
-  where product_id = 'dd012b-tea' and group_key = 'sugar' and min_select = 1 and max_select = 2;
+  where product_id = 'dd012b-tea' and group_key = 'dd012b_sugar' and min_select = 1 and max_select = 2;
   if v_count <> 1 then raise exception 'public modifier group projection missing'; end if;
   select count(*) into v_count
   from public.list_public_menu_modifier_options('deedou-demo')
@@ -229,7 +229,7 @@ begin
   select * into v_result
   from public.submit_qr_order(
     'dd012b-catalog-token-Q8m5Nz',
-    '[{"productId":"dd012b-tea","qty":1,"selection":{"variantId":"large","modifierSelections":{"sugar":["normal"]}}}]'::jsonb,
+    '[{"productId":"dd012b-tea","qty":1,"selection":{"variantId":"large","modifierSelections":{"dd012b_sugar":["normal"]}}}]'::jsonb,
     '', 'dd012b-public-order-1'
   ) limit 1;
   if v_result.ok <> true then
@@ -324,7 +324,7 @@ declare
 begin
   select * into v_result
   from public.dd012_create_modifier_group(
-    'deedou-demo', 'dd012b-cashier-denied', 'denied', 'Denied', 'Denied',
+    'deedou-demo', 'dd012b-cashier-denied', 'dd012b_denied', 'Denied', 'Denied',
     false, false, 0, 1, 1,
     'dd012b-cashier-denied', 'ADMIN', 'dd012b-cashier-device'
   ) limit 1;
