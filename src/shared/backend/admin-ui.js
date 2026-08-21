@@ -55,7 +55,10 @@ function render() {
     return;
   }
   const adminPage = document.querySelector("#app .admin-page") || document.querySelector("#app .page");
-  if (!adminPage) return;
+  if (!adminPage || adminPage.querySelector("[data-auth-login]")) {
+    existing?.remove();
+    return;
+  }
 
   const panel = existing || document.createElement("section");
   panel.dataset.dd008dAdminMenu = "";
