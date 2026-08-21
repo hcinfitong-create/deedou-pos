@@ -18,7 +18,7 @@ const state = {
 
 const root = document.getElementById("app");
 if (root && "MutationObserver" in window) {
-  new MutationObserver(() => queueMicrotask(render)).observe(root, { childList: true, subtree: true });
+  new MutationObserver(() => queueMicrotask(render)).observe(root, { childList: true });
 }
 window.addEventListener("hashchange", () => queueMicrotask(render));
 document.addEventListener("click", handleClick);
