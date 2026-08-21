@@ -1,4 +1,5 @@
 name: DD-012 Production Hosted Catalog Smoke
+# Bootstrap is enabled only for the pinned PR/workflow OIDC subject during acceptance.
 
 on:
   pull_request:
