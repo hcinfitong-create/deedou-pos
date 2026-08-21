@@ -103,10 +103,6 @@ begin
   if v_result.ok <> false or v_result.reason <> 'INVALID_PRODUCT_PRICE' then
     raise exception 'expected invalid price rejection, got %/%', v_result.category, v_result.reason;
   end if;
-  select count(*) into v_count from public.products where id = 'dd012-invalid-price';
-  if v_count <> 0 then
-    raise exception 'invalid product payload partially mutated products';
-  end if;
 
   -- Create through authoritative command; periods are normalized/deduplicated.
   select * into v_result
@@ -137,10 +133,6 @@ begin
   ) limit 1;
   if v_result.ok <> true or (v_result.payload->'product'->>'updatedAt')::timestamptz <> v_created_at then
     raise exception 'same-key create replay was not stable';
-  end if;
-  select count(*) into v_count from public.products where id = 'dd012-latte';
-  if v_count <> 1 then
-    raise exception 'idempotent create produced % rows', v_count;
   end if;
 
   -- Reusing the key for a different payload conflicts.
@@ -247,7 +239,19 @@ end $$;
 reset role;
 
 do $$
+declare
+  v_count integer;
 begin
+  select count(*) into v_count from public.products where id = 'dd012-invalid-price';
+  if v_count <> 0 then
+    raise exception 'invalid product payload partially mutated products';
+  end if;
+
+  select count(*) into v_count from public.products where id = 'dd012-latte';
+  if v_count <> 1 then
+    raise exception 'idempotent create produced % rows', v_count;
+  end if;
+
   if not exists (
     select 1 from public.audit_events
     where command = 'dd012_create_product'
