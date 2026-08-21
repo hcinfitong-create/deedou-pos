@@ -5,23 +5,32 @@ const browserSmokePath = "scripts/dd008d-browser-smoke.mjs";
 const hostedSmokePath = "scripts/dd008p-preview-hosted-smoke.mjs";
 const runtimeHostedSmokePath = "scripts/.dd008p-production-hosted-smoke-runtime.mjs";
 const productionSmokeLocationId = "deedou-prod-smoke";
+const demoLocationAssignment = 'localStorage.setItem("deedou_staff_location_id", "deedou-demo");';
+const productionLocationAssignment = `localStorage.setItem("deedou_staff_location_id", ${JSON.stringify(productionSmokeLocationId)});`;
 
 const originalBrowserSmoke = await readFile(browserSmokePath, "utf8");
 const originalHostedSmoke = await readFile(hostedSmokePath, "utf8");
 
 try {
-  const productionBrowserSmoke = replaceExact(
+  let productionBrowserSmoke = replaceExact(
     originalBrowserSmoke,
     'const LOCATION_ID = "deedou-demo";',
     `const LOCATION_ID = ${JSON.stringify(productionSmokeLocationId)};`
   );
+  productionBrowserSmoke = replaceExact(
+    productionBrowserSmoke,
+    demoLocationAssignment,
+    productionLocationAssignment
+  );
   await writeFile(browserSmokePath, productionBrowserSmoke, "utf8");
 
-  let productionHostedSmoke = replaceExact(
-    originalHostedSmoke,
-    'localStorage.setItem("deedou_staff_location_id", "deedou-demo");',
-    `localStorage.setItem("deedou_staff_location_id", ${JSON.stringify(productionSmokeLocationId)});`
+  let productionHostedSmoke = originalHostedSmoke.replaceAll(
+    demoLocationAssignment,
+    productionLocationAssignment
   );
+  if (productionHostedSmoke === originalHostedSmoke) {
+    throw new Error("Production smoke hosted template location target missing");
+  }
   productionHostedSmoke = productionHostedSmoke
     .replaceAll("DD008_PREVIEW_", "DD008_PRODUCTION_")
     .replaceAll("Preview runtime config", "Production runtime config")
