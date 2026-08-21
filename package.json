@@ -23,6 +23,6 @@
     "supabase": "2.113.0"
   },
   "dependencies": {
-    "@supabase/supabase-js": "2.112.3"
+    "@supabase/supabase-js": "^2.112.3"
   }
 }
