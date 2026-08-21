@@ -21,8 +21,8 @@ test("DD-010A QR SVG is self-contained and does not call an external QR service"
   const svg = qrSvg("https://deedou-pos.vercel.app/#/t/ddt_12345678901234567890", { scale: 4, border: 4 });
   assert.match(svg, /^<svg /);
   assert.match(svg, /<path /);
-  assert.doesNotMatch(svg, /https?:\/\//);
-  assert.doesNotMatch(svg, /<image/i);
+  assert.doesNotMatch(svg, /<(?:image|script|foreignObject)\b/i);
+  assert.doesNotMatch(svg, /\b(?:href|xlink:href)\s*=/i);
 });
 
 test("DD-010A QR generator fails explicitly when URL exceeds capacity", () => {
