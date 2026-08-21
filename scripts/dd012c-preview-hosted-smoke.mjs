@@ -296,7 +296,7 @@ async function waitForPreviewRuntimeConfig() {
       const response = await fetch(`${previewUrl}/api/runtime-config`, { headers: bypassHeaders() });
       const body = await response.text();
       const safe = !/service_role|sb_secret_|SUPABASE_SECRET|DATABASE_URL|DB_PASSWORD|JWT_SECRET|PRIVATE KEY/i.test(body);
-      const expected = body.includes('\"mode\":\"SUPABASE\"') && body.includes(apiUrl) && body.includes(publishableKey);
+      const expected = body.includes('"mode":"SUPABASE"') && body.includes(apiUrl) && body.includes(publishableKey);
       if (response.ok && safe && expected) return;
       last = `status=${response.status} safe=${safe} expected=${expected}`;
     } catch (error) { last = sanitize(error?.message || error); }
