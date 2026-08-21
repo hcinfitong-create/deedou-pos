@@ -17,12 +17,12 @@ concurrency:
 
 jobs:
   production-security-smoke:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'hcinfitong-create' && github.event.pull_request.head.ref == 'agent/dd011-production-smoke' && github.event.pull_request.number == 0
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'hcinfitong-create' && github.event.pull_request.head.ref == 'agent/dd011-production-smoke' && github.event.pull_request.number == 39
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       DEEDOU_PR_NUMBER: ${{ github.event.pull_request.number }}
-      DEEDOU_EXPECTED_PR_NUMBER: "0"
+      DEEDOU_EXPECTED_PR_NUMBER: "39"
       DEEDOU_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       DEEDOU_PRODUCTION_URL: https://deedou-pos.vercel.app
       DEEDOU_HOSTED_SUPABASE_URL: https://nwohsyzpmogqjbmknwbl.supabase.co
