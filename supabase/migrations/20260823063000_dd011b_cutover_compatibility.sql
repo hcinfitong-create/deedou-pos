@@ -203,7 +203,8 @@ begin
 end
 $$;
 
--- Correct composite-row assignment for activation completion.
+-- Activation completion uses the request's own staff_profile_id. No record variable
+-- participates in a multi-item INTO list, which keeps the migration PostgreSQL-safe.
 create or replace function public.dd011b_service_complete_activation(
   p_auth_user_id uuid,
   p_request_token_hash text,
@@ -225,14 +226,18 @@ begin
     return query select false,'VALIDATION_ERROR','','',''; return;
   end if;
 
-  select ar,sp.id into v_request,v_staff_id
+  select ar.* into v_request
   from public.staff_activation_requests ar
   join public.staff_profiles sp on sp.id=ar.staff_profile_id
-  where sp.auth_user_id=p_auth_user_id and ar.request_token_hash=p_request_token_hash
-  order by ar.requested_at desc limit 1
+  where sp.auth_user_id=p_auth_user_id
+    and ar.request_token_hash=p_request_token_hash
+  order by ar.requested_at desc
+  limit 1
   for update of ar;
 
   if v_request.id is null then return query select false,'ACTIVATION_NOT_FOUND','','',''; return; end if;
+  v_staff_id := v_request.staff_profile_id;
+
   if v_request.status<>'APPROVED' then return query select false,'ACTIVATION_NOT_APPROVED','','',''; return; end if;
   if v_request.expires_at<=now() then
     update public.staff_activation_requests set status='EXPIRED' where id=v_request.id;
