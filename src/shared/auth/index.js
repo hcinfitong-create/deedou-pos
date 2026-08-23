@@ -270,6 +270,14 @@ export function createSupabasePasswordAuthApi(options = {}) {
   }
 
   let client = options.client || null;
+  let passwordSignInInProgress = false;
+  let observedSessionIdentity = "";
+
+  function rememberSession(session) {
+    observedSessionIdentity = authSessionIdentity(session);
+    return session;
+  }
+
   const getClient = async () => {
     if (client) return client;
     const createClient = await resolveSupabaseCreateClient(options.createClient);
@@ -290,7 +298,8 @@ export function createSupabasePasswordAuthApi(options = {}) {
     const activeClient = await getClient();
     const { data, error } = await activeClient.auth.getSession();
     if (error) return { ok: false, reason: error.message || AUTH_DENIAL_REASONS.BACKEND_UNAVAILABLE, session: null };
-    return { ok: true, session: normalizeAuthSession(data?.session) };
+    const session = rememberSession(normalizeAuthSession(data?.session));
+    return { ok: true, session };
   }
 
   async function rpc(functionName, params) {
@@ -311,14 +320,19 @@ export function createSupabasePasswordAuthApi(options = {}) {
     restoreSession: currentSessionInfo,
     async signInWithPassword({ email, password } = {}) {
       const activeClient = await getClient();
-      const { data, error } = await activeClient.auth.signInWithPassword({
-        email: normalizeText(email),
-        password: String(password || "")
-      });
-      if (error) return { ok: false, reason: error.message || AUTH_DENIAL_REASONS.SIGN_IN_REQUIRED };
-      const session = normalizeAuthSession(data?.session);
-      if (!session) return { ok: false, reason: "SESSION_MISSING" };
-      return { ok: true, session };
+      passwordSignInInProgress = true;
+      try {
+        const { data, error } = await activeClient.auth.signInWithPassword({
+          email: normalizeText(email),
+          password: String(password || "")
+        });
+        if (error) return { ok: false, reason: error.message || AUTH_DENIAL_REASONS.SIGN_IN_REQUIRED };
+        const session = rememberSession(normalizeAuthSession(data?.session));
+        if (!session) return { ok: false, reason: "SESSION_MISSING" };
+        return { ok: true, session };
+      } finally {
+        passwordSignInInProgress = false;
+      }
     },
     async authorize({ locationId, permission, workstationMode, routeName } = {}) {
       const sessionResult = await currentSessionInfo();
@@ -366,6 +380,7 @@ export function createSupabasePasswordAuthApi(options = {}) {
       const activeClient = await getClient();
       const { error } = await activeClient.auth.signOut({ scope: "local" });
       if (error) return { ok: false, reason: error.message || "LOGOUT_FAILED" };
+      rememberSession(null);
       return { ok: true };
     },
     onAuthStateChange(callback) {
@@ -375,7 +390,17 @@ export function createSupabasePasswordAuthApi(options = {}) {
         .then((activeClient) => {
           if (!active) return;
           const { data } = activeClient.auth.onAuthStateChange((event, session) => {
-            callback?.({ event, session: normalizeAuthSession(session) });
+            const normalizedSession = normalizeAuthSession(session);
+            const identity = authSessionIdentity(normalizedSession);
+            const sameIdentity = Boolean(identity && observedSessionIdentity && identity === observedSessionIdentity);
+            const redundantStableEvent = sameIdentity && ["INITIAL_SESSION", "SIGNED_IN", "TOKEN_REFRESHED"].includes(event);
+            const explicitSignInEvent = passwordSignInInProgress && event === "SIGNED_IN";
+            if (redundantStableEvent || explicitSignInEvent) {
+              observedSessionIdentity = identity;
+              return;
+            }
+            observedSessionIdentity = identity;
+            callback?.({ event, session: normalizedSession });
           });
           subscription = data?.subscription || null;
         })
@@ -414,6 +439,10 @@ export function normalizeAuthSession(payload = {}) {
     userEmail,
     userId
   };
+}
+
+function authSessionIdentity(session) {
+  return normalizeText(session?.userId || session?.userEmail).toLowerCase();
 }
 
 export function routeAuthorizationKey({ routeName, authState, policy } = {}) {
