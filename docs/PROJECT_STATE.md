@@ -80,7 +80,7 @@ Merged/production-complete work confirmed from GitHub history:
 
 Branch: `agent/dd011b-owner-device-hardening`
 Issue: #47
-Status at DD-011B hosted acceptance update: **Draft / open / mergeable; Vercel Preview hosted security acceptance is automated by `.github/workflows/dd011b-preview-hosted-smoke.yml` and must pass on the exact PR head before merge**.
+Status at DD-011B hosted acceptance update: **Draft / open / mergeable; Vercel Preview hosted security acceptance is automated by `.github/workflows/dd011-preview-hosted-smoke.yml` job `dd011b-hosted-preview-security-acceptance` and must pass on the exact PR head before merge**.
 
 Accepted scope:
 
@@ -133,7 +133,7 @@ PR #46 and PR #48 are intentionally independent. They both touch integration fil
 
 ## Next action
 
-1. Re-check PR #48 exact head and all CI jobs, including `DD-011B Vercel Preview Hosted Security Acceptance`.
+1. Re-check PR #48 exact head and all CI jobs, including the DD-011B hosted acceptance job in `DD-011 Vercel Preview Hosted Security Smoke`.
 2. If a job fails, inspect the failing log and identify root cause before changing code.
 3. Confirm hosted acceptance cleanup returns the run-scoped staging database fixtures to baseline.
 4. If all exact-head local/CI/hosted gates pass, PR #48 can be moved from Draft to Ready for Review.

@@ -142,12 +142,13 @@ test("DD011B hosted preview acceptance is isolated from the DD-011 PR #38 gate",
   const dd011Script = readFileSync(new URL("../scripts/dd011-preview-hosted-smoke.mjs", import.meta.url), "utf8");
   const dd011Workflow = readFileSync(new URL("../.github/workflows/dd011-preview-hosted-smoke.yml", import.meta.url), "utf8");
   const dd011bScript = readFileSync(new URL("../scripts/dd011b-preview-hosted-smoke.mjs", import.meta.url), "utf8");
-  const dd011bWorkflow = readFileSync(new URL("../.github/workflows/dd011b-preview-hosted-smoke.yml", import.meta.url), "utf8");
 
   assert.match(dd011Script, /DD-011 hosted gate must run on PR #38/);
-  assert.match(dd011Workflow, /pull_request\.number == 38/);
+  assert.match(dd011Workflow, /hosted-preview-security-smoke:[\s\S]*pull_request\.number == 38/);
+  assert.match(dd011Workflow, /dd011b-hosted-preview-security-acceptance:[\s\S]*pull_request\.number == 48/);
+  assert.match(dd011Workflow, /node scripts\/dd011-preview-hosted-smoke\.mjs/);
+  assert.match(dd011Workflow, /node scripts\/dd011b-preview-hosted-smoke\.mjs/);
   assert.match(dd011bScript, /DD-011B hosted gate must run on PR #48/);
-  assert.match(dd011bWorkflow, /pull_request\.number == 48/);
   assert.doesNotMatch(dd011bScript, /DD-011 hosted gate must run on PR #38/);
 });
 
