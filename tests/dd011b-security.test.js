@@ -137,3 +137,31 @@ test("DD011B Owner Security checks identity before calling Owner-only snapshot",
   assert.match(source, /state\.isOwner = status\.isOwner === true/);
   assert.match(source, /if \(!state\.isOwner\) \{[\s\S]*?state\.snapshot = null;[\s\S]*?return;/);
 });
+
+test("DD011B hosted preview acceptance is isolated from the DD-011 PR #38 gate", () => {
+  const dd011Script = readFileSync(new URL("../scripts/dd011-preview-hosted-smoke.mjs", import.meta.url), "utf8");
+  const dd011Workflow = readFileSync(new URL("../.github/workflows/dd011-preview-hosted-smoke.yml", import.meta.url), "utf8");
+  const dd011bScript = readFileSync(new URL("../scripts/dd011b-preview-hosted-smoke.mjs", import.meta.url), "utf8");
+  const dd011bWorkflow = readFileSync(new URL("../.github/workflows/dd011b-preview-hosted-smoke.yml", import.meta.url), "utf8");
+
+  assert.match(dd011Script, /DD-011 hosted gate must run on PR #38/);
+  assert.match(dd011Workflow, /pull_request\.number == 38/);
+  assert.match(dd011bScript, /DD-011B hosted gate must run on PR #48/);
+  assert.match(dd011bWorkflow, /pull_request\.number == 48/);
+  assert.doesNotMatch(dd011bScript, /DD-011 hosted gate must run on PR #38/);
+});
+
+test("DD011B hosted acceptance uses backend-managed device sessions without JS-readable device credentials", () => {
+  const source = readFileSync(new URL("../scripts/dd011b-preview-hosted-smoke.mjs", import.meta.url), "utf8");
+
+  assert.match(source, /__Host-deedou_device_session/);
+  assert.match(source, /httpOnly === true/);
+  assert.match(source, /secure === true/);
+  assert.match(source, /assertNoBrowserDeviceCredential/);
+  assert.match(source, /requestActivationThroughUi/);
+  assert.match(source, /approveActivationAndWaitForDevice/);
+  assert.match(source, /revokeDeviceThroughOwnerUi/);
+  assert.match(source, /disableStaffThroughOwnerUi/);
+  assert.doesNotMatch(source, /setItem\(["']deedou_device_credential["']/);
+  assert.doesNotMatch(source, /sessionStorage\.setItem\(["']deedou_device_credential["']/);
+});

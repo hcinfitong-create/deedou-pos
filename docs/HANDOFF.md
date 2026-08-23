@@ -22,7 +22,7 @@ Before implementing anything:
 - PR: `#48 DD-011B: single Owner and backend-managed device activation`
 - Branch: `agent/dd011b-owner-device-hardening`
 - Pre-documentation code baseline inspected: `10a6b53b67768a0912410a46267008d4688de7a6`
-- PR state at that checkpoint: open, Draft, mergeable.
+- PR state at latest DD-011B hosted acceptance update: open, Draft, mergeable; move to Ready only after the exact-head hosted acceptance and final CI are green.
 - PR #46/DD-012C remains a separate open Draft.
 
 Always fetch the latest head before continuing; documentation commits and later fixes may advance this SHA.
@@ -42,7 +42,7 @@ Repository implementation already includes the DD-011B schema/security direction
 - Owner security Admin UI.
 - browser-side device-session transport that removes legacy workstation secret usage from production browser storage.
 
-Recent Part 5 fixes added a browser-smoke compatibility adapter so old DD-008 regression suites can exercise the new backend device-session model without restoring browser-readable secrets.
+Recent Part 5 fixes added a browser-smoke compatibility adapter so old DD-008 regression suites can exercise the new backend device-session model without restoring browser-readable secrets. DD-011B now also has its own Vercel Preview hosted security acceptance workflow for PR #48.
 
 ## Last confirmed debugging evidence
 
@@ -66,12 +66,12 @@ Old smoke fixtures injected `deedou_device_credential` into `localStorage` and r
 
 Do not say DD-011B is complete merely because a previous run was green.
 
-At the pre-documentation baseline:
+At the DD-011B hosted acceptance update, exact-head status must include:
 
-- syntax checks: PASS;
-- unit tests: PASS;
-- DD-008D hardening gate: PASS;
-- remaining exact-head database/Auth/browser/security contract jobs required fresh verification.
+- DeeDou CI syntax/unit/backend/Auth/browser gates;
+- DD-011 security contract;
+- DD-011B Vercel Preview hosted security acceptance;
+- hosted fixture cleanup with run-scoped staff/device/session/location data returning to baseline.
 
 Any documentation commit changes the head and may trigger a new CI run. Fetch current checks before reporting status.
 
@@ -104,10 +104,10 @@ Resolve these after one branch advances/merges; do not copy unrelated modules be
 
 1. Fetch PR #48 latest head.
 2. Inspect all current CI checks and logs.
-3. If browser smoke still fails, trace exact request/authorization/UI state before patching.
+3. If browser or hosted smoke fails, trace exact request/authorization/UI/cleanup state before patching.
 4. Keep fixes surgical and security-preserving.
-5. When exact-head local/fresh-DB regression is green, execute Issue #47 staging hosted acceptance and cleanup.
-6. Update `PROJECT_STATE.md` + this file with final evidence before merge.
+5. Use `.github/workflows/dd011b-preview-hosted-smoke.yml` / `scripts/dd011b-preview-hosted-smoke.mjs` for Issue #47 staging hosted acceptance and cleanup.
+6. When exact-head CI and hosted acceptance are green, move PR #48 from Draft to Ready for Review.
 
 ## Handoff template for future sessions
 

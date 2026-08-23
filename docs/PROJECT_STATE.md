@@ -2,7 +2,7 @@
 
 > Dynamic source-of-truth summary. Update this file whenever a major PR/phase changes state.
 >
-> Last source review: 2026-08-23. Baseline inspected before this documentation commit: `agent/dd011b-owner-device-hardening` at `10a6b53`.
+> Last source review: 2026-08-23. Baseline inspected for DD-011B hosted acceptance on `agent/dd011b-owner-device-hardening` at PR #48 head.
 
 ## Source-of-truth order
 
@@ -80,7 +80,7 @@ Merged/production-complete work confirmed from GitHub history:
 
 Branch: `agent/dd011b-owner-device-hardening`
 Issue: #47
-Status at documentation baseline: **Draft / open / mergeable**.
+Status at DD-011B hosted acceptance update: **Draft / open / mergeable; Vercel Preview hosted security acceptance is automated by `.github/workflows/dd011b-preview-hosted-smoke.yml` and must pass on the exact PR head before merge**.
 
 Accepted scope:
 
@@ -95,9 +95,9 @@ Accepted scope:
 - immediate device/staff/location/role revoke semantics;
 - public QR remains outside staff security gateway.
 
-Recent browser regression root cause: DD-008C/DD-008D smoke fixtures still assumed browser-local workstation credentials while DD-011B removes that trust from frontend storage. Test integration is being adapted to backend-managed device sessions; production security must not be weakened to satisfy old fixtures.
+Recent browser regression root cause: DD-008C/DD-008D smoke fixtures and serve-flow synchronization were adapted to the DD-011B backend-managed device-session model without restoring browser-readable workstation credentials. Production security must not be weakened to satisfy old fixtures.
 
-Pre-documentation code baseline `10a6b53` had syntax/unit/DD-008D hardening checks green. Exact-head DB/Auth/browser/security contract state must be re-checked after any new commit; do not copy an old CI conclusion forward.
+Hosted acceptance status is no longer a manual pending item in source: PR #48 now has a dedicated DD-011B Vercel Preview hosted security acceptance gate. Exact-head DB/Auth/browser/security/hosted state must still be read from GitHub Actions after every new commit; do not copy an old CI conclusion forward.
 
 ### PR #46 — DD-012C combo/components
 
@@ -128,18 +128,17 @@ PR #46 and PR #48 are intentionally independent. They both touch integration fil
 
 - `app.js` still owns broad route composition, DOM/event wiring and orchestration.
 - Some Admin surfaces remain integrated in the app shell.
-- Existing browser smoke suites predate DD-011B backend device-session trust and require compatibility adaptation without weakening production authorization.
+- Hosted/security smoke suites now include DD-011B backend device-session trust. Any future harness change must preserve the no-JS-readable-device-secret rule and public QR bypass of staff security.
 - Repository docs written before DD-008D/DD-010/DD-011/DD-012 may contain historical wording. Current source/migrations override stale documentation.
 
 ## Next action
 
-1. Re-check PR #48 exact head and all CI jobs.
+1. Re-check PR #48 exact head and all CI jobs, including `DD-011B Vercel Preview Hosted Security Acceptance`.
 2. If a job fails, inspect the failing log and identify root cause before changing code.
-3. Complete DD-011B local/fresh-DB regressions.
-4. Run staging hosted acceptance + fixture cleanup required by Issue #47.
-5. Only then evaluate PR #48 merge readiness.
-6. Rebase/resolve interaction with PR #46 according to merge order.
-7. Continue DD-012C and real menu provisioning using user-supplied menu data; do not invent production catalog data.
+3. Confirm hosted acceptance cleanup returns the run-scoped staging database fixtures to baseline.
+4. If all exact-head local/CI/hosted gates pass, PR #48 can be moved from Draft to Ready for Review.
+5. Rebase/resolve interaction with PR #46 according to merge order.
+6. Continue DD-012C and real menu provisioning using user-supplied menu data; do not invent production catalog data.
 
 ## Required maintenance
 
