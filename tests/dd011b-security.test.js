@@ -166,3 +166,16 @@ test("DD011B hosted acceptance uses backend-managed device sessions without JS-r
   assert.doesNotMatch(source, /setItem\(["']deedou_device_credential["']/);
   assert.doesNotMatch(source, /sessionStorage\.setItem\(["']deedou_device_credential["']/);
 });
+
+test("DD011B hosted bootstrap source remains enabled and narrowly GitHub OIDC scoped", () => {
+  const source = readFileSync(new URL("../supabase/functions/dd008-hosted-smoke-bootstrap/index.ts", import.meta.url), "utf8");
+
+  assert.doesNotMatch(source, /HOSTED_SMOKE_DISABLED/);
+  assert.match(source, /deedou-hosted-smoke/);
+  assert.match(source, /hcinfitong-create\/deedou-pos/);
+  assert.match(source, /refs\/pull\/38\/merge/);
+  assert.match(source, /refs\/pull\/48\/merge/);
+  assert.match(source, /\.github\/workflows\/dd011-preview-hosted-smoke\.yml/);
+  assert.match(source, /event_name !== "pull_request"/);
+  assert.match(source, /workflow_ref/);
+});

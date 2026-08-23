@@ -42,7 +42,7 @@ Repository implementation already includes the DD-011B schema/security direction
 - Owner security Admin UI.
 - browser-side device-session transport that removes legacy workstation secret usage from production browser storage.
 
-Recent Part 5 fixes added a browser-smoke compatibility adapter so old DD-008 regression suites can exercise the new backend device-session model without restoring browser-readable secrets. DD-011B now also has its own PR #48 Vercel Preview hosted security acceptance job inside the existing DD-011 hosted workflow, leaving the PR #38 job intact.
+Recent Part 5 fixes added a browser-smoke compatibility adapter so old DD-008 regression suites can exercise the new backend device-session model without restoring browser-readable secrets. DD-011B now also has its own PR #48 Vercel Preview hosted security acceptance job inside the existing DD-011 hosted workflow, leaving the PR #38 job intact. The staging bootstrap Edge Function source is versioned at `supabase/functions/dd008-hosted-smoke-bootstrap/index.ts`.
 
 ## Last confirmed debugging evidence
 
@@ -106,7 +106,7 @@ Resolve these after one branch advances/merges; do not copy unrelated modules be
 2. Inspect all current CI checks and logs.
 3. If browser or hosted smoke fails, trace exact request/authorization/UI/cleanup state before patching.
 4. Keep fixes surgical and security-preserving.
-5. Use `.github/workflows/dd011-preview-hosted-smoke.yml` job `dd011b-hosted-preview-security-acceptance` / `scripts/dd011b-preview-hosted-smoke.mjs` for Issue #47 staging hosted acceptance and cleanup.
+5. Use `.github/workflows/dd011-preview-hosted-smoke.yml` job `dd011b-hosted-preview-security-acceptance`, `scripts/dd011b-preview-hosted-smoke.mjs`, and `supabase/functions/dd008-hosted-smoke-bootstrap/index.ts` for Issue #47 staging hosted acceptance and cleanup.
 6. When exact-head CI and hosted acceptance are green, move PR #48 from Draft to Ready for Review.
 
 ## Handoff template for future sessions

@@ -97,7 +97,7 @@ Accepted scope:
 
 Recent browser regression root cause: DD-008C/DD-008D smoke fixtures and serve-flow synchronization were adapted to the DD-011B backend-managed device-session model without restoring browser-readable workstation credentials. Production security must not be weakened to satisfy old fixtures.
 
-Hosted acceptance status is no longer a manual pending item in source: PR #48 now has a dedicated DD-011B Vercel Preview hosted security acceptance gate. Exact-head DB/Auth/browser/security/hosted state must still be read from GitHub Actions after every new commit; do not copy an old CI conclusion forward.
+Hosted acceptance status is no longer a manual pending item in source: PR #48 now has a dedicated DD-011B Vercel Preview hosted security acceptance gate and versioned staging bootstrap function source at `supabase/functions/dd008-hosted-smoke-bootstrap/index.ts`. Exact-head DB/Auth/browser/security/hosted state must still be read from GitHub Actions after every new commit; do not copy an old CI conclusion forward.
 
 ### PR #46 — DD-012C combo/components
 
