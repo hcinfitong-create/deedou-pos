@@ -43,9 +43,8 @@
 - Legacy ADMIN device revoked through the security workflow.
 - Post-cutover Owner Admin access verified after enforcement.
 - PR #49 hotfix merged as `ff615b5874c0ad1ff9379c0eb2c6b8a9b98b7675` to restore the required Owner TOTP re-challenge path when a valid active device is paired with an AAL1 Auth session.
-- PR #49 exact-head DeeDou CI, DD-010A, DD-011 and DD-012 contracts all passed; Production Vercel deployment succeeded; post-deploy Owner session/device/enforcement state was verified.
 
-Issue #47 remains open only as tracking metadata at the 2026-08-24 review; close it after this documentation sync if no follow-up acceptance item is intentionally retained.
+Issue #47 remains open only as tracking metadata at the 2026-08-24 review; close it only after confirming no intentional follow-up acceptance item remains.
 
 ## Catalog provisioning
 
@@ -53,38 +52,38 @@ Parent: Issue #41.
 
 - ✅ DD-012 Slice A — authoritative product core.
 - ✅ DD-012 Slice B — variants/modifiers/assignments.
-- 🟡 DD-012 Slice C / PR #46 — combo/component management using existing `product_components`.
-- ⏭ Real DeeDou production menu provisioning through Admin UI using user-provided menu data after Slice C is accepted.
+- ✅ DD-012 Slice C / PR #46 — authoritative combo/component management using existing `product_components`.
+- ⏭ Real DeeDou production menu provisioning through Admin UI using user-provided menu data.
 
-Current PR #46 integration status after DD-011B + hotfix merges:
+### DD-012C completion evidence
 
-- head `307e1868cac3cc1f1c593353ff3c51fa0878ce32`;
-- Draft/open;
-- currently not mergeable against latest `main`;
-- branch diverged: 15 commits ahead / 73 commits behind.
+- accepted PR head: `27fa5c8219ad066bf21e3e02a33b1e803768535f`;
+- PR #46 merged as `b282a0cd859b122fc6df4d065e5b9c496a5af537`;
+- exact-head DeeDou CI, DD-010A, DD-011, DD-012 Catalog Contract and DD-012C hosted Preview smoke all passed;
+- final hosted staging acceptance run `32673729910`, job `97278777585` — PASS;
+- staging fixture cleanup returned catalog/order/security smoke data to zero;
+- Vercel Production deployment for the merge commit succeeded;
+- Production migration `dd012c_combo_components` applied as version `20260823235316`;
+- post-rollout Production verification confirmed component RPCs/ACLs and DD-011B security baseline intact;
+- no Production menu/combo fixture data was invented or left behind.
 
-Required next sequence for DD-012C:
+DD-012C architecture remains binding:
 
-1. rebase/update `agent/dd012c-combo-components` onto latest `main`;
-2. resolve only real integration conflicts against current security/Admin composition;
-3. rerun exact-head fresh-DB CI and existing regression contracts;
-4. run DD-012C staging hosted Admin + public QR/order acceptance;
-5. clean all staging fixtures back to baseline;
-6. only after staging success consider Production migration and acceptance.
+- `product_components` is the canonical component graph; no parallel combo model;
+- submitted order component/configured snapshots remain immutable;
+- browser direct writes remain denied;
+- Admin component mutations use existing authenticated `menu.manage` + registered workstation/backend-session authority.
 
-Do not invent production menu data. Import/duplicate helpers are optional and should be added only if real operator setup proves they materially reduce work.
+## Next catalog work
 
-## Merge sequencing for active work
-
-DD-011B is complete, so PR #46 must now integrate **forward** onto the latest `main` rather than being treated as a parallel peer of PR #48.
+Real menu provisioning is now the next accepted catalog step, but it requires user-provided source data.
 
 Rules:
 
-1. repository/source on latest `main` wins over stale PR #46 assumptions;
-2. rebase/update before additional feature work;
-3. resolve only actual integration conflicts;
-4. do not remove DD-011B/hotfix security behavior to make the old branch merge;
-5. rerun all relevant exact-head gates after conflict resolution.
+1. do not invent Production products/components;
+2. reuse current DD-012 A/B/C contracts rather than creating a second catalog path;
+3. keep data provisioning separate from UI/UX redesign;
+4. UI/UX redesign may reuse existing backend contracts and should request backend changes only for proven capability gaps.
 
 ## Accepted next product areas not yet implemented
 
@@ -94,7 +93,7 @@ Rules:
 - ⏭ Current user-intended calculation is +8% VAT +2% service fee when that option is selected.
 - **Gate:** current Vietnamese legal/tax/e-invoice rules, entity type, rounding, accounting treatment and provider API contract must be verified before coding. See `DECISIONS.md`.
 
-This area should receive its own issue/contract before implementation. Do not mix it into DD-012C.
+This area should receive its own issue/contract before implementation.
 
 ## Candidate future areas — no binding implementation issue yet
 
