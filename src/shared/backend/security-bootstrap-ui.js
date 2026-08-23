@@ -91,6 +91,11 @@ function render(panel) {
     return;
   }
 
+  if (status.isOwner && state.mfa?.currentLevel !== "aal2") {
+    panel.innerHTML = renderOwnerBootstrap(profile);
+    return;
+  }
+
   if (status.device?.active) {
     panel.innerHTML = `
       <hr />
@@ -124,7 +129,7 @@ function renderOwnerBootstrap(profile) {
     <hr />
     <div class="kicker">SOLE OWNER SECURITY</div>
     <p><strong>${esc(profile.display_name || "DeeDou Owner")}</strong></p>
-    <p class="muted">Owner bắt buộc TOTP 2FA (AAL2) trước khi bootstrap workstation đầu tiên.</p>
+    <p class="muted">Owner bắt buộc TOTP 2FA (AAL2) trước khi truy cập Admin hoặc bootstrap workstation.</p>
     ${state.message ? `<p class="notice">${esc(state.message)}</p>` : ""}
     ${state.enrollment ? `
       <div class="dd011-mfa-enroll">
