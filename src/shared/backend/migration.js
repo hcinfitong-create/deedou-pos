@@ -78,7 +78,7 @@ export function createLegacyMigrationApi(options = {}) {
     const locationId = normalizeText(authState.locationId || params.p_location_id);
     const workstationMode = normalizeText(authState.authorization?.workstationMode || authState.workstationMode || "ADMIN");
     const credential = readDeviceCredential(deviceStorage);
-    if (!locationId || !credential) return failure("FORBIDDEN", "MIGRATION_CONTEXT_INCOMPLETE");
+    if (!locationId) return failure("FORBIDDEN", "MIGRATION_CONTEXT_INCOMPLETE");
     const correlationId = createCorrelationId("legacy");
     try {
       const { data, error } = await client.rpc(functionName, {
