@@ -67,12 +67,15 @@ function installPlaywrightFixtureBridge() {
     browser.newContext = async (...contextArgs) => {
       const context = await originalNewContext(...contextArgs);
       const originalAddInitScript = context.addInitScript.bind(context);
+      const originalNewPage = context.newPage.bind(context);
+
       context.addInitScript = async (script, arg) => {
         const fixture = extractLegacyFixture(arg);
         if (!fixture) return originalAddInitScript(script, arg);
 
         const contextId = randomBytes(18).toString("base64url");
         fixtureContexts.set(contextId, fixture);
+        context.__dd011bFixture = fixture;
         await context.addCookies([{
           name: TEST_CONTEXT_COOKIE,
           value: contextId,
@@ -84,6 +87,20 @@ function installPlaywrightFixtureBridge() {
         }]);
         return originalAddInitScript(script, sanitizeLegacyFixtureArg(arg));
       };
+
+      context.newPage = async (...pageArgs) => {
+        const page = await originalNewPage(...pageArgs);
+        const originalOn = page.on.bind(page);
+        page.on = (event, listener) => {
+          if (event !== "console") return originalOn(event, listener);
+          return originalOn(event, (message) => {
+            if (context.__dd011bFixture?.authorizationDenied === true && isIntentionalAuthorizationDenialConsole(message)) return;
+            listener(message);
+          });
+        };
+        return page;
+      };
+
       return context;
     };
     return browser;
@@ -103,12 +120,15 @@ async function attachBackendManagedFixtureSession(request) {
   if (!fixture) return;
   if (readCookie(request, DEVICE_SESSION_COOKIE)) return;
 
+  const permission = requestedAuthorizationPermission(request);
+  if (!permission) return;
+
   const caller = await authenticatedCaller(request);
   if (!caller.ok) return;
 
   const key = `${contextId}:${caller.user.id}`;
   if (!sessionPromises.has(key)) {
-    sessionPromises.set(key, createFixtureSession(caller, fixture));
+    sessionPromises.set(key, createFixtureSession(caller, fixture, permission));
   }
   const token = await sessionPromises.get(key);
   if (!token) return;
@@ -117,16 +137,20 @@ async function attachBackendManagedFixtureSession(request) {
   request.headers.cookie = `${current}${current ? "; " : ""}${DEVICE_SESSION_COOKIE}=${encodeURIComponent(token)}`;
 }
 
-async function createFixtureSession(caller, fixture) {
+async function createFixtureSession(caller, fixture, permission) {
   const { data, error } = await caller.userClient.rpc("authorize_staff_access", {
     p_location_id: fixture.locationId,
-    p_permission_key: permissionForMode(fixture.workstationMode),
+    p_permission_key: permission,
     p_workstation_mode: fixture.workstationMode,
     p_device_credential: fixture.deviceCredential
   });
   const resolved = firstRow(data) || {};
-  if (error || resolved.ok !== true || !resolved.device_id) return "";
+  if (error || resolved.ok !== true || !resolved.device_id) {
+    fixture.authorizationDenied = !error && resolved.ok === false;
+    return "";
+  }
 
+  fixture.authorizationDenied = false;
   const { error: secretError } = await caller.serviceClient
     .from("workstation_device_secrets")
     .upsert({
@@ -150,15 +174,19 @@ async function createFixtureSession(caller, fixture) {
   return token;
 }
 
-function permissionForMode(mode) {
-  return {
-    CASHIER: "orders.read",
-    STAFF: "orders.read",
-    KDS_KITCHEN: "kds.kitchen",
-    KDS_BAR: "kds.bar",
-    KDS_DESSERT: "kds.dessert",
-    ADMIN: "menu.read"
-  }[String(mode || "").toUpperCase()] || "orders.read";
+function requestedAuthorizationPermission(request) {
+  const body = request?.body;
+  if (!body || body.functionName !== "authorize_staff_access") return "";
+  const params = body.params;
+  if (!params || typeof params !== "object" || Array.isArray(params)) return "";
+  return String(params.p_permission_key || "").trim();
+}
+
+function isIntentionalAuthorizationDenialConsole(message) {
+  if (message?.type?.() !== "error") return false;
+  if (message.text?.() !== "Failed to load resource: the server responded with a status of 403 (Forbidden)") return false;
+  const locationUrl = String(message.location?.()?.url || "");
+  return !locationUrl || safePathname(locationUrl) === "/api/staff-rpc";
 }
 
 function extractLegacyFixture(arg) {
@@ -168,7 +196,8 @@ function extractLegacyFixture(arg) {
     return {
       deviceCredential,
       workstationMode: String(arg.storage.deedou_workstation_mode || ""),
-      locationId: String(arg.storage.deedou_staff_location_id || "deedou-demo")
+      locationId: String(arg.storage.deedou_staff_location_id || "deedou-demo"),
+      authorizationDenied: false
     };
   }
   if (arg && Object.prototype.hasOwnProperty.call(arg, "deviceSecret")) {
@@ -177,7 +206,8 @@ function extractLegacyFixture(arg) {
     return {
       deviceCredential,
       workstationMode: String(arg.mode || ""),
-      locationId: "deedou-demo"
+      locationId: "deedou-demo",
+      authorizationDenied: false
     };
   }
   return null;
