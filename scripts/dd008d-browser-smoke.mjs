@@ -9,6 +9,7 @@ import { createClient } from "@supabase/supabase-js";
 const LOCATION_ID = "deedou-demo";
 const BASE_URL = "http://127.0.0.1:8099";
 const DB_URL = process.env.DB_URL || "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
+const LOGIN_ROUTE_TIMEOUT_MS = 70_000;
 const statusEnv = parseEnvOutput(execFileSync("npx", ["supabase", "status", "-o", "env"], { encoding: "utf8", timeout: 30_000 }));
 const apiUrl = statusEnv.API_URL || statusEnv.SUPABASE_URL || "http://127.0.0.1:54321";
 const anonKey = statusEnv.ANON_KEY || statusEnv.SUPABASE_ANON_KEY;
@@ -73,11 +74,11 @@ try {
 
   markSmokePhase("login staff routes and admin");
   await Promise.all([
-    loginRoute(staffPage, "staff", accounts.staff),
-    loginRoute(kitchenPage, "kitchen", accounts.kitchen),
-    loginRoute(barPage, "bar", accounts.bar),
-    loginRoute(cashierPage, "cashier", accounts.cashier),
-    loginAdmin(adminPage, accounts.admin)
+    loginWithDiagnostics(staffPage, "staff", accounts.staff, (step) => loginRoute(staffPage, "staff", accounts.staff, step)),
+    loginWithDiagnostics(kitchenPage, "kitchen", accounts.kitchen, (step) => loginRoute(kitchenPage, "kitchen", accounts.kitchen, step)),
+    loginWithDiagnostics(barPage, "bar", accounts.bar, (step) => loginRoute(barPage, "bar", accounts.bar, step)),
+    loginWithDiagnostics(cashierPage, "cashier", accounts.cashier, (step) => loginRoute(cashierPage, "cashier", accounts.cashier, step)),
+    loginWithDiagnostics(adminPage, "admin", accounts.admin, (step) => loginAdmin(adminPage, accounts.admin, step))
   ]);
 
   markSmokePhase("wait staff connectivity online");
@@ -420,31 +421,60 @@ async function trackedPage(context, label) {
   return page;
 }
 
-async function loginRoute(page, route, spec) {
-  await page.goto(`${BASE_URL}/#/${route}`, { waitUntil: "domcontentloaded" });
-  const form = page.locator("[data-auth-login]");
-  await form.waitFor({ timeout: 20_000 });
-  await waitForAuthGateReady(page, `login gate ${spec.mode}`);
-  await form.locator('input[name="email"]').fill(spec.email);
-  await form.locator('input[name="password"]').fill(spec.password);
-  await form.locator('input[name="locationId"]').fill(LOCATION_ID);
-  await form.locator('select[name="workstationMode"]').selectOption(spec.mode);
-  await form.locator('button[type="submit"]').click();
-  await page.waitForFunction(() => !document.querySelector("[data-auth-login]"), null, { timeout: 30_000 });
+async function loginWithDiagnostics(page, route, spec, work) {
+  const label = `${spec.mode}:${route}`;
+  let lastSuccessfulStep = "start";
+  const step = async (name, action) => {
+    console.log(`[DD011B login] ${label} step=${sanitize(name)} start`);
+    try {
+      const result = await action();
+      lastSuccessfulStep = name;
+      console.log(`[DD011B login] ${label} step=${sanitize(name)} success`);
+      return result;
+    } catch (error) {
+      console.log(`[DD011B login] ${label} step=${sanitize(name)} failure=${sanitize(error?.message || error)}`);
+      throw error;
+    }
+  };
+  console.log(`[DD011B login] ${label} route-start timeoutMs=${LOGIN_ROUTE_TIMEOUT_MS}`);
+  try {
+    await withTimeout(
+      work(step),
+      LOGIN_ROUTE_TIMEOUT_MS,
+      () => new Error(`login route timeout route=${label} lastSuccessfulStep=${lastSuccessfulStep}`)
+    );
+    console.log(`[DD011B login] ${label} route-success lastSuccessfulStep=${sanitize(lastSuccessfulStep)}`);
+  } catch (error) {
+    await printLoginDiagnostics(page, label, lastSuccessfulStep, error);
+    throw error;
+  }
 }
 
-async function loginAdmin(page, spec) {
-  await page.goto(`${BASE_URL}/#/admin`, { waitUntil: "domcontentloaded" });
+async function loginRoute(page, route, spec, step = (name, action) => action()) {
+  await step("goto", () => page.goto(`${BASE_URL}/#/${route}`, { waitUntil: "domcontentloaded" }));
   const form = page.locator("[data-auth-login]");
-  await form.waitFor({ timeout: 20_000 });
-  await waitForAuthGateReady(page, "login gate ADMIN");
-  await form.locator('input[name="email"]').fill(spec.email);
-  await form.locator('input[name="password"]').fill(spec.password);
-  await form.locator('input[name="locationId"]').fill(LOCATION_ID);
-  await form.locator('select[name="workstationMode"]').selectOption(spec.mode);
-  await form.locator('button[type="submit"]').click();
-  await waitForAdminPanel(page, "[data-dd008d-admin-menu]", "admin menu");
-  await waitForAdminPanel(page, "[data-dd008d-migration-panel]", "migration panel");
+  await step("wait_auth_form", () => form.waitFor({ timeout: 20_000 }));
+  await step("wait_auth_gate_ready", () => waitForAuthGateReady(page, `login gate ${spec.mode}`));
+  await step("fill_email", () => form.locator('input[name="email"]').fill(spec.email));
+  await step("fill_password", () => form.locator('input[name="password"]').fill(spec.password));
+  await step("fill_location", () => form.locator('input[name="locationId"]').fill(LOCATION_ID));
+  await step("select_workstation_mode", () => form.locator('select[name="workstationMode"]').selectOption(spec.mode));
+  await step("submit_login", () => form.locator('button[type="submit"]').click());
+  await step("wait_auth_form_removed", () => page.waitForFunction(() => !document.querySelector("[data-auth-login]"), null, { timeout: 30_000 }));
+}
+
+async function loginAdmin(page, spec, step = (name, action) => action()) {
+  await step("goto", () => page.goto(`${BASE_URL}/#/admin`, { waitUntil: "domcontentloaded" }));
+  const form = page.locator("[data-auth-login]");
+  await step("wait_auth_form", () => form.waitFor({ timeout: 20_000 }));
+  await step("wait_auth_gate_ready", () => waitForAuthGateReady(page, "login gate ADMIN"));
+  await step("fill_email", () => form.locator('input[name="email"]').fill(spec.email));
+  await step("fill_password", () => form.locator('input[name="password"]').fill(spec.password));
+  await step("fill_location", () => form.locator('input[name="locationId"]').fill(LOCATION_ID));
+  await step("select_workstation_mode", () => form.locator('select[name="workstationMode"]').selectOption(spec.mode));
+  await step("submit_login", () => form.locator('button[type="submit"]').click());
+  await step("wait_admin_menu", () => waitForAdminPanel(page, "[data-dd008d-admin-menu]", "admin menu"));
+  await step("wait_migration_panel", () => waitForAdminPanel(page, "[data-dd008d-migration-panel]", "migration panel"));
 }
 
 async function waitForAdminPanel(page, selector, label) {
@@ -630,6 +660,18 @@ async function waitFor(predicate, label, timeout = 20_000) {
   throw new Error(`Timed out waiting for ${label}${lastError ? `: ${lastError.message}` : ""}`);
 }
 
+async function withTimeout(promise, timeout, createError) {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(createError()), timeout);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function waitForBody(page, text, timeout = 30_000) {
   await page.waitForFunction((expected) => document.body?.innerText?.includes(expected), text, { timeout });
 }
@@ -648,8 +690,22 @@ function markSmokePhase(phase) {
   smokePhase = String(phase || "unknown");
 }
 
+async function printLoginDiagnostics(page, label, lastSuccessfulStep, error) {
+  const snapshot = await captureLoginDomSnapshot(page);
+  console.log(`[DD011B login] ${label} route-failure lastSuccessfulStep=${sanitize(lastSuccessfulStep)} error=${sanitize(error?.message || error)}`);
+  console.log(`[DD011B login] ${label} dom=${JSON.stringify(snapshot)}`);
+  printPageDiagnostics("login", page, label);
+}
+
 async function printAdminTimeoutDiagnostics(page, label, error) {
-  const snapshot = await page.evaluate(() => {
+  const snapshot = await captureLoginDomSnapshot(page);
+  console.log(`[DD011B admin-timeout] ${label}: ${sanitize(error?.message || error)}`);
+  console.log(`[DD011B admin-timeout] dom=${JSON.stringify(snapshot)}`);
+  printPageDiagnostics("admin-timeout", page, label);
+}
+
+async function captureLoginDomSnapshot(page) {
+  return page.evaluate(() => {
     const exists = (selector) => Boolean(document.querySelector(selector));
     const visible = (selector) => {
       const element = document.querySelector(selector);
@@ -691,15 +747,20 @@ async function printAdminTimeoutDiagnostics(page, label, error) {
       authGateText: text(".auth-gate"),
       adminMenu: displayState("[data-dd008d-admin-menu]"),
       migrationPanel: displayState("[data-dd008d-migration-panel]"),
-      connectivityState: document.querySelector("[data-dd008d-connectivity]")?.getAttribute("data-state") || ""
+      connectivityState: document.querySelector("[data-dd008d-connectivity]")?.getAttribute("data-state") || "",
+      storedLocationId: String(localStorage.getItem("deedou_staff_location_id") || "").replace(/[^A-Za-z0-9_.:-]+/g, "_").slice(0, 80),
+      storedWorkstationMode: String(localStorage.getItem("deedou_workstation_mode") || "").replace(/[^A-Za-z0-9_.:-]+/g, "_").slice(0, 80),
+      hasDeviceCredential: Boolean(localStorage.getItem("deedou_device_credential")),
+      jsCookieVisible: Boolean(document.cookie)
     };
   }).catch((diagnosticError) => ({ error: sanitize(diagnosticError?.message || diagnosticError) }));
-  console.log(`[DD011B admin-timeout] ${label}: ${sanitize(error?.message || error)}`);
-  console.log(`[DD011B admin-timeout] dom=${JSON.stringify(snapshot)}`);
+}
+
+function printPageDiagnostics(prefix, page, label) {
   const pageErrors = (page.__errors || []).slice(-12).map(sanitize);
-  if (pageErrors.length) console.log(`[DD011B admin-timeout] browserErrors=${JSON.stringify(pageErrors)}`);
+  if (pageErrors.length) console.log(`[DD011B ${prefix}] ${label} browserErrors=${JSON.stringify(pageErrors)}`);
   const network = (page.__networkDiagnostics || []).slice(-20).map(sanitize);
-  if (network.length) console.log(`[DD011B admin-timeout] network=${JSON.stringify(network)}`);
+  if (network.length) console.log(`[DD011B ${prefix}] ${label} network=${JSON.stringify(network)}`);
 }
 
 function recordSafeNetworkDiagnostic(page, type, rawUrl, detail) {
