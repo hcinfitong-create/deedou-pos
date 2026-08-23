@@ -2,7 +2,7 @@
 
 > Dynamic source-of-truth summary. Update this file whenever a major PR/phase changes state.
 >
-> Last source review: 2026-08-23. DD-011B docs finalization is based on PR #48 pre-documentation head `1b0d4931693891ee343c037399d250beb9e146b7`.
+> Last source review: 2026-08-24. Current `main` reviewed at `ff615b5874c0ad1ff9379c0eb2c6b8a9b98b7675` after DD-011B production hotfix PR #49.
 
 ## Source-of-truth order
 
@@ -57,7 +57,7 @@ See `docs/ARCHITECTURE.md` and `docs/MODULE_MAP.md` before changing module owner
 
 ## Completed development baseline
 
-Merged/production-complete work confirmed from GitHub history:
+Merged/production-complete work confirmed from GitHub/source/hosted state:
 
 - DD-002 / DD-002.1 — staff-order state and hybrid cafe/restaurant service context.
 - DD-003 — station workflow + item-level serving.
@@ -71,54 +71,80 @@ Merged/production-complete work confirmed from GitHub history:
 - DD-008D / DD-008P — production cutover/resilience + hosted production acceptance.
 - DD-010A — authoritative Admin tables/floor layout/QR management.
 - DD-011 — production identity/device security hardening + AAL2.
+- DD-011B — sole Owner, username staff identity, Owner-approved activation and backend-managed device sessions.
 - DD-012 Slice A — authoritative product-core Admin catalog.
 - DD-012 Slice B — authoritative variants/modifiers and assignments.
 
-## Current open work
+## DD-011B final production state
 
-### PR #48 — DD-011B single Owner + backend-managed device activation
-
-Branch: `agent/dd011b-owner-device-hardening`
 Issue: #47
-Status at DD-011B docs finalization: **Draft / open / mergeable**. Implementation and exact-head Vercel Preview hosted security acceptance completed on pre-documentation head `1b0d4931693891ee343c037399d250beb9e146b7`; final merge remains pending Production rollout prerequisite verification and fresh exact-head checks after this docs-only commit.
+Implementation PR: #48 `DD-011B: single Owner and backend-managed device activation`
+Production hotfix PR: #49 `Hotfix DD-011B: allow Owner AAL2 re-challenge with active device`
 
-Accepted scope:
+Current status: **production-complete**.
+
+Merged commits:
+
+- PR #48 merged to `main` as `834049bb89a08968e5f69d77f9bb3718ba908d5b`.
+- PR #49 merged to `main` as `ff615b5874c0ad1ff9379c0eb2c6b8a9b98b7675`.
+
+Implemented/accepted security behavior:
 
 - exactly one active OWNER globally;
-- Owner AAL2 for privileged security operations;
-- staff `display_name` + case-insensitive unique `username`;
-- Owner-created pending staff account;
-- first-login/new-device six-digit verification challenge;
-- explicit Owner approval;
-- backend-managed trusted device session;
-- device secret never stored in frontend JS-readable storage;
-- immediate device/staff/location/role revoke semantics;
-- public QR remains outside staff security gateway.
+- OWNER privileged security paths require Supabase MFA/AAL2;
+- staff identity uses `display_name` plus case-insensitive unique `username`;
+- Owner creates pending staff and approves first-login/new-device six-digit activation challenges;
+- trusted workstation proof is a backend-managed session using Secure/HttpOnly/SameSite cookie transport;
+- browser JS-readable storage is not an authority for workstation/device secret material;
+- individual device revoke and staff/location/role disable invalidate protected access immediately;
+- sole OWNER protection blocks normal flows from removing/deactivating the only OWNER;
+- public QR remains outside the staff security gateway.
 
-Resolved hosted acceptance regressions:
+Production rollout completed on Supabase project `nwohsyzpmogqjbmknwbl`:
 
-- Chromium username `pattern` syntax was corrected without changing the accepted username contract.
-- Async/background 403 resource diagnostics now classify only proven expected `DEVICE_SESSION_REQUIRED` and `SINGLE_OWNER_ENFORCED` responses by phase/path/method/reason; no global 403 ignore was added.
+- DD-011B forward migrations were applied in order: identity/device schema, staff activation authority, cutover compatibility, and sole-Owner role-revoke guard;
+- production Vercel server-only Supabase service credential is configured separately from Preview/staging;
+- OWNER TOTP factor is verified;
+- OWNER backend-managed ADMIN device/session is active;
+- `dd011b_security_policy.backend_device_sessions_required = true`;
+- legacy ADMIN device was revoked through the application security workflow rather than hard-deleted;
+- post-cutover Owner Admin access was verified after hard refresh with a backend session used after enforcement was enabled.
 
-Verified evidence on pre-documentation head `1b0d4931693891ee343c037399d250beb9e146b7`:
+Post-rollout incident and hotfix:
 
-- DeeDou CI `32659206957`: PASS.
-- DD-011 Security Hardening Contract `32659206967`: PASS.
-- DD-010A Table Authority Contract `32659206939`: PASS.
-- DD-012 Catalog Contract `32659206898`: PASS.
-- DD-011 Vercel Preview Hosted Security Smoke `32659206888`, job `97242678394`: PASS.
-- Hosted log ended with `DD011B_PREVIEW_CLEANUP_BASELINE=PASS` and `DD-011B Vercel Preview hosted security acceptance passed.`
-- Vercel Preview status: Ready/success.
+- after the browser Supabase Auth session returned to AAL1, the existing active-device UI rendered the continue state before the Owner MFA challenge, which left OWNER unable to elevate back to AAL2 from the route gate;
+- PR #49 moved the Owner AAL2 re-challenge guard ahead of the active-device continue state;
+- no RBAC/RLS/device-session contract was weakened;
+- after Production deployment of PR #49, OWNER successfully re-verified TOTP and re-entered Admin;
+- direct Production verification confirmed the latest OWNER Auth session at `aal2`, the current ADMIN device/session active, the legacy device revoked, and backend-device-session enforcement still enabled.
 
-Hosted acceptance is no longer pending for the pre-documentation implementation head. Exact-head DB/Auth/browser/security/hosted state must still be read from GitHub Actions after every new commit; do not copy an old CI conclusion forward. PR #48 remains open/Draft and is not production verified or merged.
+Validation evidence for PR #49 exact head `039246cd56f5478ceb4b188b20845abe70b052ef` before merge:
+
+- DeeDou CI `32662677868`: PASS, including 275/275 unit tests, browser smoke, DD-008D multi-context browser smoke, Auth+AAL2 integration, database contracts and authoritative command/realtime integration.
+- DD-010A Table Authority Contract `32662677890`: PASS.
+- DD-011 Security Hardening Contract `32662677908`: PASS.
+- DD-012 Catalog Contract `32662677907`: PASS.
+- Vercel Preview: success.
+- Production Vercel deployment for merge commit `ff615b5874c0ad1ff9379c0eb2c6b8a9b98b7675`: success.
+
+Issue #47 is still open in GitHub as tracking metadata at this source review. The implementation/production acceptance described above is complete; close the issue separately after this documentation sync if no additional acceptance item is intentionally being kept open.
+
+## Current open work
 
 ### PR #46 — DD-012C combo/components
 
 Branch: `agent/dd012c-combo-components`
 Issue parent: #41
-Status: **Draft / open**.
+Status: **Draft / open / currently not mergeable against latest `main`**.
 
-Scope:
+Current integration state reviewed after DD-011B/hotfix merges:
+
+- PR head: `307e1868cac3cc1f1c593353ff3c51fa0878ce32`.
+- Branch is diverged from `main`: 15 commits ahead and 73 commits behind.
+- GitHub reports `mergeable=false` at this review.
+- The branch must be rebased/updated onto latest `main` before further acceptance or merge-readiness claims.
+
+Scope remains:
 
 - authoritative CRUD for existing `product_components` model;
 - Admin component editor;
@@ -126,7 +152,7 @@ Scope:
 - preserve immutable submitted-order snapshots;
 - import/duplicate helper only if real provisioning proves it useful.
 
-PR #46 and PR #48 are intentionally independent. They both touch integration files such as `index.html` / `package.json`; whichever merges second may require rebase/conflict resolution. Do not merge one PR's business logic into the other merely to avoid a normal integration conflict.
+After rebase/conflict resolution, rerun exact-head fresh-DB CI and the DD-012C staging hosted Admin + public QR/order acceptance/cleanup gate before production migration.
 
 ## Current production authority
 
@@ -136,21 +162,25 @@ PR #46 and PR #48 are intentionally independent. They both touch integration fil
 - Realtime events are refresh hints, not state authority; clients refetch authoritative snapshots.
 - LOCAL_DEMO remains a separate demo/runtime path. No authoritative dual-write between localStorage and PostgreSQL.
 - Historical submitted order-line pricing/options are immutable snapshots.
+- Staff protected requests require the DD-011B backend-managed device-session model when enforcement is enabled.
+- OWNER must be AAL2 for accepted privileged security paths; an AAL1 Owner with an active device must be offered a TOTP re-challenge rather than silently denied behind the active-device continue state.
 
 ## Known coupling / technical debt
 
 - `app.js` still owns broad route composition, DOM/event wiring and orchestration.
 - Some Admin surfaces remain integrated in the app shell.
-- Hosted/security smoke suites now include DD-011B backend device-session trust. Any future harness change must preserve the no-JS-readable-device-secret rule and public QR bypass of staff security.
+- Hosted/security smoke suites include DD-011B backend device-session trust. Future harness changes must preserve the no-JS-readable-device-secret rule and public QR bypass of staff security.
+- Long-lived privileged sessions can return to AAL1 according to Supabase Auth/session lifecycle; UI must preserve the Owner re-challenge path added by PR #49.
 - Repository docs written before DD-008D/DD-010/DD-011/DD-012 may contain historical wording. Current source/migrations override stale documentation.
 
 ## Next action
 
-1. After this docs-only commit, re-check PR #48 exact head and all GitHub/Vercel checks.
-2. Verify the Production Vercel server-only service-role environment for the production Supabase project before any production rollout/acceptance claim.
-3. If post-doc exact-head checks and production prerequisites are green, move PR #48 from Draft to Ready for final merge-readiness review.
-4. Rebase/resolve interaction with PR #46 according to merge order.
-5. Continue DD-012C and real menu provisioning using user-supplied menu data; do not invent production catalog data.
+1. Merge this docs-only final-state sync after confirming its diff contains documentation only.
+2. Optionally close Issue #47 as completed once the documentation state is merged and no further DD-011B acceptance work is intended.
+3. Rebase/update PR #46 (`agent/dd012c-combo-components`) onto latest `main`.
+4. Resolve only real integration conflicts introduced by DD-011B/hotfix work; do not copy unrelated business logic between slices.
+5. Rerun PR #46 exact-head CI/fresh-DB contracts, then staging DD-012C hosted acceptance and fixture cleanup.
+6. Continue real menu provisioning only from user-supplied menu data after Slice C is accepted; do not invent production catalog data.
 
 ## Required maintenance
 
