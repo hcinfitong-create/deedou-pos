@@ -96,3 +96,37 @@ test("DD011B password sign-in event does not invalidate the caller's in-flight a
   authStateCallback("MFA_CHALLENGE_VERIFIED", user);
   assert.deepEqual(delivered.map(({ event }) => event), ["MFA_CHALLENGE_VERIFIED"]);
 });
+
+test("DD011B late empty initial session cannot clobber a completed password sign-in", async () => {
+  let authStateCallback = null;
+  const delivered = [];
+  const user = { user: { id: "admin-user", email: "admin@example.invalid" } };
+
+  const client = {
+    auth: {
+      onAuthStateChange(callback) {
+        authStateCallback = callback;
+        return { data: { subscription: { unsubscribe() {} } } };
+      },
+      async signInWithPassword() {
+        return { data: { session: user }, error: null };
+      }
+    }
+  };
+
+  const api = createSupabasePasswordAuthApi({ config, client });
+  api.onAuthStateChange((event) => delivered.push(event));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof authStateCallback, "function");
+
+  const signedIn = await api.signInWithPassword({ email: "admin@example.invalid", password: "test-password" });
+  assert.equal(signedIn.ok, true);
+  assert.equal(signedIn.session.userId, "admin-user");
+
+  authStateCallback("INITIAL_SESSION", null);
+  authStateCallback("SIGNED_IN", user);
+  assert.deepEqual(delivered, [], "a stale empty INITIAL_SESSION after interactive sign-in must not reset authorization state");
+
+  authStateCallback("SIGNED_OUT", null);
+  assert.deepEqual(delivered.map(({ event }) => event), ["SIGNED_OUT"], "real sign-out must still invalidate the session");
+});
