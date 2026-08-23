@@ -15,113 +15,121 @@ Before implementing anything:
 7. Compare repository state with this handoff.
 8. Only then code/debug.
 
+## Current state
+
+**DD-011B / PR #48 is complete in production.**
+
+- PR #48 merged to `main` as `834049bb89a08968e5f69d77f9bb3718ba908d5b`.
+- Production DD-011B migrations are applied.
+- Owner TOTP MFA is verified.
+- Owner backend-managed ADMIN device/session is active.
+- `backend_device_sessions_required = true` in production.
+- Owner Admin access was verified after enforcement was enabled.
+- Legacy ADMIN device was revoked through the Owner security UI and has no active backend session.
+- Current Owner ADMIN device/session remains active after cleanup.
+- Sanitized rollout/cutover/cleanup evidence was recorded on PR #48.
+
+Do not reopen DD-011B implementation unless new production evidence proves a regression.
+
 ## Current working task
 
-**DD-011B — Issue #47 / PR #48**
+**DD-012C — PR #46 (`agent/dd012c-combo-components`)**
 
-- PR: `#48 DD-011B: single Owner and backend-managed device activation`
-- Branch: `agent/dd011b-owner-device-hardening`
-- Pre-documentation implementation head finalized for docs: `1b0d4931693891ee343c037399d250beb9e146b7`
-- PR state at DD-011B docs finalization: open, Draft, mergeable. Implementation and exact-head Vercel Preview hosted acceptance are complete; move to Ready only after this docs-only commit has fresh exact-head checks and Production rollout prerequisites are verified.
-- PR #46/DD-012C remains a separate open Draft.
+PR #46 is still open and Draft, but its current branch predates the DD-011B merge.
 
-Always fetch the latest head before continuing; documentation commits and later fixes may advance this SHA.
+Verified integration state on 2026-08-24:
 
-## Completed work on DD-011B
+- head: `307e1868cac3cc1f1c593353ff3c51fa0878ce32`;
+- status against current `main`: `diverged`;
+- ahead of `main`: 15 commits;
+- behind `main`: 70 commits;
+- GitHub reports `mergeable=false` in the current state.
 
-Repository implementation already includes the DD-011B schema/security direction:
+Therefore the next coding action is **rebase/integration first**, not new DD-012C implementation from the stale branch state.
 
-- `staff_profiles.username` and provisioning status.
-- case-insensitive username uniqueness.
-- single-active-OWNER database guard.
-- `workstation_device_secrets` backend secret storage.
-- `workstation_device_sessions` hashed backend session tokens.
-- `staff_activation_requests` for FIRST_LOGIN/NEW_DEVICE challenges.
-- same-origin backend security endpoints.
-- Owner bootstrap/device/session flow.
-- Owner security Admin UI.
-- browser-side device-session transport that removes legacy workstation secret usage from production browser storage.
+## DD-011B completed work and protected behavior
 
-Recent Part 5 fixes added a browser-smoke compatibility adapter so old DD-008 regression suites can exercise the new backend device-session model without restoring browser-readable secrets. DD-011B now also has its own PR #48 Vercel Preview hosted security acceptance job inside the existing DD-011 hosted workflow, leaving the PR #38 job intact. The staging bootstrap Edge Function source is versioned at `supabase/functions/dd008-hosted-smoke-bootstrap/index.ts`.
+Production implementation now includes:
 
-Hosted acceptance fixes now resolved on pre-documentation head `1b0d4931693891ee343c037399d250beb9e146b7`:
+- `staff_profiles.username` + provisioning status;
+- case-insensitive username uniqueness;
+- exactly one active OWNER guard;
+- Owner AAL2/TOTP requirement for privileged security paths;
+- Owner-created pending staff accounts;
+- first-login/new-device verification challenge + explicit Owner approval;
+- backend-only workstation device secrets;
+- hashed backend device sessions;
+- same-origin security endpoints;
+- Secure HttpOnly browser device-session proof;
+- immediate revoke/disable semantics;
+- public QR outside the staff security gateway.
 
-- Username pattern failure: resolved; Chromium accepts the intended username pattern without invalid regex syntax.
-- Hosted async 403 classification failure: resolved; only phase/path/method/reason-proven expected 403s are tolerated, while unrelated console/page/network errors remain fatal.
+Production cutover sequence completed successfully:
 
-## Last confirmed debugging evidence
+1. Production Vercel server-only service-role secret configured for the production Supabase project.
+2. Owner TOTP enrolled and verified before DB cutover.
+3. Four forward DD-011B migrations applied to production.
+4. Owner backend-managed ADMIN workstation bootstrapped.
+5. Backend-session enforcement enabled only after the Owner session existed.
+6. Owner Admin hard-refresh succeeded after enforcement; DB `last_seen_at` advanced after enforcement timestamp.
+7. Legacy ADMIN device revoked through the security workflow.
+8. Current Owner device/session remained active and continued receiving backend traffic after cleanup.
 
-### Symptom before Part 5 fix
+Do not regress these boundaries:
 
-`browser-smoke` and `dd008d-browser-smoke` failed after DD-011B while DB/Auth/security contracts were otherwise passing.
+- no JS-readable device secret as production authority;
+- no service-role/private secret in browser code;
+- no direct browser writes to protected security/business tables;
+- sole Owner cannot be removed/deactivated through normal role/staff mutation paths;
+- revoked device/staff access must fail on the next protected request;
+- public QR remains unauthenticated and exact-token scoped.
 
-### Root cause confirmed
+## DD-011B validation evidence
 
-Old smoke fixtures injected `deedou_device_credential` into `localStorage` and ran a static server. DD-011B intentionally removes that secret from JS-readable storage and proxies staff RPCs through same-origin backend `/api/staff-rpc` using backend-managed device sessions. Therefore the old fixture model no longer matched production security architecture.
+Pre-merge exact-head PR validation included:
 
-### Fix direction
+- DeeDou CI: PASS;
+- DD-011 Security Hardening Contract: PASS;
+- DD-010A Table Authority Contract: PASS;
+- DD-012 Catalog Contract: PASS;
+- DD-011 Vercel Preview Hosted Security Smoke: PASS;
+- hosted cleanup baseline: PASS;
+- Vercel Preview: Ready/success.
 
-- Do **not** restore workstation/device secret to browser storage.
-- Keep production 401/403 authorization semantics.
-- Adapt smoke fixture infrastructure to create/use backend device sessions.
-- Reuse the actual requested route permission; do not maintain a duplicate permission map in the test adapter.
-- Ignore only a browser console signal proven to be an intentional denial in a negative authorization test; all unexpected console/page/network errors still fail.
+Production verification included live Owner MFA/bootstrap/cutover plus direct production DB invariant checks. The historical `DD-011 Production Hosted Security Smoke` workflow remains hard-scoped to PR #39 and was not modified or bypassed simply to create a new green run for PR #48.
 
-## Validation status rule
+## DD-012C scope to preserve during rebase
 
-Do not say DD-011B is complete merely because a previous run was green.
+PR #46 scope:
 
-At the DD-011B hosted acceptance update, exact-head status must include:
+- authoritative CRUD for the existing `product_components` model;
+- optimistic `updated_at` handling;
+- authoritative Admin menu snapshot integration;
+- DD-012C component RPCs + SQL/JS contracts;
+- Admin component editor on the existing Admin route;
+- no parallel combo model;
+- submitted order-line snapshots remain immutable when component catalog rows change;
+- no import/duplicate helper unless real provisioning proves it useful;
+- no invented production menu data.
 
-- DeeDou CI syntax/unit/backend/Auth/browser gates;
-- DD-011 security contract;
-- DD-011B Vercel Preview hosted security acceptance;
-- hosted fixture cleanup with run-scoped staff/device/session/location data returning to baseline.
-
-Confirmed evidence on pre-documentation head `1b0d4931693891ee343c037399d250beb9e146b7`:
-
-- DeeDou CI `32659206957`: PASS.
-- DD-011 Security Hardening Contract `32659206967`: PASS.
-- DD-010A Table Authority Contract `32659206939`: PASS.
-- DD-012 Catalog Contract `32659206898`: PASS.
-- DD-011 Vercel Preview Hosted Security Smoke `32659206888`, job `97242678394`: PASS.
-- Hosted cleanup baseline: `DD011B_PREVIEW_CLEANUP_BASELINE=PASS`.
-- Hosted completion marker: `DD-011B Vercel Preview hosted security acceptance passed.`
-
-Any documentation commit changes the head and may trigger a new CI run. Fetch current checks before reporting status.
-
-## Protected behavior — do not regress
-
-- PostgreSQL authority in hosted Supabase mode.
-- direct-write/RLS/ACL denial.
-- public QR unauthenticated flow.
-- existing DD-008 operational command contracts.
-- table-session authority from DD-004/DD-010A.
-- KDS `prepStatus` workflow and FOH serving separation.
-- append-only payment ledger and bounded refund semantics.
-- DD-012 immutable historical configured-order snapshots.
-- OWNER AAL2 and sole-Owner protection.
-- no JS-readable device secret.
-
-## Parallel PR interaction
-
-PR #46 is DD-012C combo/components. It must stay business-logically independent from DD-011B.
-
-Expected integration hotspots if both remain open:
+Expected rebase/integration hotspots:
 
 - `index.html`;
 - `package.json`;
-- possibly Admin composition if both add UI wiring.
+- shared backend exports;
+- Admin composition/security integration.
 
-Resolve these after one branch advances/merges; do not copy unrelated modules between PRs.
+Do not copy DD-011B business logic into DD-012C. Resolve conflicts by reading the current `main` implementation and preserving both modules' accepted boundaries.
 
 ## Next concrete action
 
-1. Fetch PR #48 latest head after the docs-only finalization commit.
-2. Inspect fresh exact-head GitHub and Vercel checks; do not reuse the `1b0d493` conclusions for the new docs SHA.
-3. Verify Production Vercel server-only service-role environment for the production Supabase project before claiming production rollout readiness.
-4. If all post-doc checks and production prerequisites are green, move PR #48 from Draft to Ready and perform final merge-readiness review.
-5. If any post-doc check fails, report the exact failing boundary and do not make production/security changes as part of the docs-only finalization.
+1. Fetch latest `main` and PR #46 head immediately before work.
+2. Rebase `agent/dd012c-combo-components` onto current `main`.
+3. Resolve only actual integration conflicts.
+4. Re-read every conflicted file after resolution; confirm DD-011B security transport remains intact.
+5. Run fresh exact-head DD-012C local/fresh-DB validation.
+6. If green, run staging hosted Admin + public QR/order acceptance and cleanup all DD-012C fixtures.
+7. Only after staging acceptance should DD-012C production migration/readiness be evaluated.
 
 ## Handoff template for future sessions
 
