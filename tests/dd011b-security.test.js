@@ -195,6 +195,11 @@ test("DD011B hosted acceptance scopes intentional HTTP 403 browser console error
   assert.match(source, /assert\(result\.status === 403/);
   assert.match(source, /isExpectedForbiddenConsoleText\(text\) && consumeExpectedForbiddenConsole\(page\)/);
   assert.match(source, /page\.on\("pageerror", \(error\) => page\.__errors\.push/);
+  assert.match(source, /page\.on\("response", async \(response\)/);
+  assert.match(source, /DD011B_HTTP_403_DIAG/);
+  assert.match(source, /safeResponseReason/);
+  assert.match(source, /expectedScope/);
+  assert.match(source, /CONSOLE_403_DIAGNOSTICS/);
   assert.doesNotMatch(source, /includes\(["']403["']\)/);
   assert.doesNotMatch(source, /message\.text\(\)\.includes/);
 });

@@ -261,7 +261,7 @@ async function withExpectedForbiddenDenial(page, expected, operation) {
   };
   page.__expectedForbiddenScopes ||= [];
   page.__expectedForbiddenScopes.push(scope);
-  try {
+  return withPagePhase(page, `expected-denial:${scope.label}`, async () => {
     const result = await operation();
     const reason = denialReason(result);
     assert(result.path === scope.path, `${scope.label} expected ${scope.path}, got ${result.path || "NO_PATH"}`);
@@ -269,10 +269,20 @@ async function withExpectedForbiddenDenial(page, expected, operation) {
     assert(reason === scope.reason, `${scope.label} expected ${scope.reason}, got ${reason || "NO_REASON"}`);
     await page.waitForTimeout(150).catch(() => {});
     return result;
-  } finally {
+  }).finally(() => {
     const scopes = page.__expectedForbiddenScopes || [];
     const index = scopes.lastIndexOf(scope);
     if (index >= 0) scopes.splice(index, 1);
+  });
+}
+
+async function withPagePhase(page, phase, operation) {
+  const previous = page.__phase || "idle";
+  page.__phase = String(phase || "unknown");
+  try {
+    return await operation();
+  } finally {
+    page.__phase = previous;
   }
 }
 
@@ -295,42 +305,48 @@ function consumeExpectedForbiddenConsole(page) {
 }
 
 async function revokeDeviceThroughOwnerUi(page, deviceId) {
-  const panel = page.locator("[data-dd011b-security-admin]");
-  await panel.locator("[data-dd011b-admin-refresh]").click();
-  const button = panel.locator(`[data-dd011b-revoke-device][data-device-id="${cssAttr(deviceId)}"]`);
-  await button.waitFor({ timeout: 30_000 });
-  await button.click();
-  await waitFor(async () => {
-    const text = await panel.innerText().catch(() => "");
-    return text.includes(deviceId) && text.includes("REVOKED");
-  }, `device ${deviceId} revoked in Owner panel`, 30_000);
+  return withPagePhase(page, "owner-ui:revoke-device", async () => {
+    const panel = page.locator("[data-dd011b-security-admin]");
+    await panel.locator("[data-dd011b-admin-refresh]").click();
+    const button = panel.locator(`[data-dd011b-revoke-device][data-device-id="${cssAttr(deviceId)}"]`);
+    await button.waitFor({ timeout: 30_000 });
+    await button.click();
+    await waitFor(async () => {
+      const text = await panel.innerText().catch(() => "");
+      return text.includes(deviceId) && text.includes("REVOKED");
+    }, `device ${deviceId} revoked in Owner panel`, 30_000);
+  });
 }
 
 async function disableStaffThroughOwnerUi(page, staffProfileId) {
-  const panel = page.locator("[data-dd011b-security-admin]");
-  await panel.locator("[data-dd011b-admin-refresh]").click();
-  const button = panel.locator(`[data-dd011b-toggle-staff][data-staff-id="${cssAttr(staffProfileId)}"][data-active="false"]`);
-  await button.waitFor({ timeout: 30_000 });
-  await button.click();
-  await waitFor(async () => {
-    const text = await panel.innerText().catch(() => "");
-    return text.includes(`@${staffAccount.username}`) && text.includes("DISABLED");
-  }, `staff ${staffProfileId} disabled in Owner panel`, 30_000);
+  return withPagePhase(page, "owner-ui:disable-staff", async () => {
+    const panel = page.locator("[data-dd011b-security-admin]");
+    await panel.locator("[data-dd011b-admin-refresh]").click();
+    const button = panel.locator(`[data-dd011b-toggle-staff][data-staff-id="${cssAttr(staffProfileId)}"][data-active="false"]`);
+    await button.waitFor({ timeout: 30_000 });
+    await button.click();
+    await waitFor(async () => {
+      const text = await panel.innerText().catch(() => "");
+      return text.includes(`@${staffAccount.username}`) && text.includes("DISABLED");
+    }, `staff ${staffProfileId} disabled in Owner panel`, 30_000);
+  });
 }
 
 async function loginThroughGate(page, identifier, password, mode) {
-  const form = page.locator("[data-auth-login]");
-  await form.waitFor({ timeout: 30_000 });
-  await waitFor(async () => !(await page.locator("body").innerText()).includes("Đang kiểm tra quyền truy cập."), `${mode} auth gate ready`, 30_000);
-  await form.locator('input[name="email"]').fill(identifier);
-  await form.locator('input[name="password"]').fill(password);
-  await setFormValue(form.locator('input[name="locationId"]'), locationId);
-  await setSelectValue(form.locator('select[name="workstationMode"]'), mode);
-  await form.locator('button[type="submit"]').click();
-  await waitFor(async () => {
-    const body = await page.locator("body").innerText().catch(() => "");
-    return !body.includes("Đang kiểm tra quyền truy cập.");
-  }, `${mode} login resolved`, 30_000);
+  return withPagePhase(page, `auth-gate:login:${mode}`, async () => {
+    const form = page.locator("[data-auth-login]");
+    await form.waitFor({ timeout: 30_000 });
+    await waitFor(async () => !(await page.locator("body").innerText()).includes("Đang kiểm tra quyền truy cập."), `${mode} auth gate ready`, 30_000);
+    await form.locator('input[name="email"]').fill(identifier);
+    await form.locator('input[name="password"]').fill(password);
+    await setFormValue(form.locator('input[name="locationId"]'), locationId);
+    await setSelectValue(form.locator('select[name="workstationMode"]'), mode);
+    await form.locator('button[type="submit"]').click();
+    await waitFor(async () => {
+      const body = await page.locator("body").innerText().catch(() => "");
+      return !body.includes("Đang kiểm tra quyền truy cập.");
+    }, `${mode} login resolved`, 30_000);
+  });
 }
 
 async function setFormValue(locator, value) {
@@ -440,7 +456,7 @@ async function securityAdminPostFromPage(page, payload) {
 }
 
 async function staffRpcFromPage(page, functionName, params) {
-  return page.evaluate(async ({ functionName, params }) => {
+  return withPagePhase(page, `staff-rpc:${functionName}`, () => page.evaluate(async ({ functionName, params }) => {
     const token = JSON.parse(localStorage.getItem("deedou_supabase_auth_session") || "{}")?.access_token || "";
     const response = await fetch("/api/staff-rpc", {
       method: "POST",
@@ -451,11 +467,11 @@ async function staffRpcFromPage(page, functionName, params) {
     const body = await response.json().catch(() => ({}));
     const row = Array.isArray(body) ? body[0] : body;
     return { status: response.status, body, row, path: "/api/staff-rpc", functionName };
-  }, { functionName, params });
+  }, { functionName, params }));
 }
 
 async function securityPostFromPage(page, path, payload) {
-  return page.evaluate(async ({ path, payload }) => {
+  return withPagePhase(page, `security-post:${path}:${String(payload?.action || "unknown")}`, () => page.evaluate(async ({ path, payload }) => {
     const token = JSON.parse(localStorage.getItem("deedou_supabase_auth_session") || "{}")?.access_token || "";
     const response = await fetch(path, {
       method: "POST",
@@ -464,7 +480,7 @@ async function securityPostFromPage(page, path, payload) {
       body: JSON.stringify(payload)
     });
     return { status: response.status, body: await response.json().catch(() => ({})), path };
-  }, { path, payload });
+  }, { path, payload }));
 }
 
 async function postHostedSecurity(token, payload) {
@@ -664,21 +680,73 @@ function bypassHeaders() {
 
 function trackErrors(page, label) {
   page.__label = label;
+  page.__phase = "tracked";
   page.__errors = [];
+  page.__forbiddenResponses = [];
+  page.__forbiddenConsoles = [];
   page.__expectedForbiddenScopes = [];
   page.__expectedForbiddenConsoles = [];
   page.on("pageerror", (error) => page.__errors.push(`pageerror:${sanitize(error?.message || error)}`));
+  page.on("response", async (response) => {
+    if (response.status() !== 403) return;
+    const request = response.request();
+    const expectedScope = (page.__expectedForbiddenScopes || []).at(-1);
+    const entry = {
+      page: label,
+      phase: sanitize(page.__phase || "unknown"),
+      method: sanitize(request.method()),
+      status: response.status(),
+      ...safeResponseUrl(response.url()),
+      reason: await safeResponseReason(response),
+      expected: expectedScope ? {
+        label: sanitize(expectedScope.label),
+        path: sanitize(expectedScope.path),
+        reason: sanitize(expectedScope.reason)
+      } : null
+    };
+    page.__forbiddenResponses.push(entry);
+    console.log(`DD011B_HTTP_403_DIAG=${JSON.stringify(entry)}`);
+  });
   page.on("console", (message) => {
     if (message.type() !== "error") return;
     const text = sanitize(message.text());
     if (isExpectedForbiddenConsoleText(text) && consumeExpectedForbiddenConsole(page)) return;
+    if (isExpectedForbiddenConsoleText(text)) {
+      const entry = { page: label, phase: sanitize(page.__phase || "unknown"), text };
+      page.__forbiddenConsoles.push(entry);
+      console.log(`DD011B_CONSOLE_403_DIAG=${JSON.stringify(entry)}`);
+    }
     page.__errors.push(`console:${text}`);
   });
 }
 
 function assertNoPageErrors(...pages) {
   const failures = pages.flatMap((page) => (page.__errors || []).map((error) => `${page.__label}:${error}`));
-  if (failures.length) throw new Error(`browser errors:\n${failures.join("\n")}`);
+  if (failures.length) {
+    const diagnostics = pages.flatMap((page) => (page.__forbiddenResponses || []).map((entry) => entry));
+    const consoles = pages.flatMap((page) => (page.__forbiddenConsoles || []).map((entry) => entry));
+    throw new Error(`browser errors:\n${failures.join("\n")}\nHTTP_403_DIAGNOSTICS=${JSON.stringify(diagnostics)}\nCONSOLE_403_DIAGNOSTICS=${JSON.stringify(consoles)}`);
+  }
+}
+
+function safeResponseUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return { origin: sanitize(url.origin), path: sanitize(url.pathname) };
+  } catch {
+    return { origin: "", path: sanitize(String(value || "").split("?")[0].slice(0, 120)) };
+  }
+}
+
+async function safeResponseReason(response) {
+  try {
+    const text = await response.text();
+    const parsed = JSON.parse(text);
+    const row = Array.isArray(parsed) ? parsed[0] : parsed;
+    return sanitize(row?.reason || row?.message || row?.code || row?.category || "");
+  } catch {
+    return "";
+  }
 }
 
 function safeStatus(value = {}) {
