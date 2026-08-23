@@ -61,6 +61,8 @@ chromium.launch = async (...launchArgs) => {
       const page = await originalNewPage(...pageArgs);
       const requestStartedAt = new WeakMap();
 
+      if (isAdminFixture) await installAppStateTrace(page);
+
       page.on("pageerror", (error) => {
         if (isAdminFixture) console.log(`[DD011B diagnose] ADMIN pageerror ${safe(error?.message)}`);
       });
@@ -68,7 +70,7 @@ chromium.launch = async (...launchArgs) => {
         if (!isAdminFixture) return;
         if (message.type() === "error") {
           console.log(`[DD011B diagnose] ADMIN console ${safe(message.text())}`);
-        } else if (message.type() === "info" && message.text().startsWith("[DD011B auth-event]")) {
+        } else if (message.type() === "info" && (message.text().startsWith("[DD011B auth-event]") || message.text().startsWith("[DD011B auth-state]"))) {
           console.log(message.text());
         }
       });
@@ -125,6 +127,40 @@ chromium.launch = async (...launchArgs) => {
 
   return browser;
 };
+
+async function installAppStateTrace(page) {
+  await page.route("**/app.js", async (route) => {
+    const response = await route.fetch();
+    let body = await response.text();
+    const replacements = [
+      [
+        "pendingStaffAuthKey = nextKey;\n  staffAuthState = {",
+        "console.info(`[DD011B auth-state] refresh-start next=${nextKey} pending=${pendingStaffAuthKey} version=${staffAuthState.authVersion || 0} status=${staffAuthState.status}`);\n  pendingStaffAuthKey = nextKey;\n  staffAuthState = {"
+      ],
+      [
+        "if (pendingStaffAuthKey !== nextKey) return;\n\n  staffAuthState = {",
+        "console.info(`[DD011B auth-state] refresh-resolved next=${nextKey} pending=${pendingStaffAuthKey} version=${staffAuthState.authVersion || 0} status=${staffAuthState.status} ok=${authorization?.ok === true} contextRows=${Array.isArray(staffContext) ? staffContext.length : -1}`);\n  if (pendingStaffAuthKey !== nextKey) {\n    console.info(`[DD011B auth-state] refresh-discard next=${nextKey} pending=${pendingStaffAuthKey} version=${staffAuthState.authVersion || 0}`);\n    return;\n  }\n\n  staffAuthState = {"
+      ],
+      [
+        "pendingStaffAuthKey = \"\";\n  render();\n}\n\nfunction syncStaffAuthSession",
+        "console.info(`[DD011B auth-state] restore-clear pending=${pendingStaffAuthKey} version=${staffAuthState.authVersion || 0} status=${staffAuthState.status}`);\n  pendingStaffAuthKey = \"\";\n  render();\n}\n\nfunction syncStaffAuthSession"
+      ],
+      [
+        "function syncStaffAuthSession({ session } = {}) {\n  if (backendConfig.mode !== BACKEND_MODES.SUPABASE) return;",
+        "function syncStaffAuthSession({ session } = {}) {\n  if (backendConfig.mode !== BACKEND_MODES.SUPABASE) return;\n  console.info(`[DD011B auth-state] sync-enter pending=${pendingStaffAuthKey} version=${staffAuthState.authVersion || 0} status=${staffAuthState.status} session=${session ? \"yes\" : \"no\"}`);"
+      ],
+      [
+        "pendingStaffAuthKey = \"\";\n  render();\n}\n\nfunction supabaseLoadingPage",
+        "console.info(`[DD011B auth-state] sync-clear pending=${pendingStaffAuthKey} version=${staffAuthState.authVersion || 0} status=${staffAuthState.status}`);\n  pendingStaffAuthKey = \"\";\n  render();\n}\n\nfunction supabaseLoadingPage"
+      ]
+    ];
+    for (const [needle, replacement] of replacements) {
+      if (!body.includes(needle)) console.log(`[DD011B diagnose] app-state injection missing ${safe(needle.slice(0, 80))}`);
+      body = body.replace(needle, replacement);
+    }
+    await route.fulfill({ response, body });
+  });
+}
 
 async function dumpAdminDom(page, label) {
   try {
