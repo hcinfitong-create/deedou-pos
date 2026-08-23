@@ -200,6 +200,12 @@ test("DD011B hosted acceptance scopes intentional HTTP 403 browser console error
   assert.match(source, /safeResponseReason/);
   assert.match(source, /expectedScope/);
   assert.match(source, /CONSOLE_403_DIAGNOSTICS/);
+  assert.match(source, /isExpectedDeviceSessionProbe/);
+  assert.match(source, /entry\.path === "\/api\/staff-rpc"/);
+  assert.match(source, /entry\.method === "POST"/);
+  assert.match(source, /entry\.reason === "DEVICE_SESSION_REQUIRED"/);
+  assert.match(source, /\^auth-gate:login:\(ADMIN\|CASHIER\)\$/);
+  assert.match(source, /\^owner-bootstrap:\(enroll-totp\|device\)\$/);
   assert.doesNotMatch(source, /includes\(["']403["']\)/);
   assert.doesNotMatch(source, /message\.text\(\)\.includes/);
 });

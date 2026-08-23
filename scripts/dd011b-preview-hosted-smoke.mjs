@@ -277,13 +277,8 @@ async function withExpectedForbiddenDenial(page, expected, operation) {
 }
 
 async function withPagePhase(page, phase, operation) {
-  const previous = page.__phase || "idle";
   page.__phase = String(phase || "unknown");
-  try {
-    return await operation();
-  } finally {
-    page.__phase = previous;
-  }
+  return operation();
 }
 
 function denialReason(result = {}) {
@@ -374,41 +369,45 @@ async function setSelectValue(locator, value) {
 }
 
 async function enrollOwnerTotpThroughUi(page) {
-  const panel = page.locator("[data-dd011b-bootstrap]");
-  await panel.waitFor({ timeout: 30_000 });
-  if (await panel.locator("[data-dd011b-owner-mfa-challenge]").count()) {
-    throw new Error("Hosted Owner unexpectedly already has a verified TOTP factor");
-  }
-  await panel.locator("[data-dd011b-owner-mfa-enroll]").click();
-  const secretLocator = panel.locator(".dd011-mfa-enroll code");
-  await secretLocator.waitFor({ timeout: 30_000 });
-  const secret = String(await secretLocator.textContent() || "").trim();
-  assert(secret.length > 10, "Owner TOTP secret missing from enrollment UI");
-  secrets.push(secret);
-  const code = generateTotp(secret);
-  secrets.push(code);
-  const form = panel.locator("[data-dd011b-owner-mfa-verify]");
-  await form.locator('input[name="code"]').fill(code);
-  await form.locator('button[type="submit"]').click();
-  await waitFor(async () => {
-    const text = await panel.innerText().catch(() => "");
-    return /Session now AAL2|Owner session is AAL2|Activate Owner workstation/i.test(text);
-  }, "Owner browser AAL2", 30_000);
-  console.log("DD011B_PREVIEW_OWNER_BROWSER_AAL2=PASS");
+  return withPagePhase(page, "owner-bootstrap:enroll-totp", async () => {
+    const panel = page.locator("[data-dd011b-bootstrap]");
+    await panel.waitFor({ timeout: 30_000 });
+    if (await panel.locator("[data-dd011b-owner-mfa-challenge]").count()) {
+      throw new Error("Hosted Owner unexpectedly already has a verified TOTP factor");
+    }
+    await panel.locator("[data-dd011b-owner-mfa-enroll]").click();
+    const secretLocator = panel.locator(".dd011-mfa-enroll code");
+    await secretLocator.waitFor({ timeout: 30_000 });
+    const secret = String(await secretLocator.textContent() || "").trim();
+    assert(secret.length > 10, "Owner TOTP secret missing from enrollment UI");
+    secrets.push(secret);
+    const code = generateTotp(secret);
+    secrets.push(code);
+    const form = panel.locator("[data-dd011b-owner-mfa-verify]");
+    await form.locator('input[name="code"]').fill(code);
+    await form.locator('button[type="submit"]').click();
+    await waitFor(async () => {
+      const text = await panel.innerText().catch(() => "");
+      return /Session now AAL2|Owner session is AAL2|Activate Owner workstation/i.test(text);
+    }, "Owner browser AAL2", 30_000);
+    console.log("DD011B_PREVIEW_OWNER_BROWSER_AAL2=PASS");
+  });
 }
 
 async function bootstrapOwnerDeviceThroughUi(page) {
-  const panel = page.locator("[data-dd011b-bootstrap]");
-  await panel.locator("[data-dd011b-owner-bootstrap]").waitFor({ timeout: 30_000 });
-  const form = panel.locator("[data-dd011b-owner-bootstrap]");
-  await form.locator('input[name="deviceLabel"]').fill("DD011B Hosted Owner Admin");
-  await form.locator('button[type="submit"]').click();
-  await waitFor(async () => {
-    const status = await securityStatusFromPage(page).catch(() => null);
-    return status?.device?.active === true && status?.device?.workstationMode === "ADMIN";
-  }, "Owner HttpOnly device session", 30_000);
-  await page.goto(`${previewUrl}/#/admin`, { waitUntil: "domcontentloaded" });
-  await page.locator("[data-dd011b-security-admin]").waitFor({ timeout: 30_000 });
+  return withPagePhase(page, "owner-bootstrap:device", async () => {
+    const panel = page.locator("[data-dd011b-bootstrap]");
+    await panel.locator("[data-dd011b-owner-bootstrap]").waitFor({ timeout: 30_000 });
+    const form = panel.locator("[data-dd011b-owner-bootstrap]");
+    await form.locator('input[name="deviceLabel"]').fill("DD011B Hosted Owner Admin");
+    await form.locator('button[type="submit"]').click();
+    await waitFor(async () => {
+      const status = await securityStatusFromPage(page).catch(() => null);
+      return status?.device?.active === true && status?.device?.workstationMode === "ADMIN";
+    }, "Owner HttpOnly device session", 30_000);
+    await page.goto(`${previewUrl}/#/admin`, { waitUntil: "domcontentloaded" });
+    await page.locator("[data-dd011b-security-admin]").waitFor({ timeout: 30_000 });
+  });
 }
 
 async function assertStaffRpcAllowed(page, label) {
@@ -715,18 +714,49 @@ function trackErrors(page, label) {
       const entry = { page: label, phase: sanitize(page.__phase || "unknown"), text };
       page.__forbiddenConsoles.push(entry);
       console.log(`DD011B_CONSOLE_403_DIAG=${JSON.stringify(entry)}`);
+      return;
     }
     page.__errors.push(`console:${text}`);
   });
 }
 
 function assertNoPageErrors(...pages) {
-  const failures = pages.flatMap((page) => (page.__errors || []).map((error) => `${page.__label}:${error}`));
+  const classified = [];
+  const unclassified403 = [];
+  for (const page of pages) {
+    for (const entry of page.__forbiddenConsoles || []) {
+      if (isExpectedDeviceSessionProbe(page, entry)) classified.push(entry);
+      else unclassified403.push(`${page.__label}:console:${entry.text}`);
+    }
+  }
+  if (classified.length) console.log(`DD011B_EXPECTED_403_CONSOLE_DIAG=${JSON.stringify(classified)}`);
+
+  const failures = [
+    ...pages.flatMap((page) => (page.__errors || []).map((error) => `${page.__label}:${error}`)),
+    ...unclassified403
+  ];
   if (failures.length) {
     const diagnostics = pages.flatMap((page) => (page.__forbiddenResponses || []).map((entry) => entry));
     const consoles = pages.flatMap((page) => (page.__forbiddenConsoles || []).map((entry) => entry));
     throw new Error(`browser errors:\n${failures.join("\n")}\nHTTP_403_DIAGNOSTICS=${JSON.stringify(diagnostics)}\nCONSOLE_403_DIAGNOSTICS=${JSON.stringify(consoles)}`);
   }
+}
+
+function isExpectedDeviceSessionProbe(page, consoleEntry) {
+  const phase = String(consoleEntry?.phase || "");
+  if (!isExpectedDeviceSessionProbePhase(phase)) return false;
+  return (page.__forbiddenResponses || []).some((entry) => (
+    entry.phase === phase &&
+    entry.method === "POST" &&
+    entry.status === 403 &&
+    entry.path === "/api/staff-rpc" &&
+    entry.reason === "DEVICE_SESSION_REQUIRED"
+  ));
+}
+
+function isExpectedDeviceSessionProbePhase(phase) {
+  return /^auth-gate:login:(ADMIN|CASHIER)$/.test(String(phase || "")) ||
+    /^owner-bootstrap:(enroll-totp|device)$/.test(String(phase || ""));
 }
 
 function safeResponseUrl(value) {
