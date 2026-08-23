@@ -83,3 +83,13 @@ test("DD011B loaded security surfaces never persist legacy device credential", (
     assert.equal(source.includes(`setItem('${LEGACY_DEVICE_CREDENTIAL_KEY}'`), false, file);
   }
 });
+
+test("DD011B Owner Security checks identity before calling Owner-only snapshot", () => {
+  const source = readFileSync(new URL("../src/shared/backend/security-admin-v2-ui.js", import.meta.url), "utf8");
+  const statusCall = source.indexOf("await api.status()");
+  const snapshotCall = source.indexOf("await api.securitySnapshot()");
+  assert.ok(statusCall >= 0, "Owner Security must query general security status first");
+  assert.ok(snapshotCall > statusCall, "Owner-only snapshot must run only after status/Owner check");
+  assert.match(source, /state\.isOwner = status\.isOwner === true/);
+  assert.match(source, /if \(!state\.isOwner\) \{[\s\S]*?state\.snapshot = null;[\s\S]*?return;/);
+});

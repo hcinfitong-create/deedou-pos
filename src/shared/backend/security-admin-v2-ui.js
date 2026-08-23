@@ -1,7 +1,7 @@
 import { createSecurityV2Api } from "./security-v2-api.js";
 
 const api = createSecurityV2Api();
-const state = { loading: false, snapshot: null, message: "" };
+const state = { loading: false, isOwner: null, snapshot: null, message: "" };
 let scheduled = false;
 
 const root = document.getElementById("app");
@@ -20,6 +20,12 @@ function isAdminRoute() {
   return location.hash.replace(/^#\/?/, "").split("/").filter(Boolean)[0] === "admin";
 }
 
+function resetOwnerState() {
+  state.isOwner = null;
+  state.snapshot = null;
+  state.message = "";
+}
+
 function schedule() {
   if (scheduled) return;
   scheduled = true;
@@ -33,10 +39,16 @@ function ensure() {
   const existing = document.querySelector("[data-dd011b-security-admin]");
   if (!isAdminRoute()) {
     existing?.remove();
+    resetOwnerState();
     return;
   }
   const page = document.querySelector("#app .admin-page") || document.querySelector("#app .page");
   if (!page || page.querySelector("[data-auth-login]")) {
+    existing?.remove();
+    resetOwnerState();
+    return;
+  }
+  if (state.isOwner === false) {
     existing?.remove();
     return;
   }
@@ -157,6 +169,21 @@ async function refresh() {
   state.loading = true;
   schedule();
   try {
+    const status = await api.status();
+    if (!status.ok) {
+      state.isOwner = null;
+      state.snapshot = null;
+      state.message = status.reason;
+      return;
+    }
+
+    state.isOwner = status.isOwner === true;
+    if (!state.isOwner) {
+      state.snapshot = null;
+      state.message = "";
+      return;
+    }
+
     const result = await api.securitySnapshot();
     state.snapshot = result.ok ? result : null;
     state.message = result.ok ? "Security state loaded from backend." : result.reason;
