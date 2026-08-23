@@ -36,12 +36,12 @@ begin
   end if;
 
   if not exists (
-    select 1 from public.staff_location_assignments
-    where staff_profile_id = p_target_staff_profile_id and location_id = p_location_id
+    select 1 from public.staff_location_assignments sla
+    where sla.staff_profile_id = p_target_staff_profile_id and sla.location_id = p_location_id
   ) then
     return query select false, 'TARGET_LOCATION_DENIED'; return;
   end if;
-  if not exists (select 1 from public.roles where id = p_role_id) then
+  if not exists (select 1 from public.roles r where r.id = p_role_id) then
     return query select false, 'ROLE_NOT_FOUND'; return;
   end if;
 
@@ -98,8 +98,9 @@ begin
   if v_target_auth is null then return query select false,'TARGET_STAFF_NOT_FOUND'; return; end if;
 
   if p_active=false then
-    update public.workstation_device_sessions set active=false,revoked_at=now()
-    where auth_user_id=v_target_auth and active=true;
+    update public.workstation_device_sessions s
+    set active=false,revoked_at=now()
+    where s.auth_user_id=v_target_auth and s.active=true;
   end if;
 
   perform public.dd008c_write_audit(
@@ -153,8 +154,8 @@ begin
     'register_workstation_device','workstation_device',v_device_id,'REGISTERED',
     jsonb_build_object('mode',p_mode,'backendManaged',true)
   );
-  select coalesce(backend_device_sessions_required,false) into v_required
-  from public.dd011b_security_policy where singleton=true;
+  select coalesce(policy.backend_device_sessions_required,false) into v_required
+  from public.dd011b_security_policy policy where policy.singleton=true;
   return query select true,'',v_device_id,case when v_required then '' else v_credential end;
 end
 $$;
@@ -183,24 +184,26 @@ begin
   if p_device_id=v_owner.device_id then return query select false,'CURRENT_DEVICE_ROTATE_BLOCKED','',''; return; end if;
 
   v_credential:=public.generate_device_credential();
-  update public.workstation_devices
+  update public.workstation_devices d
   set credential_hash=public.hash_device_credential(v_credential),active=true,rotated_at=now(),revoked_at=null,
       last_seen_at=null,last_used_by_staff_profile_id=null,use_count=0
-  where id=p_device_id and location_id=p_location_id;
+  where d.id=p_device_id and d.location_id=p_location_id;
   if not found then return query select false,'DEVICE_NOT_FOUND','',''; return; end if;
 
   insert into public.workstation_device_secrets(device_id,credential,rotated_at) values(p_device_id,v_credential,now())
   on conflict on constraint workstation_device_secrets_pkey do update
   set credential=excluded.credential,rotated_at=now();
-  update public.workstation_device_sessions set active=false,revoked_at=now() where device_id=p_device_id and active=true;
+  update public.workstation_device_sessions s
+  set active=false,revoked_at=now()
+  where s.device_id=p_device_id and s.active=true;
 
   perform public.dd008c_write_audit(
     p_location_id,'STAFF',v_owner.staff_profile_id,v_owner.staff_profile_id,v_owner.device_id,
     'dd011_rotate_workstation_device','workstation_device',p_device_id,'ROTATED',
     jsonb_build_object('backendManaged',true)
   );
-  select coalesce(backend_device_sessions_required,false) into v_required
-  from public.dd011b_security_policy where singleton=true;
+  select coalesce(policy.backend_device_sessions_required,false) into v_required
+  from public.dd011b_security_policy policy where policy.singleton=true;
   return query select true,'',p_device_id,case when v_required then '' else v_credential end;
 end
 $$;
@@ -242,13 +245,13 @@ begin
 
   if v_request.status<>'APPROVED' then return query select false,'ACTIVATION_NOT_APPROVED','','',''; return; end if;
   if v_request.expires_at<=now() then
-    update public.staff_activation_requests set status='EXPIRED' where id=v_request.id;
+    update public.staff_activation_requests ar set status='EXPIRED' where ar.id=v_request.id;
     return query select false,'ACTIVATION_EXPIRED','','',''; return;
   end if;
 
-  if not exists(select 1 from public.staff_profiles where id=v_staff_id and active=true)
-     or not exists(select 1 from public.staff_location_assignments where staff_profile_id=v_staff_id and location_id=v_request.location_id and active=true)
-     or not exists(select 1 from public.staff_role_assignments where staff_profile_id=v_staff_id and location_id=v_request.location_id and role_id=v_request.role_id and active=true) then
+  if not exists(select 1 from public.staff_profiles sp where sp.id=v_staff_id and sp.active=true)
+     or not exists(select 1 from public.staff_location_assignments sla where sla.staff_profile_id=v_staff_id and sla.location_id=v_request.location_id and sla.active=true)
+     or not exists(select 1 from public.staff_role_assignments sra where sra.staff_profile_id=v_staff_id and sra.location_id=v_request.location_id and sra.role_id=v_request.role_id and sra.active=true) then
     return query select false,'STAFF_NOT_ACTIVE','','',''; return;
   end if;
 
@@ -259,7 +262,7 @@ begin
   insert into public.workstation_device_secrets(device_id,credential) values(v_device_id,v_credential);
   insert into public.workstation_device_sessions(device_id,auth_user_id,session_token_hash,expires_at)
   values(v_device_id,p_auth_user_id,p_session_token_hash,p_session_expires_at);
-  update public.staff_activation_requests set status='COMPLETED',completed_at=now(),device_id=v_device_id where id=v_request.id;
+  update public.staff_activation_requests ar set status='COMPLETED',completed_at=now(),device_id=v_device_id where ar.id=v_request.id;
 
   perform public.dd008c_write_audit(
     v_request.location_id,'STAFF',v_staff_id,v_staff_id,v_device_id,
