@@ -93,7 +93,7 @@ function render(panel) {
       <div class="order-head"><div><strong>Create staff account</strong><div class="muted">Name là tên hiển thị; username là định danh đăng nhập duy nhất.</div></div></div>
       <form class="dd011-inline-form" data-dd011b-create-staff>
         <input name="displayName" placeholder="Nguyễn Minh Hiếu" required />
-        <input name="username" placeholder="hieustaff1" pattern="[a-zA-Z0-9][a-zA-Z0-9_-]{2,31}" autocomplete="off" required />
+        <input name="username" placeholder="hieustaff1" pattern="[a-zA-Z0-9][a-zA-Z0-9_\\-]{2,31}" autocomplete="off" required />
         <input name="password" type="password" minlength="10" autocomplete="new-password" placeholder="Temporary password" required />
         <select name="roleId" required>${roleOptions}</select>
         <button class="primary" type="submit">Create pending staff</button>

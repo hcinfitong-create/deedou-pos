@@ -30,6 +30,24 @@ test("DD011B normalizes unique staff username into internal Auth email", () => {
   assert.equal(loginEmailForIdentifier("owner@example.com"), "owner@example.com");
 });
 
+test("DD011B Owner Security username pattern is valid under Chromium v regex semantics", () => {
+  const source = readFileSync(new URL("../src/shared/backend/security-admin-v2-ui.js", import.meta.url), "utf8");
+  const match = source.match(/<input name="username"[^>]*pattern="([^"]+)"/);
+  assert.ok(match, "username input pattern must be present");
+  assert.equal(match[1], String.raw`[a-zA-Z0-9][a-zA-Z0-9_\\-]{2,31}`);
+
+  const renderedPattern = match[1].replace(/\\\\/g, "\\");
+  assert.equal(renderedPattern, String.raw`[a-zA-Z0-9][a-zA-Z0-9_\-]{2,31}`);
+  const browserPattern = new RegExp(`^(?:${renderedPattern})$`, "v");
+
+  for (const value of ["abc", "a_b", "a-b", "A1_", "a".repeat(32)]) {
+    assert.equal(browserPattern.test(value), true, `${value} should be accepted by browser username pattern`);
+  }
+  for (const value of ["ab", "a".repeat(33), "_ab", "-ab", "a.b", "a b"]) {
+    assert.equal(browserPattern.test(value), false, `${value} should be rejected by browser username pattern`);
+  }
+});
+
 test("DD011B device session cookie is JS-inaccessible and strict same-origin", () => {
   const cookie = secureCookie(DEVICE_SESSION_COOKIE, "secret", 300);
   assert.match(cookie, /^__Host-deedou_device_session=/);
@@ -165,6 +183,20 @@ test("DD011B hosted acceptance uses backend-managed device sessions without JS-r
   assert.match(source, /disableStaffThroughOwnerUi/);
   assert.doesNotMatch(source, /setItem\(["']deedou_device_credential["']/);
   assert.doesNotMatch(source, /sessionStorage\.setItem\(["']deedou_device_credential["']/);
+});
+
+test("DD011B hosted acceptance scopes intentional HTTP 403 browser console errors", () => {
+  const source = readFileSync(new URL("../scripts/dd011b-preview-hosted-smoke.mjs", import.meta.url), "utf8");
+
+  assert.match(source, /withExpectedForbiddenDenial/);
+  assert.match(source, /path: "\/api\/security-admin"[\s\S]*reason: "SINGLE_OWNER_ENFORCED"/);
+  assert.match(source, /path: "\/api\/staff-rpc"[\s\S]*reason: expectedReason/);
+  assert.match(source, /assert\(result\.path === scope\.path/);
+  assert.match(source, /assert\(result\.status === 403/);
+  assert.match(source, /isExpectedForbiddenConsoleText\(text\) && consumeExpectedForbiddenConsole\(page\)/);
+  assert.match(source, /page\.on\("pageerror", \(error\) => page\.__errors\.push/);
+  assert.doesNotMatch(source, /includes\(["']403["']\)/);
+  assert.doesNotMatch(source, /message\.text\(\)\.includes/);
 });
 
 test("DD011B hosted bootstrap source remains enabled and narrowly GitHub OIDC scoped", () => {

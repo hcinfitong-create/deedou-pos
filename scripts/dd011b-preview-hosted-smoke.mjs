@@ -236,15 +236,62 @@ async function approveActivationAndWaitForDevice({ ownerPage, staffPage, staffCo
 }
 
 async function assertSingleOwnerInvariant(page) {
-  const result = await securityAdminPostFromPage(page, {
-    action: "createStaff",
-    displayName: "Invalid Second Owner",
-    username: `${staffAccount.username}_owner`.slice(0, 31),
-    password: staffAccount.password,
-    roleId: "OWNER",
-    locationId
-  });
+  const result = await withExpectedForbiddenDenial(page, {
+    label: "second OWNER create",
+    path: "/api/security-admin",
+    reason: "SINGLE_OWNER_ENFORCED"
+  }, () => securityAdminPostFromPage(page, {
+      action: "createStaff",
+      displayName: "Invalid Second Owner",
+      username: `${staffAccount.username}_owner`.slice(0, 31),
+      password: staffAccount.password,
+      roleId: "OWNER",
+      locationId
+    })
+  );
   assert(result.status === 403 && result.body?.reason === "SINGLE_OWNER_ENFORCED", `second OWNER create was not denied: ${JSON.stringify(result)}`);
+}
+
+async function withExpectedForbiddenDenial(page, expected, operation) {
+  const scope = {
+    label: String(expected.label || "expected denial"),
+    path: String(expected.path || ""),
+    reason: String(expected.reason || ""),
+    consoleCount: 0
+  };
+  page.__expectedForbiddenScopes ||= [];
+  page.__expectedForbiddenScopes.push(scope);
+  try {
+    const result = await operation();
+    const reason = denialReason(result);
+    assert(result.path === scope.path, `${scope.label} expected ${scope.path}, got ${result.path || "NO_PATH"}`);
+    assert(result.status === 403, `${scope.label} expected HTTP 403: ${JSON.stringify(safeRpc(result))}`);
+    assert(reason === scope.reason, `${scope.label} expected ${scope.reason}, got ${reason || "NO_REASON"}`);
+    await page.waitForTimeout(150).catch(() => {});
+    return result;
+  } finally {
+    const scopes = page.__expectedForbiddenScopes || [];
+    const index = scopes.lastIndexOf(scope);
+    if (index >= 0) scopes.splice(index, 1);
+  }
+}
+
+function denialReason(result = {}) {
+  return String(result.body?.reason || result.body?.message || result.row?.reason || "");
+}
+
+function isExpectedForbiddenConsoleText(text) {
+  return /^Failed to load resource: the server responded with a status of 403(?: \((?:Forbidden)?\))?$/.test(String(text || ""));
+}
+
+function consumeExpectedForbiddenConsole(page) {
+  const scopes = page.__expectedForbiddenScopes || [];
+  const scope = scopes[scopes.length - 1];
+  if (!scope) return false;
+  scope.consoleCount += 1;
+  page.__expectedForbiddenConsoles ||= [];
+  page.__expectedForbiddenConsoles.push({ label: scope.label, path: scope.path, reason: scope.reason });
+  return true;
 }
 
 async function revokeDeviceThroughOwnerUi(page, deviceId) {
@@ -359,14 +406,19 @@ async function assertStaffRpcAllowed(page, label) {
 }
 
 async function assertStaffRpcDenied(page, expectedReason, label) {
-  const result = await staffRpcFromPage(page, "authorize_staff_access", {
-    p_location_id: locationId,
-    p_permission_key: "payments.record",
-    p_workstation_mode: "CASHIER",
-    p_device_credential: ""
-  });
+  const result = await withExpectedForbiddenDenial(page, {
+    label,
+    path: "/api/staff-rpc",
+    reason: expectedReason
+  }, () => staffRpcFromPage(page, "authorize_staff_access", {
+      p_location_id: locationId,
+      p_permission_key: "payments.record",
+      p_workstation_mode: "CASHIER",
+      p_device_credential: ""
+    })
+  );
   const reason = String(result.body?.message || result.row?.reason || "");
-  assert(result.status === 403 || result.row?.ok === false, `${label} should be denied: ${JSON.stringify(safeRpc(result))}`);
+  assert(result.status === 403, `${label} should be denied: ${JSON.stringify(safeRpc(result))}`);
   assert(reason === expectedReason, `${label} expected ${expectedReason}, got ${reason || "NO_REASON"}`);
 }
 
@@ -398,7 +450,7 @@ async function staffRpcFromPage(page, functionName, params) {
     });
     const body = await response.json().catch(() => ({}));
     const row = Array.isArray(body) ? body[0] : body;
-    return { status: response.status, body, row };
+    return { status: response.status, body, row, path: "/api/staff-rpc", functionName };
   }, { functionName, params });
 }
 
@@ -411,7 +463,7 @@ async function securityPostFromPage(page, path, payload) {
       headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
       body: JSON.stringify(payload)
     });
-    return { status: response.status, body: await response.json().catch(() => ({})) };
+    return { status: response.status, body: await response.json().catch(() => ({})), path };
   }, { path, payload });
 }
 
@@ -613,9 +665,14 @@ function bypassHeaders() {
 function trackErrors(page, label) {
   page.__label = label;
   page.__errors = [];
+  page.__expectedForbiddenScopes = [];
+  page.__expectedForbiddenConsoles = [];
   page.on("pageerror", (error) => page.__errors.push(`pageerror:${sanitize(error?.message || error)}`));
   page.on("console", (message) => {
-    if (message.type() === "error") page.__errors.push(`console:${sanitize(message.text())}`);
+    if (message.type() !== "error") return;
+    const text = sanitize(message.text());
+    if (isExpectedForbiddenConsoleText(text) && consumeExpectedForbiddenConsole(page)) return;
+    page.__errors.push(`console:${text}`);
   });
 }
 
