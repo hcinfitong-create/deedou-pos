@@ -14,7 +14,10 @@ let pollTimer = null;
 
 const root = document.getElementById("app");
 if (root && "MutationObserver" in window) {
-  new MutationObserver(scheduleEnsure).observe(root, { childList: true, subtree: true });
+  new MutationObserver((mutations) => {
+    const hasExternalMutation = mutations.some(({ target }) => !target.closest?.("[data-dd011b-bootstrap]"));
+    if (hasExternalMutation) scheduleEnsure();
+  }).observe(root, { childList: true, subtree: true });
 }
 document.addEventListener("click", handleClick);
 document.addEventListener("submit", handleSubmit);
