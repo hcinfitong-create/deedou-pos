@@ -110,6 +110,7 @@ function installPlaywrightFixtureBridge() {
 async function handleApiRequest(request, response, handler) {
   adaptNodeResponse(response);
   request.body = await readJsonBody(request);
+  installSafeAdminDiagnostics(request, response);
   await attachBackendManagedFixtureSession(request);
   await handler(request, response);
 }
@@ -148,10 +149,16 @@ async function createFixtureSession(caller, fixture) {
   const resolved = firstRow(data) || {};
   if (error || !resolved.device_id) {
     fixture.authorizationDenied = !error && !resolved.device_id;
+    if (fixture.workstationMode === "ADMIN") {
+      console.log(`[DD011B smoke] ADMIN device context unresolved: ${safeDiagnosticReason(error?.code || error?.message || "NO_DEVICE_CONTEXT")}`);
+    }
     return "";
   }
 
   fixture.authorizationDenied = false;
+  if (fixture.workstationMode === "ADMIN") {
+    console.log(`[DD011B smoke] ADMIN device context resolved: ${safeDiagnosticReason(resolved.device_id)}`);
+  }
   const { error: secretError } = await caller.serviceClient
     .from("workstation_device_secrets")
     .upsert({
@@ -172,7 +179,29 @@ async function createFixtureSession(caller, fixture) {
       expires_at: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
     });
   if (sessionError) throw new Error(`fixture device session insert failed: ${sessionError.message}`);
+  if (fixture.workstationMode === "ADMIN") console.log("[DD011B smoke] ADMIN backend device session created");
   return token;
+}
+
+function installSafeAdminDiagnostics(request, response) {
+  const fixture = fixtureContexts.get(readCookie(request, TEST_CONTEXT_COOKIE));
+  if (fixture?.workstationMode !== "ADMIN") return;
+  const pathname = safePathname(request?.url);
+  const action = pathname === "/api/staff-rpc"
+    ? String(request.body?.functionName || "unknown-rpc")
+    : String(request.body?.action || "status");
+  const originalJson = response.json.bind(response);
+  response.json = (body) => {
+    const outcome = body?.ok === true ? "OK" : safeDiagnosticReason(body?.reason || "DENIED");
+    console.log(`[DD011B smoke] ADMIN ${pathname} ${safeDiagnosticReason(action)} -> ${response.statusCode || 200} ${outcome}`);
+    return originalJson(body);
+  };
+}
+
+function safeDiagnosticReason(value) {
+  return String(value || "")
+    .replace(/[^A-Za-z0-9_.:-]+/g, "_")
+    .slice(0, 120);
 }
 
 function isIntentionalAuthorizationDenialConsole(message) {
