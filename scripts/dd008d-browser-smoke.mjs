@@ -9,7 +9,7 @@ import { createClient } from "@supabase/supabase-js";
 const LOCATION_ID = "deedou-demo";
 const BASE_URL = "http://127.0.0.1:8099";
 const DB_URL = process.env.DB_URL || "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
-const statusEnv = parseEnvOutput(execFileSync("npx", ["supabase", "status", "-o", "env"], { encoding: "utf8" }));
+const statusEnv = parseEnvOutput(execFileSync("npx", ["supabase", "status", "-o", "env"], { encoding: "utf8", timeout: 30_000 }));
 const apiUrl = statusEnv.API_URL || statusEnv.SUPABASE_URL || "http://127.0.0.1:54321";
 const anonKey = statusEnv.ANON_KEY || statusEnv.SUPABASE_ANON_KEY;
 const serviceRoleKey = statusEnv.SERVICE_ROLE_KEY || statusEnv.SUPABASE_SERVICE_ROLE_KEY;
@@ -560,11 +560,23 @@ function classifyError(error) {
 }
 
 function psql(statement) {
-  return execFileSync("psql", [DB_URL, "-v", "ON_ERROR_STOP=1", "-c", statement], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return runPsql(["-v", "ON_ERROR_STOP=1", "-c", statement]);
 }
 
 function psqlScalar(statement) {
-  return execFileSync("psql", [DB_URL, "-v", "ON_ERROR_STOP=1", "-Atc", statement], { encoding: "utf8" }).trim();
+  return runPsql(["-v", "ON_ERROR_STOP=1", "-Atc", statement]).trim();
+}
+
+function runPsql(args) {
+  try {
+    return execFileSync("psql", [DB_URL, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 20_000
+    });
+  } catch (error) {
+    throw new Error(`psql failed during ${sanitize(smokePhase)}: ${sanitize(error?.stderr?.toString?.() || error?.message || error)}`);
+  }
 }
 
 async function startStaticServer() {

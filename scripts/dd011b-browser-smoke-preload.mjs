@@ -28,7 +28,7 @@ installLocalApiInterceptor();
 installPlaywrightFixtureBridge();
 
 function configureLocalSupabaseEnv() {
-  const statusEnv = parseEnvOutput(execFileSync("npx", ["supabase", "status", "-o", "env"], { encoding: "utf8" }));
+  const statusEnv = parseEnvOutput(execFileSync("npx", ["supabase", "status", "-o", "env"], { encoding: "utf8", timeout: 30_000 }));
   const apiUrl = statusEnv.API_URL || statusEnv.SUPABASE_URL || "http://127.0.0.1:54321";
   const publishableKey = statusEnv.ANON_KEY || statusEnv.SUPABASE_ANON_KEY || "";
   const serviceRoleKey = statusEnv.SERVICE_ROLE_KEY || statusEnv.SUPABASE_SERVICE_ROLE_KEY || "";
