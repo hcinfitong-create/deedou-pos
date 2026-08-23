@@ -825,7 +825,7 @@ function supabaseLoadingPage(routeName) {
   const staffContext = staffAuthState.staffContext?.find((row) => row.locationId === staffAuthState.locationId) || staffAuthState.staffContext?.[0];
   return `
     <section class="page admin-page">
-      <div class="panel section-pad auth-gate">
+      <div class="panel section-pad supabase-authorized-panel">
         <div class="order-head">
           <div>
             <div class="kicker">SUPABASE MODE</div>
@@ -852,7 +852,7 @@ function bindSupabaseReadOnlyRoute() {}
 function supabaseAdminDeferredPage() {
   return `
     <section class="page admin-page">
-      <div class="panel section-pad auth-gate">
+      <div class="panel section-pad supabase-authorized-panel">
         <div class="kicker">SUPABASE MODE</div>
         <h1>Admin DeeDou</h1>
         <p class="muted">Menu/admin mutation RPCs are deferred; localStorage admin changes are disabled in SUPABASE mode.</p>
