@@ -92,8 +92,17 @@ try {
   await create.locator('[data-dd012-create="stationCode"]').fill("KITCHEN");
   await create.locator('[data-dd012-create="descVi"]').fill("DD-012C hosted component acceptance");
   await create.locator('[data-dd012-create="descEn"]').fill("DD-012C hosted component acceptance");
-  await create.locator("[data-dd012-create-product]").click();
-  await catalog.locator(`[data-dd012-product="${productId}"]`).waitFor({ timeout: 30_000 });
+  const createRpcPromise = waitForStaffRpcResponse(adminPage, "dd012_create_product", 15_000);
+  await withPagePhase(adminPage, "admin:create-product", () => create.locator("[data-dd012-create-product]").click());
+  const createRpc = await createRpcPromise;
+  await logProductCreateDiagnostics(adminPage, catalog, productId, createRpc, "after-click");
+  try {
+    await catalog.locator(`[data-dd012-product="${productId}"]`).waitFor({ timeout: 30_000 });
+  } catch (error) {
+    const failureDiagnostic = await logProductCreateDiagnostics(adminPage, catalog, productId, createRpc, "row-timeout");
+    console.log(`DD012C_PRODUCT_CREATE_CLASSIFICATION=${JSON.stringify(classifyProductCreateFailure(failureDiagnostic))}`);
+    throw new Error(`product create card missing after create click: ${sanitize(error?.message || error)}`);
+  }
   console.log("DD012C_PREVIEW_PRODUCT_CREATE=PASS");
 
   const directWrite = await ownerClient.from("product_components").insert({
@@ -237,6 +246,235 @@ async function previewContext() {
   const context = await browser.newContext({ timezoneId: "Asia/Ho_Chi_Minh" });
   await context.route(`${previewUrl}/**`, async (route) => route.continue({ headers: { ...route.request().headers(), ...bypassHeaders() } }));
   return context;
+}
+
+async function waitForStaffRpcResponse(page, functionName, timeout = 15_000) {
+  try {
+    const response = await page.waitForResponse((candidate) => {
+      if (candidate.request().method() !== "POST") return false;
+      const url = safeUrl(candidate.url());
+      if (url?.pathname !== "/api/staff-rpc") return false;
+      const body = parseJson(candidate.request().postData() || "{}");
+      return body?.functionName === functionName;
+    }, { timeout });
+    return await safeStaffRpcResponse(response);
+  } catch (error) {
+    return { seen: false, error: sanitize(error?.message || error) };
+  }
+}
+
+async function logProductCreateDiagnostics(page, catalog, expectedProductId, createRpc, label) {
+  const [ui, security, storage, bootstrap] = await Promise.all([
+    productCreateUiState(page, catalog, expectedProductId).catch((error) => ({ error: sanitize(error?.message || error) })),
+    securityStatusFromPage(page).then(safeStatus).catch((error) => ({ ok: false, reason: sanitize(error?.message || error) })),
+    browserDeviceCredentialState(page),
+    callBootstrap("diagnose", { runId, locationId }).catch((error) => ({ ok: false, reason: sanitize(error?.message || error), diagnostic: {} }))
+  ]);
+  const diagnostic = {
+    label,
+    productId: expectedProductId,
+    ui,
+    staffRpc: createRpc,
+    bootstrap: safeBootstrapDiagnostic(bootstrap),
+    authority: security,
+    browserStorage: storage
+  };
+  const productExistsByCount = Number(bootstrap?.diagnostic?.products || 0) > 0;
+  const commandSucceeded = createRpc?.body?.ok === true;
+  if (productExistsByCount || commandSucceeded) {
+    diagnostic.menuSnapshot = await adminMenuSnapshotFromPage(page, expectedProductId);
+  }
+  console.log(`DD012C_PRODUCT_CREATE_DIAG=${JSON.stringify(diagnostic)}`);
+  return diagnostic;
+}
+
+async function productCreateUiState(page, catalog, expectedProductId) {
+  const [visible, browserState] = await Promise.all([
+    catalog.locator(`[data-dd012-product="${expectedProductId}"]`).isVisible().catch(() => false),
+    page.evaluate((productId) => {
+      const message = document.querySelector("[data-dd008d-admin-message]")?.textContent?.trim?.() || "";
+      const cards = [...document.querySelectorAll("[data-dd012-product]")];
+      const product = cards.find((element) => element.getAttribute("data-dd012-product") === productId);
+      return {
+        message,
+        createFormMounted: Boolean(document.querySelector("[data-dd012-create-form]")),
+        productCardMounted: Boolean(product),
+        productCardText: product?.textContent?.trim?.().slice(0, 240) || "",
+        productCardCount: cards.length
+      };
+    }, expectedProductId)
+  ]);
+  return {
+    message: sanitizePanelText(browserState.message),
+    createFormMounted: browserState.createFormMounted === true,
+    productCardMounted: browserState.productCardMounted === true,
+    productCardVisible: visible === true,
+    productCardCount: Number(browserState.productCardCount || 0),
+    productCardText: sanitizePanelText(browserState.productCardText)
+  };
+}
+
+async function browserDeviceCredentialState(page) {
+  return page.evaluate(() => ({
+    hasLocalDeviceCredential: localStorage.getItem("deedou_device_credential") !== null,
+    hasSessionDeviceCredential: sessionStorage.getItem("deedou_device_credential") !== null
+  })).catch((error) => ({ error: sanitize(error?.message || error) }));
+}
+
+async function adminMenuSnapshotFromPage(page, expectedProductId) {
+  const raw = await withPagePhase(page, "admin:create-product:snapshot", () => page.evaluate(async ({ locationId, productId }) => {
+    const token = JSON.parse(localStorage.getItem("deedou_supabase_auth_session") || "{}")?.access_token || "";
+    const response = await fetch("/api/staff-rpc", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        functionName: "dd008d_get_admin_menu_snapshot",
+        params: {
+          p_location_id: locationId,
+          p_workstation_mode: "ADMIN",
+          p_device_credential: ""
+        }
+      })
+    });
+    return { status: response.status, text: await response.text(), productId };
+  }, { locationId, productId: expectedProductId })).catch((error) => ({ error: sanitize(error?.message || error) }));
+  if (raw.error) return raw;
+  return safeMenuSnapshot(raw.status, raw.text, raw.productId);
+}
+
+async function safeStaffRpcResponse(response) {
+  const requestBody = parseJson(response.request().postData() || "{}") || {};
+  const params = object(requestBody.params);
+  const text = await response.text().catch(() => "");
+  return {
+    seen: true,
+    status: response.status(),
+    request: {
+      functionName: sanitize(requestBody.functionName),
+      locationId: sanitize(params.p_location_id),
+      workstationMode: sanitize(params.p_workstation_mode),
+      productId: sanitize(params.p_product_id)
+    },
+    body: safeRpcBody(text)
+  };
+}
+
+function safeRpcBody(textValue) {
+  const parsed = parseJson(textValue);
+  const row = Array.isArray(parsed) ? parsed[0] : object(parsed);
+  const product = object(object(row.payload).product);
+  return {
+    ok: row.ok === true,
+    category: sanitize(row.category || row.code || ""),
+    reason: sanitize(row.reason || row.message || ""),
+    entityType: sanitize(row.entity_type || row.entityType || ""),
+    entityId: sanitize(row.entity_id || row.entityId || ""),
+    version: row.version ?? null,
+    product: product.id ? {
+      id: sanitize(product.id),
+      kind: sanitize(product.kind),
+      category: sanitize(product.category),
+      stationCode: sanitize(product.stationCode || product.station_code),
+      priceVnd: Number(product.priceVnd ?? product.price_vnd ?? 0)
+    } : null
+  };
+}
+
+function safeMenuSnapshot(status, textValue, expectedProductId) {
+  const body = safeRpcBody(textValue);
+  const parsed = parseJson(textValue);
+  const row = Array.isArray(parsed) ? parsed[0] : object(parsed);
+  const products = Array.isArray(object(row.payload).products) ? object(row.payload).products : [];
+  const expectedProduct = products.find((product) => product?.id === expectedProductId);
+  return {
+    status,
+    ok: body.ok,
+    category: body.category,
+    reason: body.reason,
+    productCount: products.length,
+    expectedProductReturned: Boolean(expectedProduct),
+    expectedProduct: expectedProduct ? {
+      id: sanitize(expectedProduct.id),
+      kind: sanitize(expectedProduct.kind),
+      category: sanitize(expectedProduct.category),
+      stationCode: sanitize(expectedProduct.stationCode || expectedProduct.station_code),
+      priceVnd: Number(expectedProduct.priceVnd ?? expectedProduct.price_vnd ?? 0)
+    } : null
+  };
+}
+
+function safeBootstrapDiagnostic(value = {}) {
+  const diagnostic = object(value.diagnostic);
+  return {
+    ok: value.ok === true,
+    reason: sanitize(value.reason || ""),
+    locations: Number(diagnostic.locations || 0),
+    tables: Number(diagnostic.tables || 0),
+    products: Number(diagnostic.products || 0),
+    components: Number(diagnostic.components || 0),
+    orders: Number(diagnostic.orders || 0),
+    orderLines: Number(diagnostic.orderLines || 0),
+    staffProfiles: Number(diagnostic.staffProfiles || 0),
+    staffLocations: Number(diagnostic.staffLocations || 0),
+    staffRoles: Number(diagnostic.staffRoles || 0),
+    devices: Number(diagnostic.devices || 0),
+    deviceSessions: Number(diagnostic.deviceSessions || 0),
+    audits: Number(diagnostic.audits || 0),
+    dedupe: Number(diagnostic.dedupe || 0),
+    refreshHints: Number(diagnostic.refreshHints || 0),
+    authUsers: Number(diagnostic.authUsers || 0),
+    expectedProductExistsByRunCount: Number(diagnostic.products || 0) > 0
+  };
+}
+
+function classifyProductCreateFailure(diagnostic = {}) {
+  const staffRpc = diagnostic.staffRpc || {};
+  const body = staffRpc.body || {};
+  const bootstrap = diagnostic.bootstrap || {};
+  const menuSnapshot = diagnostic.menuSnapshot || null;
+  let bucket = "another proven root cause";
+  let proof = "insufficient diagnostic signal";
+  if (!staffRpc.seen) {
+    bucket = "UI validation/form issue before command dispatch";
+    proof = "no /api/staff-rpc response for dd012_create_product was observed after clicking Create product";
+  } else if (Number(staffRpc.status || 0) >= 400 || ["FORBIDDEN", "UNAUTHENTICATED", "AUTH_REQUIRED", "DEVICE_SESSION_REQUIRED"].includes(body.category)) {
+    bucket = "/api/staff-rpc transport/security/context failure";
+    proof = `staff-rpc status=${staffRpc.status} category=${body.category || ""} reason=${body.reason || ""}`;
+  } else if (body.ok === false) {
+    bucket = "dd012_create_product command/business validation failure";
+    proof = `command returned ok=false category=${body.category || ""} reason=${body.reason || ""}`;
+  } else if (body.ok === true && bootstrap.products <= 0) {
+    bucket = "another proven root cause";
+    proof = "dd012_create_product returned ok=true but bootstrap diagnose found no run-scoped product";
+  } else if (bootstrap.products > 0 && menuSnapshot && (menuSnapshot.status >= 400 || menuSnapshot.ok === false || menuSnapshot.expectedProductReturned === false)) {
+    bucket = "DB create succeeds but authoritative menu snapshot/refresh does not include the product";
+    proof = `products=${bootstrap.products} snapshotStatus=${menuSnapshot.status} snapshotOk=${menuSnapshot.ok} expectedProductReturned=${menuSnapshot.expectedProductReturned}`;
+  } else if (bootstrap.products > 0 && menuSnapshot?.expectedProductReturned === true && diagnostic.ui?.productCardMounted !== true) {
+    bucket = "DB + snapshot are correct but Admin render/state/selector is wrong";
+    proof = "bootstrap and menu snapshot include the product, but Admin DOM product card is absent";
+  }
+  return { bucket, proof };
+}
+
+function safeUrl(value) {
+  try {
+    return new URL(String(value || ""));
+  } catch {
+    return null;
+  }
+}
+
+function parseJson(value) {
+  try {
+    return value ? JSON.parse(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+function object(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
 async function loginThroughGate(page, identifier, password, mode) {
