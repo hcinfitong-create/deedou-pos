@@ -29,6 +29,7 @@ const gitignore = readFileSync(new URL("../.gitignore", import.meta.url), "utf8"
 const ciWorkflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const supabaseConfig = readFileSync(new URL("../supabase/config.toml", import.meta.url), "utf8");
 const browserSmokeScript = readFileSync(new URL("../scripts/dd008b-browser-smoke.mjs", import.meta.url), "utf8");
+const dd008dBrowserSmokeScript = readFileSync(new URL("../scripts/dd008d-browser-smoke.mjs", import.meta.url), "utf8");
 const dd008cIntegrationScript = readFileSync(new URL("../scripts/dd008c-command-realtime.mjs", import.meta.url), "utf8");
 const appSource = readFileSync(new URL("../app.js", import.meta.url), "utf8");
 
@@ -279,6 +280,27 @@ test("DD-008C app routes authoritative commands instead of SUPABASE localStorage
   assert.doesNotMatch(appSource, /authoritativeBackendApi\.setOrderStatus\(\{\s*orderId,\s*status: "VOIDED"/);
   assert.match(appSource, /localStorage admin changes are disabled in SUPABASE mode/);
   assert.doesNotMatch(appSource, /server command not available until DD-008C/);
+});
+
+test("DD-011B stale order-version conflicts force a fresh authoritative snapshot", () => {
+  assert.match(appSource, /function isStaleVersionConflict\(result = \{\}\) \{\s*return result\?\.category === "CONFLICT" && result\?\.reason === "STALE_VERSION";\s*\}/);
+  assert.match(appSource, /if \(!result\?\.ok\) \{[\s\S]*?if \(isStaleVersionConflict\(result\)\) \{[\s\S]*?supabaseSnapshotLoaded = false;[\s\S]*?await ensureSupabaseOperationalState\(\{ force: true \}\);[\s\S]*?\} else \{[\s\S]*?render\(\);[\s\S]*?\}[\s\S]*?return false;/);
+  assert.match(appSource, /const expectedVersion = expectedOrderVersion\(order\);[\s\S]*?authoritativeBackendApi\.serveOrderLine\(\{[\s\S]*?expectedVersion,/);
+  assert.match(authoritativeMigrationSql, /if p_expected_version is not null and v_order\.version <> p_expected_version then\s*return query select \* from public\.dd008c_failure\('CONFLICT', 'STALE_VERSION'/i);
+});
+
+test("DD-011B coalesces forced snapshot refreshes instead of dropping realtime hints", () => {
+  assert.match(appSource, /let supabaseSnapshotRefreshPending = false;/);
+  assert.match(appSource, /if \(supabaseSnapshotLoading\) \{\s*if \(options\.force\) supabaseSnapshotRefreshPending = true;\s*return;\s*\}/);
+  assert.match(appSource, /do \{[\s\S]*?supabaseSnapshotRefreshPending = false;[\s\S]*?authoritativeBackendApi\.fetchStaffSnapshot[\s\S]*?if \(supabaseSnapshotRefreshPending\) supabaseSnapshotLoaded = false;[\s\S]*?\} while \(supabaseSnapshotRefreshPending/);
+  assert.match(appSource, /supabaseSnapshotRefreshPending = false;[\s\S]*supabaseSnapshotError = "";/);
+});
+
+test("DD-011B browser smoke waits for served progress instead of counting rejected serve clicks", () => {
+  assert.match(dd008dBrowserSmokeScript, /serveAllReadyForNote\(staffPage, note1, 2, \{ client: runtimeClients\.staff, spec: accounts\.staff, orderId: firstOrder\.id \}\)/);
+  assert.match(dd008dBrowserSmokeScript, /await waitForUiOrderVersion\(card, current\.version\);/);
+  assert.match(dd008dBrowserSmokeScript, /current = await serveProgressSnapshot\(options\.client, options\.spec, options\.orderId\);[\s\S]*return current\.servedQty > before\.servedQty \|\| current\.version > before\.version;/);
+  assert.doesNotMatch(dd008dBrowserSmokeScript, /await button\.click\(\);\s*served \+= 1;\s*await sleep\(100\);/);
 });
 
 test("all exposed backend tables enable RLS", () => {

@@ -130,6 +130,7 @@ test("staff order card renders escaped item content and valid action buttons", (
     zone: "Beach",
     time: "09:00",
     status: "PENDING_ACCEPTANCE",
+    version: 42,
     total: 52000,
     note: "<script>",
     stationStatus: { BAR_TEA: "QUEUED" },
@@ -155,6 +156,8 @@ test("staff order card renders escaped item content and valid action buttons", (
   });
 
   assert.match(html, /D01-0001 - Beach Table A01/);
+  assert.match(html, /data-order-id="order-1"/);
+  assert.match(html, /data-order-version="42"/);
   assert.match(html, /Table service/);
   assert.match(html, /Dine-in/);
   assert.match(html, /QR/);

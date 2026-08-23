@@ -181,7 +181,7 @@ try {
   await progressTicket(kitchenPage, note1, ["ACKNOWLEDGED", "PREPARING", "READY"]);
 
   markSmokePhase("serve first batch");
-  await serveAllReadyForNote(staffPage, note1, 2);
+  await serveAllReadyForNote(staffPage, note1, 2, { client: runtimeClients.staff, spec: accounts.staff, orderId: firstOrder.id });
   await waitOrderStatus(runtimeClients.cashier, firstOrder.id, "SERVED", accounts.cashier);
 
   // Second order batch must reuse the same active visit.
@@ -201,7 +201,7 @@ try {
   await secondStaffCard.waitFor({ timeout: 30_000 });
   await secondStaffCard.locator('button[data-status="ACCEPTED"]').click();
   await progressTicket(barPage, note2, ["ACKNOWLEDGED", "PREPARING", "READY"]);
-  await serveAllReadyForNote(staffPage, note2, 1);
+  await serveAllReadyForNote(staffPage, note2, 1, { client: runtimeClients.staff, spec: accounts.staff, orderId: secondOrder.id });
   await waitOrderStatus(runtimeClients.cashier, secondOrder.id, "SERVED", accounts.cashier);
 
   // Transfer the open visit A01 -> A02 through actual cashier UI.
@@ -528,17 +528,51 @@ async function progressTicket(page, note, statuses) {
   }
 }
 
-async function serveAllReadyForNote(page, note, expectedCount) {
-  let served = 0;
-  while (served < expectedCount) {
+async function serveAllReadyForNote(page, note, expectedCount, options = {}) {
+  assert(options.client && options.spec && options.orderId, "serve helper requires authoritative snapshot options");
+  const initial = await serveProgressSnapshot(options.client, options.spec, options.orderId);
+  const targetServed = initial.servedQty + expectedCount;
+  let current = initial;
+  while (current.servedQty < targetServed) {
     const card = page.locator(".order-card").filter({ hasText: note }).first();
     await card.waitFor({ timeout: 30_000 });
+    await waitForUiOrderVersion(card, current.version);
     const button = card.locator("[data-serve-line]").first();
     await button.waitFor({ timeout: 30_000 });
     await button.click();
-    served += 1;
-    await sleep(100);
+    const before = current;
+    await waitFor(async () => {
+      current = await serveProgressSnapshot(options.client, options.spec, options.orderId);
+      return current.servedQty > before.servedQty || current.version > before.version;
+    }, `${options.orderId} serve progress`, 30_000);
   }
+}
+
+async function waitForUiOrderVersion(card, serverVersion) {
+  await waitFor(async () => {
+    const uiVersion = Number(await card.getAttribute("data-order-version").catch(() => ""));
+    return Number.isSafeInteger(uiVersion) && uiVersion >= serverVersion;
+  }, `staff UI order version >= ${serverVersion}`, 30_000);
+}
+
+async function serveProgressSnapshot(client, spec, orderId) {
+  const snapshot = await staffSnapshot(client, spec);
+  const order = snapshot.orders.find((item) => item.id === orderId);
+  assert(order, `order missing while serving ${orderId}`);
+  const lines = serviceableLines(order);
+  return {
+    version: Number(order.version) || 0,
+    servedQty: lines.reduce((sum, line) => sum + Math.max(0, Number(line.servedQty || 0)), 0),
+    serviceableQty: lines.reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0)), 0),
+    readyLineIds: lines
+      .filter((line) => (line.prepStatus || line.status) === "READY" && Number(line.servedQty || 0) < Number(line.qty || 0))
+      .map((line) => line.lineId || line.id || "")
+      .filter(Boolean)
+  };
+}
+
+function serviceableLines(order = {}) {
+  return (Array.isArray(order.items) ? order.items : []).filter((line) => !line.isComponent && line.station !== "COMBO");
 }
 
 async function publicSnapshot(token) {

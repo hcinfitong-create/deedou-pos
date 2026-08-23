@@ -165,7 +165,7 @@ export function renderStaffOrderCard(order) {
   const serviceProgress = getServiceProgress(order);
   const readyLines = selectReadyToServeLines(order);
   return `
-    <article class="order-card">
+    <article class="order-card" data-order-id="${escapeAttr(order.id)}" data-order-version="${escapeAttr(order.version ?? "")}">
       <div class="order-head"><strong>${escapeHtml(order.orderNo)} - ${escapeHtml(orderContextLabel(context))}</strong><span class="muted">${escapeHtml(age || order.time || "")}</span></div>
       <div class="station-grid">
         <span class="status-pill"><span>Mode</span><strong>${escapeHtml(serviceModeLabel(context.serviceMode))}</strong></span>
