@@ -120,15 +120,12 @@ async function attachBackendManagedFixtureSession(request) {
   if (!fixture) return;
   if (readCookie(request, DEVICE_SESSION_COOKIE)) return;
 
-  const permission = requestedAuthorizationPermission(request);
-  if (!permission) return;
-
   const caller = await authenticatedCaller(request);
   if (!caller.ok) return;
 
   const key = `${contextId}:${caller.user.id}`;
   if (!sessionPromises.has(key)) {
-    sessionPromises.set(key, createFixtureSession(caller, fixture, permission));
+    sessionPromises.set(key, createFixtureSession(caller, fixture));
   }
   const token = await sessionPromises.get(key);
   if (!token) return;
@@ -137,16 +134,20 @@ async function attachBackendManagedFixtureSession(request) {
   request.headers.cookie = `${current}${current ? "; " : ""}${DEVICE_SESSION_COOKIE}=${encodeURIComponent(token)}`;
 }
 
-async function createFixtureSession(caller, fixture, permission) {
-  const { data, error } = await caller.userClient.rpc("authorize_staff_access", {
+async function createFixtureSession(caller, fixture) {
+  // Legacy DD-008 browser fixtures already provision a real registered device in
+  // PostgreSQL. Resolve that exact staff/location/device context through the
+  // existing authenticated contract; do not duplicate route permission policy in
+  // this test bridge. The production /api/staff-rpc handler remains responsible
+  // for permission and workstation authorization on each real request.
+  const { data, error } = await caller.userClient.rpc("get_my_staff_context", {
     p_location_id: fixture.locationId,
-    p_permission_key: permission,
     p_workstation_mode: fixture.workstationMode,
     p_device_credential: fixture.deviceCredential
   });
   const resolved = firstRow(data) || {};
-  if (error || resolved.ok !== true || !resolved.device_id) {
-    fixture.authorizationDenied = !error && resolved.ok === false;
+  if (error || !resolved.device_id) {
+    fixture.authorizationDenied = !error && !resolved.device_id;
     return "";
   }
 
@@ -172,14 +173,6 @@ async function createFixtureSession(caller, fixture, permission) {
     });
   if (sessionError) throw new Error(`fixture device session insert failed: ${sessionError.message}`);
   return token;
-}
-
-function requestedAuthorizationPermission(request) {
-  const body = request?.body;
-  if (!body || body.functionName !== "authorize_staff_access") return "";
-  const params = body.params;
-  if (!params || typeof params !== "object" || Array.isArray(params)) return "";
-  return String(params.p_permission_key || "").trim();
 }
 
 function isIntentionalAuthorizationDenialConsole(message) {
