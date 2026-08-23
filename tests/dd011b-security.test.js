@@ -11,6 +11,10 @@ import {
   staffLoginEmail
 } from "../api/_dd011b.js";
 import {
+  BACKEND_MODES,
+  createLegacyMigrationApi
+} from "../src/shared/backend/index.js";
+import {
   LEGACY_DEVICE_CREDENTIAL_KEY,
   loginEmailForIdentifier,
   shouldProxyStaffRpc,
@@ -59,6 +63,46 @@ test("DD011B proxies only RPCs carrying workstation proof", () => {
   assert.equal(shouldProxyStaffRpc(staffUrl, { p_current_device_credential: "" }), true);
   assert.equal(shouldProxyStaffRpc("https://example.supabase.co/rest/v1/rpc/submit_qr_order", { p_qr_token: "abc" }), false);
   assert.equal(rpcFunctionName(staffUrl), "authorize_staff_access");
+});
+
+test("DD011B migration adapter preserves empty browser credential for backend-managed device proxy", async () => {
+  const calls = [];
+  const api = createLegacyMigrationApi({
+    config: {
+      mode: BACKEND_MODES.SUPABASE,
+      supabaseUrl: "https://deedou-demo.supabase.co",
+      supabasePublishableKey: "sb_publishable_demo_key"
+    },
+    authApi: {
+      getClient: async () => ({
+        rpc: async (functionName, params) => {
+          calls.push({ functionName, params });
+          return {
+            data: [{ ok: true, category: "OK", payload: { preview: true } }],
+            error: null
+          };
+        }
+      })
+    },
+    deviceStorage: { getItem: () => "" },
+    authStateRef: () => ({
+      locationId: "deedou-demo",
+      authorization: { workstationMode: "ADMIN" }
+    })
+  });
+
+  const result = await api.preview({
+    bundle: { schemaVersion: 1, source: "DEEDOU_LOCAL_DEMO", locationId: "deedou-demo" },
+    importKey: "dd011b-preview"
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].functionName, "dd008d_preview_legacy_import");
+  assert.equal(calls[0].params.p_location_id, "deedou-demo");
+  assert.equal(calls[0].params.p_workstation_mode, "ADMIN");
+  assert.equal(Object.hasOwn(calls[0].params, "p_device_credential"), true);
+  assert.equal(calls[0].params.p_device_credential, "");
 });
 
 test("DD011B production HTML no longer loads legacy browser credential UI", () => {
