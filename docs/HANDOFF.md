@@ -21,8 +21,8 @@ Before implementing anything:
 
 - PR: `#48 DD-011B: single Owner and backend-managed device activation`
 - Branch: `agent/dd011b-owner-device-hardening`
-- Pre-documentation code baseline inspected: `10a6b53b67768a0912410a46267008d4688de7a6`
-- PR state at latest DD-011B hosted acceptance update: open, Draft, mergeable; move to Ready only after the exact-head hosted acceptance and final CI are green.
+- Pre-documentation implementation head finalized for docs: `1b0d4931693891ee343c037399d250beb9e146b7`
+- PR state at DD-011B docs finalization: open, Draft, mergeable. Implementation and exact-head Vercel Preview hosted acceptance are complete; move to Ready only after this docs-only commit has fresh exact-head checks and Production rollout prerequisites are verified.
 - PR #46/DD-012C remains a separate open Draft.
 
 Always fetch the latest head before continuing; documentation commits and later fixes may advance this SHA.
@@ -43,6 +43,11 @@ Repository implementation already includes the DD-011B schema/security direction
 - browser-side device-session transport that removes legacy workstation secret usage from production browser storage.
 
 Recent Part 5 fixes added a browser-smoke compatibility adapter so old DD-008 regression suites can exercise the new backend device-session model without restoring browser-readable secrets. DD-011B now also has its own PR #48 Vercel Preview hosted security acceptance job inside the existing DD-011 hosted workflow, leaving the PR #38 job intact. The staging bootstrap Edge Function source is versioned at `supabase/functions/dd008-hosted-smoke-bootstrap/index.ts`.
+
+Hosted acceptance fixes now resolved on pre-documentation head `1b0d4931693891ee343c037399d250beb9e146b7`:
+
+- Username pattern failure: resolved; Chromium accepts the intended username pattern without invalid regex syntax.
+- Hosted async 403 classification failure: resolved; only phase/path/method/reason-proven expected 403s are tolerated, while unrelated console/page/network errors remain fatal.
 
 ## Last confirmed debugging evidence
 
@@ -73,6 +78,16 @@ At the DD-011B hosted acceptance update, exact-head status must include:
 - DD-011B Vercel Preview hosted security acceptance;
 - hosted fixture cleanup with run-scoped staff/device/session/location data returning to baseline.
 
+Confirmed evidence on pre-documentation head `1b0d4931693891ee343c037399d250beb9e146b7`:
+
+- DeeDou CI `32659206957`: PASS.
+- DD-011 Security Hardening Contract `32659206967`: PASS.
+- DD-010A Table Authority Contract `32659206939`: PASS.
+- DD-012 Catalog Contract `32659206898`: PASS.
+- DD-011 Vercel Preview Hosted Security Smoke `32659206888`, job `97242678394`: PASS.
+- Hosted cleanup baseline: `DD011B_PREVIEW_CLEANUP_BASELINE=PASS`.
+- Hosted completion marker: `DD-011B Vercel Preview hosted security acceptance passed.`
+
 Any documentation commit changes the head and may trigger a new CI run. Fetch current checks before reporting status.
 
 ## Protected behavior — do not regress
@@ -102,12 +117,11 @@ Resolve these after one branch advances/merges; do not copy unrelated modules be
 
 ## Next concrete action
 
-1. Fetch PR #48 latest head.
-2. Inspect all current CI checks and logs.
-3. If browser or hosted smoke fails, trace exact request/authorization/UI/cleanup state before patching.
-4. Keep fixes surgical and security-preserving.
-5. Use `.github/workflows/dd011-preview-hosted-smoke.yml` job `dd011b-hosted-preview-security-acceptance`, `scripts/dd011b-preview-hosted-smoke.mjs`, and `supabase/functions/dd008-hosted-smoke-bootstrap/index.ts` for Issue #47 staging hosted acceptance and cleanup.
-6. When exact-head CI and hosted acceptance are green, move PR #48 from Draft to Ready for Review.
+1. Fetch PR #48 latest head after the docs-only finalization commit.
+2. Inspect fresh exact-head GitHub and Vercel checks; do not reuse the `1b0d493` conclusions for the new docs SHA.
+3. Verify Production Vercel server-only service-role environment for the production Supabase project before claiming production rollout readiness.
+4. If all post-doc checks and production prerequisites are green, move PR #48 from Draft to Ready and perform final merge-readiness review.
+5. If any post-doc check fails, report the exact failing boundary and do not make production/security changes as part of the docs-only finalization.
 
 ## Handoff template for future sessions
 

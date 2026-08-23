@@ -2,7 +2,7 @@
 
 > Dynamic source-of-truth summary. Update this file whenever a major PR/phase changes state.
 >
-> Last source review: 2026-08-23. Baseline inspected for DD-011B hosted acceptance on `agent/dd011b-owner-device-hardening` at PR #48 head.
+> Last source review: 2026-08-23. DD-011B docs finalization is based on PR #48 pre-documentation head `1b0d4931693891ee343c037399d250beb9e146b7`.
 
 ## Source-of-truth order
 
@@ -80,7 +80,7 @@ Merged/production-complete work confirmed from GitHub history:
 
 Branch: `agent/dd011b-owner-device-hardening`
 Issue: #47
-Status at DD-011B hosted acceptance update: **Draft / open / mergeable; Vercel Preview hosted security acceptance is automated by `.github/workflows/dd011-preview-hosted-smoke.yml` job `dd011b-hosted-preview-security-acceptance` and must pass on the exact PR head before merge**.
+Status at DD-011B docs finalization: **Draft / open / mergeable**. Implementation and exact-head Vercel Preview hosted security acceptance completed on pre-documentation head `1b0d4931693891ee343c037399d250beb9e146b7`; final merge remains pending Production rollout prerequisite verification and fresh exact-head checks after this docs-only commit.
 
 Accepted scope:
 
@@ -95,9 +95,22 @@ Accepted scope:
 - immediate device/staff/location/role revoke semantics;
 - public QR remains outside staff security gateway.
 
-Recent browser regression root cause: DD-008C/DD-008D smoke fixtures and serve-flow synchronization were adapted to the DD-011B backend-managed device-session model without restoring browser-readable workstation credentials. Production security must not be weakened to satisfy old fixtures.
+Resolved hosted acceptance regressions:
 
-Hosted acceptance status is no longer a manual pending item in source: PR #48 now has a dedicated DD-011B Vercel Preview hosted security acceptance gate and versioned staging bootstrap function source at `supabase/functions/dd008-hosted-smoke-bootstrap/index.ts`. Exact-head DB/Auth/browser/security/hosted state must still be read from GitHub Actions after every new commit; do not copy an old CI conclusion forward.
+- Chromium username `pattern` syntax was corrected without changing the accepted username contract.
+- Async/background 403 resource diagnostics now classify only proven expected `DEVICE_SESSION_REQUIRED` and `SINGLE_OWNER_ENFORCED` responses by phase/path/method/reason; no global 403 ignore was added.
+
+Verified evidence on pre-documentation head `1b0d4931693891ee343c037399d250beb9e146b7`:
+
+- DeeDou CI `32659206957`: PASS.
+- DD-011 Security Hardening Contract `32659206967`: PASS.
+- DD-010A Table Authority Contract `32659206939`: PASS.
+- DD-012 Catalog Contract `32659206898`: PASS.
+- DD-011 Vercel Preview Hosted Security Smoke `32659206888`, job `97242678394`: PASS.
+- Hosted log ended with `DD011B_PREVIEW_CLEANUP_BASELINE=PASS` and `DD-011B Vercel Preview hosted security acceptance passed.`
+- Vercel Preview status: Ready/success.
+
+Hosted acceptance is no longer pending for the pre-documentation implementation head. Exact-head DB/Auth/browser/security/hosted state must still be read from GitHub Actions after every new commit; do not copy an old CI conclusion forward. PR #48 remains open/Draft and is not production verified or merged.
 
 ### PR #46 — DD-012C combo/components
 
@@ -133,12 +146,11 @@ PR #46 and PR #48 are intentionally independent. They both touch integration fil
 
 ## Next action
 
-1. Re-check PR #48 exact head and all CI jobs, including the DD-011B hosted acceptance job in `DD-011 Vercel Preview Hosted Security Smoke`.
-2. If a job fails, inspect the failing log and identify root cause before changing code.
-3. Confirm hosted acceptance cleanup returns the run-scoped staging database fixtures to baseline.
-4. If all exact-head local/CI/hosted gates pass, PR #48 can be moved from Draft to Ready for Review.
-5. Rebase/resolve interaction with PR #46 according to merge order.
-6. Continue DD-012C and real menu provisioning using user-supplied menu data; do not invent production catalog data.
+1. After this docs-only commit, re-check PR #48 exact head and all GitHub/Vercel checks.
+2. Verify the Production Vercel server-only service-role environment for the production Supabase project before any production rollout/acceptance claim.
+3. If post-doc exact-head checks and production prerequisites are green, move PR #48 from Draft to Ready for final merge-readiness review.
+4. Rebase/resolve interaction with PR #46 according to merge order.
+5. Continue DD-012C and real menu provisioning using user-supplied menu data; do not invent production catalog data.
 
 ## Required maintenance
 

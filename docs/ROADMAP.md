@@ -49,11 +49,11 @@ Do not invent production menu data. Import/duplicate helpers are optional and sh
 
 Required gates before merge/production completion:
 
-1. exact-head local/fresh-DB regressions;
-2. DD-008/DD-010A/DD-011/DD-012 regression compatibility;
-3. staging hosted acceptance;
-4. fixture cleanup/baseline restoration;
-5. production rollout plan/acceptance appropriate to Issue #47.
+1. ✅ exact-head local/fresh-DB regressions — DeeDou CI `32659206957` PASS on pre-documentation head `1b0d4931693891ee343c037399d250beb9e146b7`.
+2. ✅ DD-008/DD-010A/DD-011/DD-012 regression compatibility — DD-011 `32659206967`, DD-010A `32659206939`, DD-012 `32659206898` PASS on the same head.
+3. ✅ staging hosted acceptance — DD-011 Vercel Preview Hosted Security Smoke `32659206888`, job `97242678394`, PASS.
+4. ✅ fixture cleanup/baseline restoration — hosted log recorded `DD011B_PREVIEW_CLEANUP_BASELINE=PASS`.
+5. ◻ production rollout/prerequisite acceptance appropriate to Issue #47 — remaining gate; verify Production Vercel server-only service-role env and fresh exact-head checks after the docs-only commit before moving PR #48 Ready or claiming production completion.
 
 ## Merge sequencing for current parallel work
 
