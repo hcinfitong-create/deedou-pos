@@ -81,11 +81,11 @@ Supported contract families include:
 
 - exact table-token resolution;
 - public menu projection for resolved location;
-- configured-order submission using catalog-derived authoritative pricing/options;
+- configured-order submission using catalog-derived authoritative pricing/options/components;
 - public table/order status projection;
 - service request creation.
 
-Public APIs must not expose station routing/internal security/payment/audit tables beyond the explicitly safe projection.
+Public APIs must not expose internal security/payment/audit tables beyond the explicitly safe projection. Component information exposed publicly must remain limited to what the public menu/order contract intentionally needs.
 
 ## Operational authoritative command contracts
 
@@ -136,17 +136,54 @@ Server validation covers accepted product ID/kind/category/bilingual name/price/
 
 Authoritative CRUD exists for variants, modifier groups/options and product assignment. Selection bounds and configured-order compatibility are server-validated.
 
-### Combo/components
+### Combo/components — DD-012C
 
-DD-012C is in progress on PR #46. It must extend existing `product_components`, not introduce a parallel combo API/model.
+DD-012C is Production-complete and extends the existing `product_components` model; it does not introduce a parallel combo API/model.
 
-## Snapshot immutability
+Authoritative Admin snapshot contract:
 
-Order submission stores configured option/component/price information as historical order-line snapshots. Later catalog changes must not mutate old order contracts.
+- `dd008d_get_admin_menu_snapshot(...)` returns `components` alongside products/variants/modifiers/assignments for the authorized location.
+
+Authoritative mutation RPCs:
+
+- `dd012_create_product_component(...)`;
+- `dd012_update_product_component(...)`;
+- `dd012_delete_product_component(...)`.
+
+Required semantics:
+
+- caller must have authenticated `menu.manage` authority for the active location/workstation context;
+- browser requests use `/api/staff-rpc`, which substitutes backend-managed DD-011B device-session authority rather than trusting browser workstation proof;
+- the browser adapter may send an empty `p_device_credential`; this is not a secret and must not be replaced with a JS-readable workstation credential;
+- create validates parent product/location, component ID/key, bilingual names, positive quantity, station code and display order;
+- update/delete use `p_expected_updated_at` optimistic concurrency and return conflict on stale state;
+- create/update/delete preserve idempotency, audit and realtime refresh-hint behavior;
+- direct browser writes to `product_components` remain denied;
+- anon EXECUTE on DD-012C mutation RPCs remains denied.
+
+Hosted acceptance proved the complete Admin/public integration path:
+
+- Owner TOTP/AAL2 + backend HttpOnly device session;
+- component Create / Update / Delete through Admin;
+- public component projection;
+- combo order expansion before/after component updates/deletes;
+- staging cleanup after acceptance.
+
+## Combo/order snapshot contract
+
+When a submitted product has configured components, order submission may expand the combo parent into non-billable routed component lines for operational routing.
+
+The submitted order becomes a historical snapshot:
+
+- later component edits do not rewrite existing submitted order-line snapshots;
+- later component deletes do not erase historical submitted component/order information;
+- catalog state remains authoritative only for future submissions.
 
 ## Realtime contract
 
 Realtime payloads are notifications to refetch, not authoritative business objects. After reconnect or refresh hint, client converges by requesting the current authoritative snapshot before reporting fully online state.
+
+DD-012C component mutations emit the existing Admin/ops refresh hints; clients must refetch the authoritative menu snapshot rather than treating the hint payload as the new component state.
 
 ## Backward compatibility
 
