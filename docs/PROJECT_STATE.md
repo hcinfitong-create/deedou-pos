@@ -2,7 +2,7 @@
 
 > Dynamic source-of-truth summary. Update this file whenever a major PR/phase changes state.
 >
-> Last source review: 2026-08-24. Current `main` reviewed at `ff615b5874c0ad1ff9379c0eb2c6b8a9b98b7675` after DD-011B production hotfix PR #49.
+> Last source review: 2026-08-24. Current `main` reviewed at `b282a0cd859b122fc6df4d065e5b9c496a5af537` after DD-012C PR #46 merged and Production schema rollout completed.
 
 ## Source-of-truth order
 
@@ -74,6 +74,7 @@ Merged/production-complete work confirmed from GitHub/source/hosted state:
 - DD-011B — sole Owner, username staff identity, Owner-approved activation and backend-managed device sessions.
 - DD-012 Slice A — authoritative product-core Admin catalog.
 - DD-012 Slice B — authoritative variants/modifiers and assignments.
+- DD-012 Slice C — authoritative combo/component management using existing `product_components`.
 
 ## DD-011B final production state
 
@@ -118,41 +119,59 @@ Post-rollout incident and hotfix:
 - after Production deployment of PR #49, OWNER successfully re-verified TOTP and re-entered Admin;
 - direct Production verification confirmed the latest OWNER Auth session at `aal2`, the current ADMIN device/session active, the legacy device revoked, and backend-device-session enforcement still enabled.
 
-Validation evidence for PR #49 exact head `039246cd56f5478ceb4b188b20845abe70b052ef` before merge:
+Issue #47 remains open as tracking metadata at this source review. The implementation/production acceptance described above is complete; close the issue separately only if no intentional follow-up acceptance item remains.
 
-- DeeDou CI `32662677868`: PASS, including 275/275 unit tests, browser smoke, DD-008D multi-context browser smoke, Auth+AAL2 integration, database contracts and authoritative command/realtime integration.
-- DD-010A Table Authority Contract `32662677890`: PASS.
-- DD-011 Security Hardening Contract `32662677908`: PASS.
-- DD-012 Catalog Contract `32662677907`: PASS.
-- Vercel Preview: success.
-- Production Vercel deployment for merge commit `ff615b5874c0ad1ff9379c0eb2c6b8a9b98b7675`: success.
+## DD-012C final production state
 
-Issue #47 is still open in GitHub as tracking metadata at this source review. The implementation/production acceptance described above is complete; close the issue separately after this documentation sync if no additional acceptance item is intentionally being kept open.
+Parent issue: #41
+Implementation PR: #46 `DD-012C: authoritative combo component management`
+Current status: **production-complete**.
 
-## Current open work
+Merge/deploy evidence:
 
-### PR #46 — DD-012C combo/components
+- exact accepted PR head: `27fa5c8219ad066bf21e3e02a33b1e803768535f`;
+- PR #46 merged to `main` as `b282a0cd859b122fc6df4d065e5b9c496a5af537`;
+- Vercel Production deployment for that merge commit succeeded;
+- Production migration `dd012c_combo_components` was applied on Supabase project `nwohsyzpmogqjbmknwbl` as migration history version `20260823235316`.
 
-Branch: `agent/dd012c-combo-components`
-Issue parent: #41
-Status: **Draft / open / currently not mergeable against latest `main`**.
+Implemented behavior:
 
-Current integration state reviewed after DD-011B/hotfix merges:
+- `product_components` remains the single canonical combo/component model; no parallel combo model was introduced;
+- `product_components.updated_at` supports optimistic concurrency;
+- authoritative Admin menu snapshots now include component rows;
+- authoritative mutation RPCs exist for component create/update/delete;
+- DD-011B backend-managed device-session authority is preserved; the browser does not need a JS-readable device credential;
+- direct browser writes remain denied;
+- component mutations retain idempotency, audit and realtime refresh-hint behavior;
+- order submission expands combo parents into non-billable routed component lines;
+- submitted order-line component/configured snapshots remain immutable when catalog components later change;
+- Admin component UI state is invalidated across auth/location/workstation context changes and failed loads do not auto-retry indefinitely.
 
-- PR head: `307e1868cac3cc1f1c593353ff3c51fa0878ce32`.
-- Branch is diverged from `main`: 15 commits ahead and 73 commits behind.
-- GitHub reports `mergeable=false` at this review.
-- The branch must be rebased/updated onto latest `main` before further acceptance or merge-readiness claims.
+Staging acceptance at exact head passed the complete hosted flow:
 
-Scope remains:
+- Owner password login → TOTP/AAL2;
+- backend HttpOnly device-session bootstrap;
+- Admin catalog mount;
+- product create prerequisite;
+- direct protected component-table write denial;
+- component create/update/delete;
+- public component projection;
+- initial/updated/post-delete QR/order behavior;
+- complete fixture cleanup.
 
-- authoritative CRUD for existing `product_components` model;
-- Admin component editor;
-- no parallel combo model;
-- preserve immutable submitted-order snapshots;
-- import/duplicate helper only if real provisioning proves it useful.
+Final hosted acceptance run: `32673729910`, job `97278777585` — PASS.
 
-After rebase/conflict resolution, rerun exact-head fresh-DB CI and the DD-012C staging hosted Admin + public QR/order acceptance/cleanup gate before production migration.
+Post-rollout Production verification confirmed:
+
+- migration present;
+- `product_components.updated_at` present;
+- `dd012_create_product_component`, `dd012_update_product_component`, `dd012_delete_product_component` present;
+- anon execute on those mutation RPCs denied;
+- unauthenticated Admin menu snapshot fails closed with `FORBIDDEN / SIGN_IN_REQUIRED`;
+- production real baseline preserved: one location, one staff profile, zero products/components/orders;
+- DD-011B baseline preserved: one active OWNER assignment, one active ADMIN workstation device, one active backend device session, `backend_device_sessions_required = true`.
+
+No Production menu/combo fixture data was invented or left behind.
 
 ## Current production authority
 
@@ -161,7 +180,7 @@ After rebase/conflict resolution, rerun exact-head fresh-DB CI and the DD-012C s
 - Transactional RPCs are the authoritative mutation boundary.
 - Realtime events are refresh hints, not state authority; clients refetch authoritative snapshots.
 - LOCAL_DEMO remains a separate demo/runtime path. No authoritative dual-write between localStorage and PostgreSQL.
-- Historical submitted order-line pricing/options are immutable snapshots.
+- Historical submitted order-line pricing/options/components are immutable snapshots.
 - Staff protected requests require the DD-011B backend-managed device-session model when enforcement is enabled.
 - OWNER must be AAL2 for accepted privileged security paths; an AAL1 Owner with an active device must be offered a TOTP re-challenge rather than silently denied behind the active-device continue state.
 
@@ -175,12 +194,11 @@ After rebase/conflict resolution, rerun exact-head fresh-DB CI and the DD-012C s
 
 ## Next action
 
-1. Merge this docs-only final-state sync after confirming its diff contains documentation only.
-2. Optionally close Issue #47 as completed once the documentation state is merged and no further DD-011B acceptance work is intended.
-3. Rebase/update PR #46 (`agent/dd012c-combo-components`) onto latest `main`.
-4. Resolve only real integration conflicts introduced by DD-011B/hotfix work; do not copy unrelated business logic between slices.
-5. Rerun PR #46 exact-head CI/fresh-DB contracts, then staging DD-012C hosted acceptance and fixture cleanup.
-6. Continue real menu provisioning only from user-supplied menu data after Slice C is accepted; do not invent production catalog data.
+1. Merge this docs-only DD-012C final-state sync after confirming the diff contains documentation only.
+2. Provision real DeeDou menu/catalog data only from user-supplied source data; do not invent Production products/components.
+3. Keep DD-012C business/schema contracts stable while future UI/UX work reuses the existing authoritative RPCs.
+4. Scope the next backend/product milestone as a separate issue/PR before implementation.
+5. Optionally close Issue #47 only if no DD-011B follow-up tracking item is intentionally retained.
 
 ## Required maintenance
 
