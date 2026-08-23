@@ -56,7 +56,8 @@ function decorateLogin(gate) {
     if (input?.closest("label")) input.closest("label").hidden = true;
   }
   const note = form.parentElement?.querySelector(".auth-note");
-  if (note) note.textContent = "Location, role và workstation trust được Owner cấp từ backend. Device secret không được lưu trong browser storage.";
+  const noteText = "Location, role và workstation trust được Owner cấp từ backend. Device secret không được lưu trong browser storage.";
+  if (note && note.textContent !== noteText) note.textContent = noteText;
 }
 
 function ensure() {
