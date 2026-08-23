@@ -9,6 +9,41 @@ const config = {
   supabasePublishableKey: "sb_publishable_demo_key"
 };
 
+test("DD011B initializes one Supabase client across concurrent auth startup calls", async () => {
+  let createCount = 0;
+  const createdClients = [];
+  const createClient = () => {
+    createCount += 1;
+    const client = {
+      auth: {
+        async getSession() {
+          return { data: { session: null }, error: null };
+        },
+        onAuthStateChange() {
+          return { data: { subscription: { unsubscribe() {} } } };
+        }
+      }
+    };
+    createdClients.push(client);
+    return client;
+  };
+
+  const api = createSupabasePasswordAuthApi({ config, createClient });
+  api.onAuthStateChange(() => {});
+  const [restored, firstClient, secondClient] = await Promise.all([
+    api.restoreSession(),
+    api.getClient(),
+    api.getClient()
+  ]);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(restored.ok, true);
+  assert.equal(createCount, 1, "auth subscription, restore and RPC paths must share one Supabase client initialization");
+  assert.equal(createdClients.length, 1);
+  assert.equal(firstClient, createdClients[0]);
+  assert.equal(secondClient, createdClients[0]);
+});
+
 test("DD011B coalesces repeated stable auth events without hiding security-significant changes", async () => {
   let authStateCallback = null;
   let unsubscribed = false;
