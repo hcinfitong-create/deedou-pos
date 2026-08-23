@@ -43,7 +43,13 @@ chromium.launch = async (...launchArgs) => {
         let responseBody = null;
         try { responseBody = await response.json(); } catch { responseBody = null; }
         const row = Array.isArray(responseBody) ? responseBody[0] : responseBody;
-        console.log(`[DD011B diagnose] ADMIN ${functionName} http=${response.status()} ok=${row?.ok === true} reason=${safe(row?.reason || "")} device=${safe(row?.device_id || "")} mode=${safe(row?.workstation_mode || "")}`);
+        const params = requestBody?.params && typeof requestBody.params === "object" ? requestBody.params : {};
+        const shape = Array.isArray(responseBody)
+          ? `array:${responseBody.length}`
+          : responseBody && typeof responseBody === "object"
+            ? `object:${Object.keys(responseBody).sort().join(",")}`
+            : typeof responseBody;
+        console.log(`[DD011B diagnose] ADMIN ${functionName} http=${response.status()} shape=${safe(shape)} location=${safe(params.p_location_id || "")} permission=${safe(params.p_permission_key || "")} requestedMode=${safe(params.p_workstation_mode || "")} ok=${row?.ok === true} reason=${safe(row?.reason || "")} device=${safe(row?.device_id || "")} mode=${safe(row?.workstation_mode || "")}`);
 
         if (functionName === "authorize_staff_access") {
           await dumpAdminDom(page, "authz-response");
@@ -84,5 +90,5 @@ async function dumpAdminDom(page, label) {
 }
 
 function safe(value) {
-  return String(value || "").replace(/[^A-Za-z0-9_.:@/-]+/g, "_").slice(0, 180);
+  return String(value || "").replace(/[^A-Za-z0-9_.:@/,-]+/g, "_").slice(0, 220);
 }
