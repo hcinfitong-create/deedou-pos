@@ -59,6 +59,7 @@ chromium.launch = async (...launchArgs) => {
 
     context.newPage = async (...pageArgs) => {
       const page = await originalNewPage(...pageArgs);
+      const requestStartedAt = new WeakMap();
 
       page.on("pageerror", (error) => {
         if (isAdminFixture) console.log(`[DD011B diagnose] ADMIN pageerror ${safe(error?.message)}`);
@@ -71,14 +72,30 @@ chromium.launch = async (...launchArgs) => {
           console.log(message.text());
         }
       });
+      page.on("request", (request) => {
+        if (!isAdminFixture) return;
+        let pathname = "";
+        try { pathname = new URL(request.url()).pathname; } catch { return; }
+        if (pathname === "/api/staff-rpc" || pathname === "/api/security") {
+          requestStartedAt.set(request, Date.now());
+        }
+      });
       page.on("response", async (response) => {
         if (!isAdminFixture) return;
         let pathname = "";
         try { pathname = new URL(response.url()).pathname; } catch { return; }
-        if (pathname !== "/api/staff-rpc") return;
+        if (pathname !== "/api/staff-rpc" && pathname !== "/api/security") return;
 
+        const request = response.request();
+        const elapsedMs = Math.max(0, Date.now() - (requestStartedAt.get(request) || Date.now()));
         let requestBody = null;
-        try { requestBody = response.request().postDataJSON(); } catch { requestBody = null; }
+        try { requestBody = request.postDataJSON(); } catch { requestBody = null; }
+
+        if (pathname === "/api/security") {
+          console.log(`[DD011B diagnose] ADMIN security action=${safe(requestBody?.action || "status")} http=${response.status()} elapsedMs=${elapsedMs}`);
+          return;
+        }
+
         const functionName = String(requestBody?.functionName || "unknown-rpc");
         if (!["get_my_staff_context", "authorize_staff_access"].includes(functionName)) return;
 
@@ -91,7 +108,7 @@ chromium.launch = async (...launchArgs) => {
           : responseBody && typeof responseBody === "object"
             ? `object:${Object.keys(responseBody).sort().join(",")}`
             : typeof responseBody;
-        console.log(`[DD011B diagnose] ADMIN ${functionName} http=${response.status()} shape=${safe(shape)} location=${safe(params.p_location_id || "")} permission=${safe(params.p_permission_key || "")} requestedMode=${safe(params.p_workstation_mode || "")} ok=${row?.ok === true} reason=${safe(row?.reason || "")} device=${safe(row?.device_id || "")} mode=${safe(row?.workstation_mode || "")}`);
+        console.log(`[DD011B diagnose] ADMIN ${functionName} http=${response.status()} elapsedMs=${elapsedMs} shape=${safe(shape)} location=${safe(params.p_location_id || "")} permission=${safe(params.p_permission_key || "")} requestedMode=${safe(params.p_workstation_mode || "")} ok=${row?.ok === true} reason=${safe(row?.reason || "")} device=${safe(row?.device_id || "")} mode=${safe(row?.workstation_mode || "")}`);
 
         if (functionName === "authorize_staff_access") {
           await dumpAdminDom(page, "authz-response");
