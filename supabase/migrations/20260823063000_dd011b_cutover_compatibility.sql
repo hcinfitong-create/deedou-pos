@@ -145,7 +145,8 @@ begin
   insert into public.workstation_devices(id,location_id,label,mode,credential_hash,active,registered_by_staff_profile_id)
   values(v_device_id,p_location_id,coalesce(nullif(btrim(p_label),''),p_mode),p_mode,public.hash_device_credential(v_credential),true,v_owner.staff_profile_id);
   insert into public.workstation_device_secrets(device_id,credential) values(v_device_id,v_credential)
-  on conflict(device_id) do update set credential=excluded.credential,rotated_at=now();
+  on conflict on constraint workstation_device_secrets_pkey do update
+  set credential=excluded.credential,rotated_at=now();
 
   perform public.dd008c_write_audit(
     p_location_id,'STAFF',v_owner.staff_profile_id,v_owner.staff_profile_id,v_owner.device_id,
@@ -189,7 +190,8 @@ begin
   if not found then return query select false,'DEVICE_NOT_FOUND','',''; return; end if;
 
   insert into public.workstation_device_secrets(device_id,credential,rotated_at) values(p_device_id,v_credential,now())
-  on conflict(device_id) do update set credential=excluded.credential,rotated_at=now();
+  on conflict on constraint workstation_device_secrets_pkey do update
+  set credential=excluded.credential,rotated_at=now();
   update public.workstation_device_sessions set active=false,revoked_at=now() where device_id=p_device_id and active=true;
 
   perform public.dd008c_write_audit(
