@@ -408,6 +408,8 @@ async function trackedPage(context, label) {
   page.__networkDiagnostics = [];
   page.on("pageerror", (error) => page.__errors.push(`pageerror:${error.message}`));
   page.on("console", (message) => {
+    const text = message.text();
+    if (text.startsWith("[DD011B ")) console.log(text);
     if (message.type() === "error") page.__errors.push(`console:${message.text()}`);
   });
   page.on("requestfailed", (request) => {

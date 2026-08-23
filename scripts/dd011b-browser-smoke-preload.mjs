@@ -68,6 +68,7 @@ function installPlaywrightFixtureBridge() {
       const context = await originalNewContext(...contextArgs);
       const originalAddInitScript = context.addInitScript.bind(context);
       const originalNewPage = context.newPage.bind(context);
+      await originalAddInitScript(installDD011BDomWatch);
 
       context.addInitScript = async (script, arg) => {
         const fixture = extractLegacyFixture(arg);
@@ -105,6 +106,80 @@ function installPlaywrightFixtureBridge() {
     };
     return browser;
   };
+}
+
+function installDD011BDomWatch() {
+  if (window.__DD011B_DOM_WATCH_INSTALLED__) return;
+  window.__DD011B_DOM_WATCH_INSTALLED__ = true;
+  const selectors = {
+    app: "#app",
+    page: "#app .page",
+    adminPage: "#app .admin-page",
+    authLogin: "[data-auth-login]",
+    adminMenu: "[data-dd008d-admin-menu]",
+    migrationPanel: "[data-dd008d-migration-panel]"
+  };
+  const safe = (value) => String(value || "")
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/g, "Bearer_[REDACTED]")
+    .replace(/[^A-Za-z0-9:_.#/?=& -]+/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 260);
+  const state = (selector) => {
+    const element = document.querySelector(selector);
+    if (!element) return "missing";
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    const visible = rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    return `${visible ? "visible" : "hidden"}:${Math.round(rect.width)}x${Math.round(rect.height)}:${style.display}:${style.visibility}`;
+  };
+  const summary = () => {
+    const authGateText = safe(document.querySelector(".auth-gate")?.innerText || "");
+    return [
+      `href=${safe(location.href.replace(location.origin, ""))}`,
+      `ready=${safe(document.readyState)}`,
+      `app=${state(selectors.app)}`,
+      `page=${state(selectors.page)}`,
+      `adminPage=${state(selectors.adminPage)}`,
+      `authLogin=${state(selectors.authLogin)}`,
+      `adminMenu=${state(selectors.adminMenu)}`,
+      `migrationPanel=${state(selectors.migrationPanel)}`,
+      `authGate=${authGateText || "none"}`
+    ].join(" ");
+  };
+  let lastSummary = "";
+  const log = (event) => {
+    const current = summary();
+    if (event !== "heartbeat" || current !== lastSummary) {
+      console.log(`[DD011B dom-watch] event=${safe(event)} ${current}`);
+      lastSummary = current;
+    }
+  };
+  const matchesInteresting = (node) => {
+    if (!node || node.nodeType !== 1) return false;
+    return Object.values(selectors).some((selector) => node.matches?.(selector) || node.querySelector?.(selector));
+  };
+  window.addEventListener("DOMContentLoaded", () => log("domcontentloaded"), { once: true });
+  window.addEventListener("load", () => log("load"), { once: true });
+  window.addEventListener("hashchange", () => log("hashchange"));
+  window.addEventListener("error", (event) => console.log(`[DD011B dom-watch] event=window-error message=${safe(event?.message)}`));
+  window.addEventListener("unhandledrejection", (event) => console.log(`[DD011B dom-watch] event=unhandled-rejection message=${safe(event?.reason?.message || event?.reason)}`));
+  const observer = new MutationObserver((mutations) => {
+    if (mutations.some((mutation) => (
+      matchesInteresting(mutation.target)
+      || [...mutation.addedNodes].some(matchesInteresting)
+      || [...mutation.removedNodes].some(matchesInteresting)
+    ))) log("mutation");
+  });
+  const observe = () => {
+    const root = document.documentElement || document;
+    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "data-dd008d-admin-menu", "data-dd008d-migration-panel", "data-auth-login"] });
+    log("observer-ready");
+  };
+  if (document.documentElement) observe();
+  else window.addEventListener("DOMContentLoaded", observe, { once: true });
+  setInterval(() => log("heartbeat"), 5_000);
 }
 
 async function handleApiRequest(request, response, handler) {
