@@ -270,6 +270,7 @@ export function createSupabasePasswordAuthApi(options = {}) {
   }
 
   let client = options.client || null;
+  let clientPromise = client ? Promise.resolve(client) : null;
   let lastStableAuthIdentity = "";
   let passwordSignInInProgress = false;
 
@@ -279,18 +280,27 @@ export function createSupabasePasswordAuthApi(options = {}) {
 
   const getClient = async () => {
     if (client) return client;
-    const createClient = await resolveSupabaseCreateClient(options.createClient);
-    client = createClient(config.supabaseUrl, config.supabasePublishableKey, {
-      auth: {
-        persistSession: true,
-        autoRefreshToken: true,
-        detectSessionInUrl: false,
-        storageKey: AUTH_SESSION_KEY,
-        storage
-      },
-      global: typeof fetchFn === "function" ? { fetch: fetchFn } : undefined
-    });
-    return client;
+    if (!clientPromise) {
+      clientPromise = resolveSupabaseCreateClient(options.createClient)
+        .then((createClient) => {
+          client = createClient(config.supabaseUrl, config.supabasePublishableKey, {
+            auth: {
+              persistSession: true,
+              autoRefreshToken: true,
+              detectSessionInUrl: false,
+              storageKey: AUTH_SESSION_KEY,
+              storage
+            },
+            global: typeof fetchFn === "function" ? { fetch: fetchFn } : undefined
+          });
+          return client;
+        })
+        .catch((error) => {
+          clientPromise = null;
+          throw error;
+        });
+    }
+    return clientPromise;
   };
 
   async function currentSessionInfo() {
