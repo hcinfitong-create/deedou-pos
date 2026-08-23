@@ -8,7 +8,7 @@
 - Hosted business authority: PostgreSQL.
 - Local development: Supabase CLI migrations + `supabase/seed.sql` + SQL contracts.
 - Hosted staging reference used by current deployment gates: `nwyhxdcslxxjirsmqnxo`.
-- Production reference seen in production acceptance history: `nwohsyzpmogqjbmknwbl`.
+- Production reference used by current production acceptance: `nwohsyzpmogqjbmknwbl`.
 - Project references are identifiers, not credentials. Never commit service-role keys, DB passwords, JWT secrets or private keys.
 
 ## Migration policy
@@ -67,7 +67,7 @@ Authorization is not determined by role name alone. Effective staff access combi
 
 ## DD-011B identity/device additions
 
-Current PR #48 migrations add/modify:
+DD-011B migrations add/modify:
 
 - `staff_profiles.username` — lowercase/case-insensitive unique login identifier.
 - `staff_profiles.provisioning_status` — `ACTIVE`, `PENDING_FIRST_LOGIN`, `PENDING_OWNER_APPROVAL`, `DISABLED`.
@@ -75,8 +75,51 @@ Current PR #48 migrations add/modify:
 - `workstation_device_secrets` — backend-only current device credential.
 - `workstation_device_sessions` — hashed HttpOnly-cookie session-token authority, expiry/revoke/last-seen state.
 - `staff_activation_requests` — FIRST_LOGIN/NEW_DEVICE challenge, six-digit code, request-token hash, approval/reject/completion lifecycle.
+- `dd011b_security_policy` — singleton enforcement state including `backend_device_sessions_required`.
 
 These security tables have RLS enabled and are revoked from anon/authenticated table access; service-role backend code is the intended direct data actor.
+
+## DD-012C combo/component schema
+
+Production-complete migration: `dd012c_combo_components`.
+
+Current Production migration-history version: `20260823235316`.
+
+DD-012C extends the existing canonical `product_components` model rather than creating a second combo graph.
+
+Schema/contract changes:
+
+- `product_components.updated_at timestamptz not null` — optimistic concurrency token for Admin component updates/deletes;
+- `dd008d_get_admin_menu_snapshot(...)` now includes a `components` projection for the requested location;
+- authoritative component mutation RPCs:
+  - `dd012_create_product_component(...)`;
+  - `dd012_update_product_component(...)`;
+  - `dd012_delete_product_component(...)`.
+
+Component mutation invariants:
+
+- parent product must exist in the same location;
+- IDs/keys/names/quantity/station/display order are server-validated;
+- update/delete require the expected `updated_at` value and reject stale writes;
+- create/update/delete use the existing `menu.manage` command authority;
+- idempotency, audit records and realtime refresh hints are preserved;
+- mutation RPC EXECUTE is denied to `anon` and granted only to intended authenticated/backend roles;
+- browser direct writes to `product_components` remain unsupported/denied.
+
+Order-history invariant:
+
+- submitted order-line component/configured snapshots are historical records;
+- later `product_components` edits or deletes must not rewrite submitted order-line snapshots.
+
+Production rollout verification after PR #46 confirmed:
+
+- migration present;
+- `updated_at` column present;
+- all three component mutation functions present;
+- anon EXECUTE denied on the mutation RPCs;
+- unauthenticated Admin menu snapshot remains fail-closed;
+- Production real data baseline remained one location / one staff profile / zero products / zero components / zero orders;
+- DD-011B Owner/device-session enforcement remained intact.
 
 ## RLS / direct-write rule
 
@@ -100,8 +143,9 @@ See `docs/API_CONTRACTS.md` for client-facing boundaries.
 ## Catalog invariants
 
 - Reuse existing product/variant/modifier/component graph.
+- `product_components` remains the canonical combo/component graph.
 - Direct browser catalog writes remain denied.
-- Admin mutations require authenticated `menu.manage` + valid workstation context.
+- Admin mutations require authenticated `menu.manage` + valid workstation/backend device-session context.
 - Create/update uses server validation, idempotency, audit and optimistic concurrency where defined.
 - Catalog changes do not rewrite historical `order_lines` option/component/price snapshots.
 
@@ -123,11 +167,12 @@ Current repository includes migration families for:
 - `dd008d_cutover_resilience`, Admin menu/realtime/refund permission;
 - `dd010a_admin_table_layout` + open-session layout lock;
 - `dd011_security_hardening` and follow-up compatibility fixes;
+- `dd011b_*` identity/device/activation/compatibility/sole-owner guard migrations;
 - `dd012_admin_catalog_product_core`;
 - `dd012b_variants_modifiers` + assignment normalization;
-- DD-011B identity/device/activation/compatibility/sole-owner guard migrations on PR #48.
+- `dd012c_combo_components`.
 
-Always inspect the actual `supabase/migrations/` directory for the latest list.
+Always inspect the actual `supabase/migrations/` directory and hosted migration history for the latest state.
 
 ## Database validation checklist
 
