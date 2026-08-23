@@ -9,7 +9,8 @@ import { createClient } from "@supabase/supabase-js";
 const LOCATION_ID = "deedou-demo";
 const BASE_URL = "http://127.0.0.1:8099";
 const DB_URL = process.env.DB_URL || "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
-const statusEnv = parseEnvOutput(execFileSync("npx", ["supabase", "status", "-o", "env"], { encoding: "utf8" }));
+const LOGIN_ROUTE_TIMEOUT_MS = 70_000;
+const statusEnv = parseEnvOutput(execFileSync("npx", ["supabase", "status", "-o", "env"], { encoding: "utf8", timeout: 30_000 }));
 const apiUrl = statusEnv.API_URL || statusEnv.SUPABASE_URL || "http://127.0.0.1:54321";
 const anonKey = statusEnv.ANON_KEY || statusEnv.SUPABASE_ANON_KEY;
 const serviceRoleKey = statusEnv.SERVICE_ROLE_KEY || statusEnv.SUPABASE_SERVICE_ROLE_KEY;
@@ -35,14 +36,24 @@ let server;
 let browser;
 const contexts = [];
 const pages = [];
+let smokePhase = "startup";
+const smokeStartedAt = Date.now();
+const smokeWatchdog = setTimeout(() => {
+  console.error(`[DD011B smoke-watchdog] phase=${sanitize(smokePhase)} elapsedMs=${Date.now() - smokeStartedAt}`);
+  process.exit(1);
+}, 8 * 60 * 1000);
 
 try {
+  markSmokePhase("provision users");
   await provisionUsers();
+  markSmokePhase("provision database");
   provisionDatabase();
 
+  markSmokePhase("node logins");
   const runtimeClients = {};
   for (const [name, spec] of Object.entries(accounts)) runtimeClients[name] = await loginNode(spec);
 
+  markSmokePhase("start browser and contexts");
   server = await startStaticServer();
   browser = await chromium.launch({ headless: true });
 
@@ -61,14 +72,16 @@ try {
   const cashierPage = await trackedPage(cashierContext, "cashier");
   const adminPage = await trackedPage(adminContext, "admin");
 
+  markSmokePhase("login staff routes and admin");
   await Promise.all([
-    loginRoute(staffPage, "staff", accounts.staff),
-    loginRoute(kitchenPage, "kitchen", accounts.kitchen),
-    loginRoute(barPage, "bar", accounts.bar),
-    loginRoute(cashierPage, "cashier", accounts.cashier),
-    loginAdmin(adminPage, accounts.admin)
+    loginWithDiagnostics(staffPage, "staff", accounts.staff, (step) => loginRoute(staffPage, "staff", accounts.staff, step)),
+    loginWithDiagnostics(kitchenPage, "kitchen", accounts.kitchen, (step) => loginRoute(kitchenPage, "kitchen", accounts.kitchen, step)),
+    loginWithDiagnostics(barPage, "bar", accounts.bar, (step) => loginRoute(barPage, "bar", accounts.bar, step)),
+    loginWithDiagnostics(cashierPage, "cashier", accounts.cashier, (step) => loginRoute(cashierPage, "cashier", accounts.cashier, step)),
+    loginWithDiagnostics(adminPage, "admin", accounts.admin, (step) => loginAdmin(adminPage, accounts.admin, step))
   ]);
 
+  markSmokePhase("wait staff connectivity online");
   await Promise.all([
     waitConnectivityOnline(staffPage),
     waitConnectivityOnline(kitchenPage),
@@ -78,6 +91,7 @@ try {
   ]);
 
   // Admin authority: PostgreSQL availability must immediately control the public QR catalog.
+  markSmokePhase("admin menu authority availability");
   await adminPage.locator("[data-dd008d-admin-refresh]").click();
   const adminFriedRice = adminPage.locator('[data-dd008d-admin-product="fried-rice"]');
   await adminFriedRice.waitFor({ timeout: 20_000 });
@@ -95,6 +109,7 @@ try {
   await customerPage.locator('[data-add="fried-rice"]').waitFor({ timeout: 20_000 });
 
   // Direct tamper with a legitimate CASHIER session/device must still fail server-side menu.manage.
+  markSmokePhase("cashier menu tamper denial");
   const tamper = await rpc(runtimeClients.cashier, "dd008d_set_product_availability", {
     p_location_id: LOCATION_ID,
     p_product_id: "fried-rice",
@@ -107,6 +122,7 @@ try {
   assert(tamper.ok === false && tamper.category === "FORBIDDEN", `cashier menu tamper not denied: ${JSON.stringify(tamper)}`);
 
   // Migration UI is explicit: import stays locked until exact server preview of the local export.
+  markSmokePhase("admin migration preview");
   const importButton = adminPage.locator("[data-dd008d-import]");
   assert(await importButton.isDisabled(), "legacy import should be locked initially");
   await adminPage.locator("[data-dd008d-build-export]").click();
@@ -119,6 +135,7 @@ try {
   await waitForBody(adminPage, '"blockingChecksOk": true');
 
   // First QR batch: configured mango tea + fried rice. Fill note before second add to regression-test note preservation.
+  markSmokePhase("customer first QR batch");
   const note1 = `${runId} configured hold-fire batch`;
   await customerPage.locator('[data-add-config="mango-tea"]').click();
   await customerPage.locator("#note").fill(note1);
@@ -138,6 +155,7 @@ try {
   assert(Array.isArray(mangoLine?.optionSnapshot?.modifierGroups) && mangoLine.optionSnapshot.modifierGroups.length > 0, "configured mango tea modifier snapshot missing");
   assert(riceLine?.lineId, "fried-rice line missing");
 
+  markSmokePhase("staff accept and hold-fire first batch");
   const staffCard = staffPage.locator(".order-card").filter({ hasText: note1 }).first();
   await staffCard.waitFor({ timeout: 30_000 });
   const riceFamily = staffCard.locator(".course-family").filter({ hasText: /Seafood Fried Rice|Cơm chiên hải sản/ }).first();
@@ -150,6 +168,7 @@ try {
   await staffPage.locator(".order-card").filter({ hasText: note1 }).first().locator('button[data-status="ACCEPTED"]').click();
 
   // Bar line is fired and can progress; held kitchen line must not surface until explicit Fire.
+  markSmokePhase("bar and kitchen KDS first batch");
   await progressTicket(barPage, note1, ["ACKNOWLEDGED", "PREPARING", "READY"]);
   await sleep(400);
   assert(await kitchenPage.locator(".ticket").filter({ hasText: note1 }).count() === 0, "held kitchen line leaked to KDS before Fire");
@@ -161,10 +180,12 @@ try {
   await expectText(kitchenTicket, "Course 1", "kitchen ticket missing assigned course after Fire");
   await progressTicket(kitchenPage, note1, ["ACKNOWLEDGED", "PREPARING", "READY"]);
 
-  await serveAllReadyForNote(staffPage, note1, 2);
+  markSmokePhase("serve first batch");
+  await serveAllReadyForNote(staffPage, note1, 2, { client: runtimeClients.staff, spec: accounts.staff, orderId: firstOrder.id });
   await waitOrderStatus(runtimeClients.cashier, firstOrder.id, "SERVED", accounts.cashier);
 
   // Second order batch must reuse the same active visit.
+  markSmokePhase("customer second QR batch");
   const note2 = `${runId} second visit batch`;
   await customerPage.locator('[data-add="espresso"]').click();
   await customerPage.locator("#note").fill(note2);
@@ -175,14 +196,16 @@ try {
   const secondOrder = secondPublic.orders.find((order) => order.note === note2);
   assert(secondOrder, "second order batch missing");
 
+  markSmokePhase("staff accept and serve second batch");
   const secondStaffCard = staffPage.locator(".order-card").filter({ hasText: note2 }).first();
   await secondStaffCard.waitFor({ timeout: 30_000 });
   await secondStaffCard.locator('button[data-status="ACCEPTED"]').click();
   await progressTicket(barPage, note2, ["ACKNOWLEDGED", "PREPARING", "READY"]);
-  await serveAllReadyForNote(staffPage, note2, 1);
+  await serveAllReadyForNote(staffPage, note2, 1, { client: runtimeClients.staff, spec: accounts.staff, orderId: secondOrder.id });
   await waitOrderStatus(runtimeClients.cashier, secondOrder.id, "SERVED", accounts.cashier);
 
   // Transfer the open visit A01 -> A02 through actual cashier UI.
+  markSmokePhase("cashier transfer session");
   await cashierPage.locator('[data-select-table="A01"]').click();
   const transfer = cashierPage.locator(`[data-transfer-session="${sessionId}"][data-transfer-to="A02"]`);
   await transfer.waitFor({ timeout: 20_000 });
@@ -192,6 +215,7 @@ try {
     return snapshot.tableSessions.some((session) => session.id === sessionId && session.tableCode === "A02" && session.status === "OPEN");
   }, "table transfer A01 to A02", 30_000);
 
+  markSmokePhase("cashier mixed tender and close");
   await cashierPage.locator('[data-select-table="A02"]').click();
   const tableAmount = cashierPage.locator('[data-payment-amount="A02"]');
   await tableAmount.waitFor({ timeout: 20_000 });
@@ -213,6 +237,7 @@ try {
   await waitConnectivityOnline(cashierPage);
 
   // Targeted refund after close must not reopen visit or KDS workflow.
+  markSmokePhase("closed order targeted refund");
   const settled = await staffSnapshot(runtimeClients.cashier, accounts.cashier);
   const settledFirst = settled.orders.find((order) => order.id === firstOrder.id);
   const originalPayment = settledFirst?.payments?.find((payment) => payment.type === "PAYMENT");
@@ -237,6 +262,7 @@ try {
   assert(await barPage.locator(".ticket").filter({ hasText: note1 }).count() === 0, "refund reopened bar workflow");
 
   // Duplicate idempotency key must produce one authoritative availability mutation.
+  markSmokePhase("admin availability idempotency");
   const adminMenu = await rpc(runtimeClients.admin, "dd008d_get_admin_menu_snapshot", {
     p_location_id: LOCATION_ID,
     p_workstation_mode: "ADMIN",
@@ -277,6 +303,7 @@ try {
   });
 
   // Disconnect staff and keep exercising the existing business-signal path until a real authoritative refetch observes the offline transport.
+  markSmokePhase("offline reconnect convergence");
   await staffContext.setOffline(true);
   await waitFor(async () => {
     await staffPage.evaluate(() => window.dispatchEvent(new StorageEvent("storage", { key: "deedou_products_full" })));
@@ -297,12 +324,14 @@ try {
   await waitForBody(staffPage, "A01");
 
   assertNoPageErrors();
+  markSmokePhase("complete");
   console.log("DD-008D browser smoke passed: migration preview, admin authority, configured QR order, Hold/Fire, KDS, second batch, transfer, mixed tender, close/refund, idempotency, and reconnect convergence.");
 } finally {
   for (const context of contexts) await context.close().catch(() => {});
   await browser?.close().catch(() => {});
   await new Promise((resolveClose) => server?.close?.(resolveClose) || resolveClose());
   for (const userId of createdUserIds) await adminClient.auth.admin.deleteUser(userId).catch(() => {});
+  clearTimeout(smokeWatchdog);
 }
 
 function account(name, role, mode) {
@@ -376,39 +405,87 @@ async function trackedPage(context, label) {
   const page = await context.newPage();
   page.__label = label;
   page.__errors = [];
+  page.__networkDiagnostics = [];
   page.on("pageerror", (error) => page.__errors.push(`pageerror:${error.message}`));
   page.on("console", (message) => {
+    const text = message.text();
+    if (text.startsWith("[DD011B ")) console.log(text);
     if (message.type() === "error") page.__errors.push(`console:${message.text()}`);
+  });
+  page.on("requestfailed", (request) => {
+    recordSafeNetworkDiagnostic(page, "requestfailed", request.url(), request.failure()?.errorText || "REQUEST_FAILED");
+  });
+  page.on("response", (response) => {
+    const status = response.status();
+    if (status >= 400) recordSafeNetworkDiagnostic(page, "response", response.url(), String(status));
   });
   pages.push(page);
   return page;
 }
 
-async function loginRoute(page, route, spec) {
-  await page.goto(`${BASE_URL}/#/${route}`, { waitUntil: "domcontentloaded" });
-  const form = page.locator("[data-auth-login]");
-  await form.waitFor({ timeout: 20_000 });
-  await waitForAuthGateReady(page, `login gate ${spec.mode}`);
-  await form.locator('input[name="email"]').fill(spec.email);
-  await form.locator('input[name="password"]').fill(spec.password);
-  await form.locator('input[name="locationId"]').fill(LOCATION_ID);
-  await form.locator('select[name="workstationMode"]').selectOption(spec.mode);
-  await form.locator('button[type="submit"]').click();
-  await page.waitForFunction(() => !document.querySelector("[data-auth-login]"), null, { timeout: 30_000 });
+async function loginWithDiagnostics(page, route, spec, work) {
+  const label = `${spec.mode}:${route}`;
+  let lastSuccessfulStep = "start";
+  const step = async (name, action) => {
+    console.log(`[DD011B login] ${label} step=${sanitize(name)} start`);
+    try {
+      const result = await action();
+      lastSuccessfulStep = name;
+      console.log(`[DD011B login] ${label} step=${sanitize(name)} success`);
+      return result;
+    } catch (error) {
+      console.log(`[DD011B login] ${label} step=${sanitize(name)} failure=${sanitize(error?.message || error)}`);
+      throw error;
+    }
+  };
+  console.log(`[DD011B login] ${label} route-start timeoutMs=${LOGIN_ROUTE_TIMEOUT_MS}`);
+  try {
+    await withTimeout(
+      work(step),
+      LOGIN_ROUTE_TIMEOUT_MS,
+      () => new Error(`login route timeout route=${label} lastSuccessfulStep=${lastSuccessfulStep}`)
+    );
+    console.log(`[DD011B login] ${label} route-success lastSuccessfulStep=${sanitize(lastSuccessfulStep)}`);
+  } catch (error) {
+    await printLoginDiagnostics(page, label, lastSuccessfulStep, error);
+    throw error;
+  }
 }
 
-async function loginAdmin(page, spec) {
-  await page.goto(`${BASE_URL}/#/admin`, { waitUntil: "domcontentloaded" });
+async function loginRoute(page, route, spec, step = (name, action) => action()) {
+  await step("goto", () => page.goto(`${BASE_URL}/#/${route}`, { waitUntil: "domcontentloaded" }));
   const form = page.locator("[data-auth-login]");
-  await form.waitFor({ timeout: 20_000 });
-  await waitForAuthGateReady(page, "login gate ADMIN");
-  await form.locator('input[name="email"]').fill(spec.email);
-  await form.locator('input[name="password"]').fill(spec.password);
-  await form.locator('input[name="locationId"]').fill(LOCATION_ID);
-  await form.locator('select[name="workstationMode"]').selectOption(spec.mode);
-  await form.locator('button[type="submit"]').click();
-  await page.locator("[data-dd008d-admin-menu]").waitFor({ timeout: 30_000 });
-  await page.locator("[data-dd008d-migration-panel]").waitFor({ timeout: 30_000 });
+  await step("wait_auth_form", () => form.waitFor({ timeout: 20_000 }));
+  await step("wait_auth_gate_ready", () => waitForAuthGateReady(page, `login gate ${spec.mode}`));
+  await step("fill_email", () => form.locator('input[name="email"]').fill(spec.email));
+  await step("fill_password", () => form.locator('input[name="password"]').fill(spec.password));
+  await step("fill_location", () => form.locator('input[name="locationId"]').fill(LOCATION_ID));
+  await step("select_workstation_mode", () => form.locator('select[name="workstationMode"]').selectOption(spec.mode));
+  await step("submit_login", () => form.locator('button[type="submit"]').click());
+  await step("wait_auth_form_removed", () => page.waitForFunction(() => !document.querySelector("[data-auth-login]"), null, { timeout: 30_000 }));
+}
+
+async function loginAdmin(page, spec, step = (name, action) => action()) {
+  await step("goto", () => page.goto(`${BASE_URL}/#/admin`, { waitUntil: "domcontentloaded" }));
+  const form = page.locator("[data-auth-login]");
+  await step("wait_auth_form", () => form.waitFor({ timeout: 20_000 }));
+  await step("wait_auth_gate_ready", () => waitForAuthGateReady(page, "login gate ADMIN"));
+  await step("fill_email", () => form.locator('input[name="email"]').fill(spec.email));
+  await step("fill_password", () => form.locator('input[name="password"]').fill(spec.password));
+  await step("fill_location", () => form.locator('input[name="locationId"]').fill(LOCATION_ID));
+  await step("select_workstation_mode", () => form.locator('select[name="workstationMode"]').selectOption(spec.mode));
+  await step("submit_login", () => form.locator('button[type="submit"]').click());
+  await step("wait_admin_menu", () => waitForAdminPanel(page, "[data-dd008d-admin-menu]", "admin menu"));
+  await step("wait_migration_panel", () => waitForAdminPanel(page, "[data-dd008d-migration-panel]", "migration panel"));
+}
+
+async function waitForAdminPanel(page, selector, label) {
+  try {
+    await page.locator(selector).waitFor({ timeout: 30_000 });
+  } catch (error) {
+    await printAdminTimeoutDiagnostics(page, label, error);
+    throw error;
+  }
 }
 
 async function waitForAuthGateReady(page, label) {
@@ -451,17 +528,51 @@ async function progressTicket(page, note, statuses) {
   }
 }
 
-async function serveAllReadyForNote(page, note, expectedCount) {
-  let served = 0;
-  while (served < expectedCount) {
+async function serveAllReadyForNote(page, note, expectedCount, options = {}) {
+  assert(options.client && options.spec && options.orderId, "serve helper requires authoritative snapshot options");
+  const initial = await serveProgressSnapshot(options.client, options.spec, options.orderId);
+  const targetServed = initial.servedQty + expectedCount;
+  let current = initial;
+  while (current.servedQty < targetServed) {
     const card = page.locator(".order-card").filter({ hasText: note }).first();
     await card.waitFor({ timeout: 30_000 });
+    await waitForUiOrderVersion(card, current.version);
     const button = card.locator("[data-serve-line]").first();
     await button.waitFor({ timeout: 30_000 });
     await button.click();
-    served += 1;
-    await sleep(100);
+    const before = current;
+    await waitFor(async () => {
+      current = await serveProgressSnapshot(options.client, options.spec, options.orderId);
+      return current.servedQty > before.servedQty || current.version > before.version;
+    }, `${options.orderId} serve progress`, 30_000);
   }
+}
+
+async function waitForUiOrderVersion(card, serverVersion) {
+  await waitFor(async () => {
+    const uiVersion = Number(await card.getAttribute("data-order-version").catch(() => ""));
+    return Number.isSafeInteger(uiVersion) && uiVersion >= serverVersion;
+  }, `staff UI order version >= ${serverVersion}`, 30_000);
+}
+
+async function serveProgressSnapshot(client, spec, orderId) {
+  const snapshot = await staffSnapshot(client, spec);
+  const order = snapshot.orders.find((item) => item.id === orderId);
+  assert(order, `order missing while serving ${orderId}`);
+  const lines = serviceableLines(order);
+  return {
+    version: Number(order.version) || 0,
+    servedQty: lines.reduce((sum, line) => sum + Math.max(0, Number(line.servedQty || 0)), 0),
+    serviceableQty: lines.reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0)), 0),
+    readyLineIds: lines
+      .filter((line) => (line.prepStatus || line.status) === "READY" && Number(line.servedQty || 0) < Number(line.qty || 0))
+      .map((line) => line.lineId || line.id || "")
+      .filter(Boolean)
+  };
+}
+
+function serviceableLines(order = {}) {
+  return (Array.isArray(order.items) ? order.items : []).filter((line) => !line.isComponent && line.station !== "COMBO");
 }
 
 async function publicSnapshot(token) {
@@ -515,11 +626,23 @@ function classifyError(error) {
 }
 
 function psql(statement) {
-  return execFileSync("psql", [DB_URL, "-v", "ON_ERROR_STOP=1", "-c", statement], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  return runPsql(["-v", "ON_ERROR_STOP=1", "-c", statement]);
 }
 
 function psqlScalar(statement) {
-  return execFileSync("psql", [DB_URL, "-v", "ON_ERROR_STOP=1", "-Atc", statement], { encoding: "utf8" }).trim();
+  return runPsql(["-v", "ON_ERROR_STOP=1", "-Atc", statement]).trim();
+}
+
+function runPsql(args) {
+  try {
+    return execFileSync("psql", [DB_URL, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 20_000
+    });
+  } catch (error) {
+    throw new Error(`psql failed during ${sanitize(smokePhase)}: ${sanitize(error?.stderr?.toString?.() || error?.message || error)}`);
+  }
 }
 
 async function startStaticServer() {
@@ -573,6 +696,18 @@ async function waitFor(predicate, label, timeout = 20_000) {
   throw new Error(`Timed out waiting for ${label}${lastError ? `: ${lastError.message}` : ""}`);
 }
 
+async function withTimeout(promise, timeout, createError) {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(createError()), timeout);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function waitForBody(page, text, timeout = 30_000) {
   await page.waitForFunction((expected) => document.body?.innerText?.includes(expected), text, { timeout });
 }
@@ -585,6 +720,118 @@ async function expectText(locator, text, message) {
 function assertNoPageErrors() {
   const failures = pages.flatMap((page) => page.__errors.map((error) => `${page.__label}:${error}`));
   if (failures.length) throw new Error(`browser errors:\n${failures.join("\n")}`);
+}
+
+function markSmokePhase(phase) {
+  smokePhase = String(phase || "unknown");
+}
+
+async function printLoginDiagnostics(page, label, lastSuccessfulStep, error) {
+  console.log(`[DD011B login] ${label} route-failure lastSuccessfulStep=${sanitize(lastSuccessfulStep)} error=${sanitize(error?.message || error)}`);
+  const snapshot = await captureLoginDomSnapshotSafely(page);
+  console.log(`[DD011B login] ${label} dom=${JSON.stringify(snapshot)}`);
+  printPageDiagnostics("login", page, label);
+}
+
+async function printAdminTimeoutDiagnostics(page, label, error) {
+  console.log(`[DD011B admin-timeout] ${label}: ${sanitize(error?.message || error)}`);
+  const snapshot = await captureLoginDomSnapshotSafely(page);
+  console.log(`[DD011B admin-timeout] dom=${JSON.stringify(snapshot)}`);
+  printPageDiagnostics("admin-timeout", page, label);
+}
+
+async function captureLoginDomSnapshotSafely(page) {
+  try {
+    return await withTimeout(
+      captureLoginDomSnapshot(page),
+      5_000,
+      () => new Error("DOM_DIAGNOSTIC_TIMEOUT")
+    );
+  } catch (error) {
+    return { error: sanitize(error?.message || error) };
+  }
+}
+
+async function captureLoginDomSnapshot(page) {
+  return page.evaluate(() => {
+    const exists = (selector) => Boolean(document.querySelector(selector));
+    const visible = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) return false;
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const displayState = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) return { exists: false };
+      const style = getComputedStyle(element);
+      return {
+        exists: true,
+        visible: visible(selector),
+        display: style.display,
+        visibility: style.visibility,
+        opacity: style.opacity,
+        width: Math.round(element.getBoundingClientRect().width),
+        height: Math.round(element.getBoundingClientRect().height)
+      };
+    };
+    const text = (selector) => {
+      const element = document.querySelector(selector);
+      return String(element?.innerText || "")
+        .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 600);
+    };
+    return {
+      href: location.href.replace(location.origin, ""),
+      hash: location.hash,
+      appExists: exists("#app"),
+      adminPageExists: exists("#app .admin-page"),
+      pageExists: exists("#app .page"),
+      authLoginExists: exists("[data-auth-login]"),
+      authLoginVisible: visible("[data-auth-login]"),
+      authGateText: text(".auth-gate"),
+      adminMenu: displayState("[data-dd008d-admin-menu]"),
+      migrationPanel: displayState("[data-dd008d-migration-panel]"),
+      connectivityState: document.querySelector("[data-dd008d-connectivity]")?.getAttribute("data-state") || "",
+      storedLocationId: String(localStorage.getItem("deedou_staff_location_id") || "").replace(/[^A-Za-z0-9_.:-]+/g, "_").slice(0, 80),
+      storedWorkstationMode: String(localStorage.getItem("deedou_workstation_mode") || "").replace(/[^A-Za-z0-9_.:-]+/g, "_").slice(0, 80),
+      hasDeviceCredential: Boolean(localStorage.getItem("deedou_device_credential")),
+      jsCookieVisible: Boolean(document.cookie)
+    };
+  }).catch((diagnosticError) => ({ error: sanitize(diagnosticError?.message || diagnosticError) }));
+}
+
+function printPageDiagnostics(prefix, page, label) {
+  const pageErrors = (page.__errors || []).slice(-12).map(sanitize);
+  if (pageErrors.length) console.log(`[DD011B ${prefix}] ${label} browserErrors=${JSON.stringify(pageErrors)}`);
+  const network = (page.__networkDiagnostics || []).slice(-20).map(sanitize);
+  if (network.length) console.log(`[DD011B ${prefix}] ${label} network=${JSON.stringify(network)}`);
+}
+
+function recordSafeNetworkDiagnostic(page, type, rawUrl, detail) {
+  const label = safeNetworkLabel(rawUrl);
+  if (!label) return;
+  page.__networkDiagnostics.push(`${type}:${label}:${safeNetworkDetail(detail)}`);
+}
+
+function safeNetworkLabel(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ""), BASE_URL);
+    const base = new URL(BASE_URL);
+    if (url.origin !== base.origin) return "";
+    return url.pathname.replace(/[^A-Za-z0-9_./:-]+/g, "_").slice(0, 160);
+  } catch {
+    return "";
+  }
+}
+
+function safeNetworkDetail(value) {
+  return String(value || "")
+    .replace(/[^A-Za-z0-9_./:-]+/g, "_")
+    .slice(0, 120);
 }
 
 function assert(condition, message) {

@@ -255,6 +255,21 @@ test("authorized SUPABASE routes load authoritative operational state before pri
   assert.doesNotMatch(appSource, /server command not available until DD-008C/);
 });
 
+test("authorized SUPABASE placeholders are not treated as auth gates", () => {
+  const loadingStart = appSource.indexOf("function supabaseLoadingPage");
+  const adminStart = appSource.indexOf("function supabaseAdminDeferredPage");
+  const customerStart = appSource.indexOf("function customerPage");
+  assert.ok(loadingStart >= 0);
+  assert.ok(adminStart > loadingStart);
+  assert.ok(customerStart > adminStart);
+  const loadingPageSource = appSource.slice(loadingStart, adminStart);
+  const adminPageSource = appSource.slice(adminStart, customerStart);
+  assert.match(loadingPageSource, /supabase-authorized-panel/);
+  assert.match(adminPageSource, /supabase-authorized-panel/);
+  assert.doesNotMatch(loadingPageSource, /auth-gate/);
+  assert.doesNotMatch(adminPageSource, /auth-gate/);
+});
+
 test("browser source has no Supabase admin API or server secret exposure", () => {
   [authSource, appSource].forEach((source) => {
     assert.doesNotMatch(source, /supabase\.auth\.admin/i);

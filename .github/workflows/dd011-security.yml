@@ -6,8 +6,17 @@ on:
     paths:
       - "supabase/migrations/**"
       - "supabase/tests/dd011_security_hardening_contract.sql"
+      - "supabase/tests/dd011b_owner_activation_contract.sql"
+      - "api/_dd011b.js"
+      - "api/staff-rpc.js"
+      - "api/security.js"
+      - "api/security-admin.js"
       - "src/shared/auth/**"
       - "src/shared/backend/security-admin*.js"
+      - "src/shared/backend/security-v2-api.js"
+      - "src/shared/backend/security-bootstrap-ui.js"
+      - "src/shared/backend/device-session-transport.js"
+      - "tests/dd011b-security.test.js"
       - "scripts/dd011-*.mjs"
       - ".github/workflows/dd011-security.yml"
       - "package.json"
@@ -45,10 +54,15 @@ jobs:
       - name: Reset database from migrations and seed
         run: npx supabase db reset
 
-      - name: Run DD-011 security hardening contract
+      - name: Run DD-011 security hardening regression
         run: |
           DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd011_security_hardening_contract.sql
+
+      - name: Run DD-011B sole Owner and activation contract
+        run: |
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd011b_owner_activation_contract.sql
 
       - name: Stop Supabase local stack
         if: always()

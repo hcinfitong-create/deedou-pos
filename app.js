@@ -119,6 +119,7 @@ let pendingStaffAuthKey = "";
 let supabaseCommandNotice = "";
 let supabaseSnapshotLoaded = false;
 let supabaseSnapshotLoading = false;
+let supabaseSnapshotRefreshPending = false;
 let supabaseSnapshotError = "";
 let supabaseRefreshSubscription = null;
 let supabaseCustomerToken = "";
@@ -409,6 +410,10 @@ function commandFailureMessage(result = {}) {
   return [result.category || "BACKEND_UNAVAILABLE", result.reason || "COMMAND_FAILED"].filter(Boolean).join(": ");
 }
 
+function isStaleVersionConflict(result = {}) {
+  return result?.category === "CONFLICT" && result?.reason === "STALE_VERSION";
+}
+
 async function runSupabaseAuthoritativeCommand(commandName, operation, options = {}) {
   if (backendConfig.mode !== BACKEND_MODES.SUPABASE) return false;
   const intent = options.intent || null;
@@ -418,7 +423,12 @@ async function runSupabaseAuthoritativeCommand(commandName, operation, options =
     if (intent && isTerminalCommandResult(result)) clearPendingCommandKey(commandName, intent);
     if (!result?.ok) {
       supabaseCommandNotice = `${commandName}: ${commandFailureMessage(result)}`;
-      render();
+      if (isStaleVersionConflict(result)) {
+        supabaseSnapshotLoaded = false;
+        await ensureSupabaseOperationalState({ force: true });
+      } else {
+        render();
+      }
       return false;
     }
     supabaseCommandNotice = `${commandName}: OK`;
@@ -665,26 +675,36 @@ async function refreshStaffAuthorization(routeName, authKey = "") {
 
 async function ensureSupabaseOperationalState(options = {}) {
   if (backendConfig.mode !== BACKEND_MODES.SUPABASE || !staffAuthState.session || staffAuthState.authorization?.ok !== true) return;
-  if (supabaseSnapshotLoading) return;
+  if (supabaseSnapshotLoading) {
+    if (options.force) supabaseSnapshotRefreshPending = true;
+    return;
+  }
   if (supabaseSnapshotLoaded && !options.force) return;
   supabaseSnapshotLoading = true;
   supabaseSnapshotError = "";
-  try {
-    const result = await authoritativeBackendApi.fetchStaffSnapshot({
-      locationId: staffAuthState.locationId,
-      workstationMode: staffAuthState.authorization?.workstationMode || staffAuthState.workstationMode
-    });
-    if (!result.ok) {
-      supabaseSnapshotError = commandFailureMessage(result);
+  do {
+    supabaseSnapshotRefreshPending = false;
+    try {
+      const result = await authoritativeBackendApi.fetchStaffSnapshot({
+        locationId: staffAuthState.locationId,
+        workstationMode: staffAuthState.authorization?.workstationMode || staffAuthState.workstationMode
+      });
+      if (!result.ok) {
+        supabaseSnapshotError = commandFailureMessage(result);
+        supabaseSnapshotLoaded = false;
+      } else {
+        applySupabaseSnapshot(result.payload);
+        subscribeSupabaseRefresh();
+      }
+    } catch (error) {
+      supabaseSnapshotError = error?.message || "BACKEND_UNAVAILABLE";
       supabaseSnapshotLoaded = false;
-    } else {
-      applySupabaseSnapshot(result.payload);
-      subscribeSupabaseRefresh();
     }
-  } catch (error) {
-    supabaseSnapshotError = error?.message || "BACKEND_UNAVAILABLE";
-    supabaseSnapshotLoaded = false;
-  }
+    if (supabaseSnapshotRefreshPending) supabaseSnapshotLoaded = false;
+  } while (supabaseSnapshotRefreshPending
+    && backendConfig.mode === BACKEND_MODES.SUPABASE
+    && staffAuthState.session
+    && staffAuthState.authorization?.ok === true);
   supabaseSnapshotLoading = false;
   render();
 }
@@ -768,6 +788,7 @@ function subscribeSupabaseRefresh() {
 function resetSupabaseOperationalState() {
   supabaseSnapshotLoaded = false;
   supabaseSnapshotLoading = false;
+  supabaseSnapshotRefreshPending = false;
   supabaseSnapshotError = "";
   supabaseRefreshSubscription?.unsubscribe?.();
   supabaseRefreshSubscription = null;
@@ -825,7 +846,7 @@ function supabaseLoadingPage(routeName) {
   const staffContext = staffAuthState.staffContext?.find((row) => row.locationId === staffAuthState.locationId) || staffAuthState.staffContext?.[0];
   return `
     <section class="page admin-page">
-      <div class="panel section-pad auth-gate">
+      <div class="panel section-pad supabase-authorized-panel">
         <div class="order-head">
           <div>
             <div class="kicker">SUPABASE MODE</div>
@@ -852,7 +873,7 @@ function bindSupabaseReadOnlyRoute() {}
 function supabaseAdminDeferredPage() {
   return `
     <section class="page admin-page">
-      <div class="panel section-pad auth-gate">
+      <div class="panel section-pad supabase-authorized-panel">
         <div class="kicker">SUPABASE MODE</div>
         <h1>Admin DeeDou</h1>
         <p class="muted">Menu/admin mutation RPCs are deferred; localStorage admin changes are disabled in SUPABASE mode.</p>

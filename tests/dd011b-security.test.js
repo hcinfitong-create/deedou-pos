@@ -1,0 +1,224 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import {
+  DEVICE_SESSION_COOKIE,
+  backendConfig,
+  secureCookie,
+  normalizeUsername,
+  isValidUsername,
+  sameOriginAllowed,
+  staffLoginEmail
+} from "../api/_dd011b.js";
+import {
+  BACKEND_MODES,
+  createLegacyMigrationApi
+} from "../src/shared/backend/index.js";
+import {
+  LEGACY_DEVICE_CREDENTIAL_KEY,
+  loginEmailForIdentifier,
+  shouldProxyStaffRpc,
+  rpcFunctionName
+} from "../src/shared/backend/device-session-transport.js";
+
+test("DD011B normalizes unique staff username into internal Auth email", () => {
+  assert.equal(normalizeUsername("  HieuStaff1 "), "hieustaff1");
+  assert.equal(isValidUsername("hieustaff1"), true);
+  assert.equal(isValidUsername("ab"), false);
+  assert.equal(staffLoginEmail("HieuStaff1"), "hieustaff1@staff.deedou.invalid");
+  assert.equal(loginEmailForIdentifier("hieustaff1"), "hieustaff1@staff.deedou.invalid");
+  assert.equal(loginEmailForIdentifier("owner@example.com"), "owner@example.com");
+});
+
+test("DD011B Owner Security username pattern is valid under Chromium v regex semantics", () => {
+  const source = readFileSync(new URL("../src/shared/backend/security-admin-v2-ui.js", import.meta.url), "utf8");
+  const match = source.match(/<input name="username"[^>]*pattern="([^"]+)"/);
+  assert.ok(match, "username input pattern must be present");
+  assert.equal(match[1], String.raw`[a-zA-Z0-9][a-zA-Z0-9_\\-]{2,31}`);
+
+  const renderedPattern = match[1].replace(/\\\\/g, "\\");
+  assert.equal(renderedPattern, String.raw`[a-zA-Z0-9][a-zA-Z0-9_\-]{2,31}`);
+  const browserPattern = new RegExp(`^(?:${renderedPattern})$`, "v");
+
+  for (const value of ["abc", "a_b", "a-b", "A1_", "a".repeat(32)]) {
+    assert.equal(browserPattern.test(value), true, `${value} should be accepted by browser username pattern`);
+  }
+  for (const value of ["ab", "a".repeat(33), "_ab", "-ab", "a.b", "a b"]) {
+    assert.equal(browserPattern.test(value), false, `${value} should be rejected by browser username pattern`);
+  }
+});
+
+test("DD011B device session cookie is JS-inaccessible and strict same-origin", () => {
+  const cookie = secureCookie(DEVICE_SESSION_COOKIE, "secret", 300);
+  assert.match(cookie, /^__Host-deedou_device_session=/);
+  assert.match(cookie, /HttpOnly/);
+  assert.match(cookie, /Secure/);
+  assert.match(cookie, /SameSite=Strict/);
+  assert.match(cookie, /Path=\//);
+});
+
+test("DD011B local backend allows loopback HTTP without allowing remote insecure origins", () => {
+  const local = backendConfig({
+    DEEDOU_SUPABASE_URL: "http://127.0.0.1:54321",
+    DEEDOU_SUPABASE_PUBLISHABLE_KEY: "publishable",
+    DEEDOU_SUPABASE_SERVICE_ROLE_KEY: "service"
+  });
+  assert.equal(local?.supabaseUrl, "http://127.0.0.1:54321");
+  assert.equal(backendConfig({
+    DEEDOU_SUPABASE_URL: "http://example.com",
+    DEEDOU_SUPABASE_PUBLISHABLE_KEY: "publishable",
+    DEEDOU_SUPABASE_SERVICE_ROLE_KEY: "service"
+  }), null);
+  assert.equal(sameOriginAllowed({ headers: { origin: "http://127.0.0.1:8099", host: "127.0.0.1:8099" } }), true);
+  assert.equal(sameOriginAllowed({ headers: { origin: "http://localhost:8099", host: "localhost:8099" } }), true);
+  assert.equal(sameOriginAllowed({ headers: { origin: "http://example.com", host: "example.com" } }), false);
+  assert.equal(sameOriginAllowed({ headers: { origin: "https://pos.deedou.example", host: "pos.deedou.example" } }), true);
+});
+
+test("DD011B proxies only RPCs carrying workstation proof", () => {
+  const staffUrl = "https://example.supabase.co/rest/v1/rpc/authorize_staff_access";
+  assert.equal(shouldProxyStaffRpc(staffUrl, { p_device_credential: "" }), true);
+  assert.equal(shouldProxyStaffRpc(staffUrl, { p_current_device_credential: "" }), true);
+  assert.equal(shouldProxyStaffRpc("https://example.supabase.co/rest/v1/rpc/submit_qr_order", { p_qr_token: "abc" }), false);
+  assert.equal(rpcFunctionName(staffUrl), "authorize_staff_access");
+});
+
+test("DD011B migration adapter preserves empty browser credential for backend-managed device proxy", async () => {
+  const calls = [];
+  const api = createLegacyMigrationApi({
+    config: {
+      mode: BACKEND_MODES.SUPABASE,
+      supabaseUrl: "https://deedou-demo.supabase.co",
+      supabasePublishableKey: "sb_publishable_demo_key"
+    },
+    authApi: {
+      getClient: async () => ({
+        rpc: async (functionName, params) => {
+          calls.push({ functionName, params });
+          return {
+            data: [{ ok: true, category: "OK", payload: { preview: true } }],
+            error: null
+          };
+        }
+      })
+    },
+    deviceStorage: { getItem: () => "" },
+    authStateRef: () => ({
+      locationId: "deedou-demo",
+      authorization: { workstationMode: "ADMIN" }
+    })
+  });
+
+  const result = await api.preview({
+    bundle: { schemaVersion: 1, source: "DEEDOU_LOCAL_DEMO", locationId: "deedou-demo" },
+    importKey: "dd011b-preview"
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].functionName, "dd008d_preview_legacy_import");
+  assert.equal(calls[0].params.p_location_id, "deedou-demo");
+  assert.equal(calls[0].params.p_workstation_mode, "ADMIN");
+  assert.equal(Object.hasOwn(calls[0].params, "p_device_credential"), true);
+  assert.equal(calls[0].params.p_device_credential, "");
+});
+
+test("DD011B production HTML no longer loads legacy browser credential UI", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  assert.match(html, /device-session-transport\.js/);
+  assert.match(html, /security-bootstrap-ui\.js/);
+  assert.match(html, /security-admin-v2-ui\.js/);
+  assert.doesNotMatch(html, /device-activation-ui\.js/);
+  assert.doesNotMatch(html, /security-admin-ui\.js/);
+});
+
+test("DD011B loaded security surfaces never persist legacy device credential", () => {
+  const files = [
+    "../src/shared/backend/device-session-transport.js",
+    "../src/shared/backend/security-bootstrap-ui.js",
+    "../src/shared/backend/security-admin-v2-ui.js",
+    "../src/shared/backend/security-v2-api.js"
+  ];
+  for (const file of files) {
+    const source = readFileSync(new URL(file, import.meta.url), "utf8");
+    assert.equal(source.includes(`setItem(\"${LEGACY_DEVICE_CREDENTIAL_KEY}\"`), false, file);
+    assert.equal(source.includes(`setItem('${LEGACY_DEVICE_CREDENTIAL_KEY}'`), false, file);
+  }
+});
+
+test("DD011B Owner Security checks identity before calling Owner-only snapshot", () => {
+  const source = readFileSync(new URL("../src/shared/backend/security-admin-v2-ui.js", import.meta.url), "utf8");
+  const statusCall = source.indexOf("await api.status()");
+  const snapshotCall = source.indexOf("await api.securitySnapshot()");
+  assert.ok(statusCall >= 0, "Owner Security must query general security status first");
+  assert.ok(snapshotCall > statusCall, "Owner-only snapshot must run only after status/Owner check");
+  assert.match(source, /state\.isOwner = status\.isOwner === true/);
+  assert.match(source, /if \(!state\.isOwner\) \{[\s\S]*?state\.snapshot = null;[\s\S]*?return;/);
+});
+
+test("DD011B hosted preview acceptance is isolated from the DD-011 PR #38 gate", () => {
+  const dd011Script = readFileSync(new URL("../scripts/dd011-preview-hosted-smoke.mjs", import.meta.url), "utf8");
+  const dd011Workflow = readFileSync(new URL("../.github/workflows/dd011-preview-hosted-smoke.yml", import.meta.url), "utf8");
+  const dd011bScript = readFileSync(new URL("../scripts/dd011b-preview-hosted-smoke.mjs", import.meta.url), "utf8");
+
+  assert.match(dd011Script, /DD-011 hosted gate must run on PR #38/);
+  assert.match(dd011Workflow, /hosted-preview-security-smoke:[\s\S]*pull_request\.number == 38/);
+  assert.match(dd011Workflow, /dd011b-hosted-preview-security-acceptance:[\s\S]*pull_request\.number == 48/);
+  assert.match(dd011Workflow, /node scripts\/dd011-preview-hosted-smoke\.mjs/);
+  assert.match(dd011Workflow, /node scripts\/dd011b-preview-hosted-smoke\.mjs/);
+  assert.match(dd011bScript, /DD-011B hosted gate must run on PR #48/);
+  assert.doesNotMatch(dd011bScript, /DD-011 hosted gate must run on PR #38/);
+});
+
+test("DD011B hosted acceptance uses backend-managed device sessions without JS-readable device credentials", () => {
+  const source = readFileSync(new URL("../scripts/dd011b-preview-hosted-smoke.mjs", import.meta.url), "utf8");
+
+  assert.match(source, /__Host-deedou_device_session/);
+  assert.match(source, /httpOnly === true/);
+  assert.match(source, /secure === true/);
+  assert.match(source, /assertNoBrowserDeviceCredential/);
+  assert.match(source, /requestActivationThroughUi/);
+  assert.match(source, /approveActivationAndWaitForDevice/);
+  assert.match(source, /revokeDeviceThroughOwnerUi/);
+  assert.match(source, /disableStaffThroughOwnerUi/);
+  assert.doesNotMatch(source, /setItem\(["']deedou_device_credential["']/);
+  assert.doesNotMatch(source, /sessionStorage\.setItem\(["']deedou_device_credential["']/);
+});
+
+test("DD011B hosted acceptance scopes intentional HTTP 403 browser console errors", () => {
+  const source = readFileSync(new URL("../scripts/dd011b-preview-hosted-smoke.mjs", import.meta.url), "utf8");
+
+  assert.match(source, /withExpectedForbiddenDenial/);
+  assert.match(source, /path: "\/api\/security-admin"[\s\S]*reason: "SINGLE_OWNER_ENFORCED"/);
+  assert.match(source, /path: "\/api\/staff-rpc"[\s\S]*reason: expectedReason/);
+  assert.match(source, /assert\(result\.path === scope\.path/);
+  assert.match(source, /assert\(result\.status === 403/);
+  assert.match(source, /isExpectedForbiddenConsoleText\(text\) && consumeExpectedForbiddenConsole\(page\)/);
+  assert.match(source, /page\.on\("pageerror", \(error\) => page\.__errors\.push/);
+  assert.match(source, /page\.on\("response", async \(response\)/);
+  assert.match(source, /DD011B_HTTP_403_DIAG/);
+  assert.match(source, /safeResponseReason/);
+  assert.match(source, /expectedScope/);
+  assert.match(source, /CONSOLE_403_DIAGNOSTICS/);
+  assert.match(source, /isExpectedDeviceSessionProbe/);
+  assert.match(source, /entry\.path === "\/api\/staff-rpc"/);
+  assert.match(source, /entry\.method === "POST"/);
+  assert.match(source, /entry\.reason === "DEVICE_SESSION_REQUIRED"/);
+  assert.match(source, /\^auth-gate:login:\(ADMIN\|CASHIER\)\$/);
+  assert.match(source, /\^owner-bootstrap:\(enroll-totp\|device\)\$/);
+  assert.doesNotMatch(source, /includes\(["']403["']\)/);
+  assert.doesNotMatch(source, /message\.text\(\)\.includes/);
+});
+
+test("DD011B hosted bootstrap source remains enabled and narrowly GitHub OIDC scoped", () => {
+  const source = readFileSync(new URL("../supabase/functions/dd008-hosted-smoke-bootstrap/index.ts", import.meta.url), "utf8");
+
+  assert.doesNotMatch(source, /HOSTED_SMOKE_DISABLED/);
+  assert.match(source, /deedou-hosted-smoke/);
+  assert.match(source, /hcinfitong-create\/deedou-pos/);
+  assert.match(source, /refs\/pull\/38\/merge/);
+  assert.match(source, /refs\/pull\/48\/merge/);
+  assert.match(source, /\.github\/workflows\/dd011-preview-hosted-smoke\.yml/);
+  assert.match(source, /event_name !== "pull_request"/);
+  assert.match(source, /workflow_ref/);
+});

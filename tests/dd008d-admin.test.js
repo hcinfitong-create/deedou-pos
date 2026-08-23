@@ -132,17 +132,26 @@ test("DD-008D admin realtime adapter requests ticketed private admin audience", 
   assert.equal(channels[0].unsubscribed, true);
 });
 
-test("DD-008D admin adapter fails closed without device credential", async () => {
-  let rpcCalled = false;
+test("DD-011B admin adapter allows backend-managed device session transport", async () => {
+  const calls = [];
   const api = createAdminBackendApi({
     config,
-    authApi: { getClient: async () => ({ rpc: async () => { rpcCalled = true; return { data: [], error: null }; } }) },
+    authApi: {
+      getClient: async () => ({
+        rpc: async (name, params) => {
+          calls.push({ name, params });
+          return { data: [{ ok: true, category: "OK", payload: { products: [] } }], error: null };
+        }
+      })
+    },
     deviceStorage: { getItem: () => null },
     authStateRef: () => ({ locationId: "deedou-demo", authorization: { workstationMode: "ADMIN" } })
   });
   const result = await api.fetchMenu();
-  assert.equal(result.ok, false);
-  assert.equal(result.category, "FORBIDDEN");
-  assert.equal(result.reason, "ADMIN_CONTEXT_INCOMPLETE");
-  assert.equal(rpcCalled, false);
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "dd008d_get_admin_menu_snapshot");
+  assert.equal(calls[0].params.p_location_id, "deedou-demo");
+  assert.equal(calls[0].params.p_workstation_mode, "ADMIN");
+  assert.equal(calls[0].params.p_device_credential, "");
 });
