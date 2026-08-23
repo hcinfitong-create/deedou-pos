@@ -273,9 +273,19 @@ async function diagnoseFixtures(runId: string, locationId: string, expectedDelet
   const refs = await fixtureRefs(runId, locationId);
   const authUsersByRun = await authUserIdsForRun(runId);
   const remainingDeletedUsers = await existingAuthUserCount(expectedDeletedUserIds);
+  const productIds = await idsFrom("products", "id", "location_id", locationId);
+  const orderIds = await idsFrom("orders", "id", "location_id", locationId);
   return {
     locations: await countEq("locations", "id", locationId),
     tables: await countEq("physical_tables", "location_id", locationId),
+    products: productIds.length,
+    components: productIds.length
+      ? await countIn("product_components", "parent_product_id", productIds)
+      : 0,
+    orders: orderIds.length,
+    orderLines: orderIds.length
+      ? await countIn("order_lines", "order_id", orderIds)
+      : 0,
     staffProfiles: refs.profileIds.length,
     staffLocations: await countEq("staff_location_assignments", "location_id", locationId),
     staffRoles: await countEq("staff_role_assignments", "location_id", locationId),
