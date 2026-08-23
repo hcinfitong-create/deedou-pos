@@ -60,6 +60,7 @@ try {
   console.log("DD012C_PREVIEW_PREAUTH_GUARD=PASS");
 
   await loginThroughGate(adminPage, account.email, account.password, "ADMIN");
+  await logOwnerBootstrapDiagnostics(adminPage, "after-password-login");
   await enrollOwnerTotpThroughUi(adminPage);
   await bootstrapOwnerDeviceThroughUi(adminPage);
   await assertBackendDeviceSessionCookie(adminContext, "Owner");
@@ -283,6 +284,7 @@ async function enrollOwnerTotpThroughUi(page) {
   return withPagePhase(page, "owner-bootstrap:enroll-totp", async () => {
     const panel = page.locator("[data-dd011b-bootstrap]");
     await panel.waitFor({ timeout: 30_000 });
+    await logOwnerBootstrapDiagnostics(page, "before-owner-mfa-enroll");
     if (await panel.locator("[data-dd011b-owner-mfa-challenge]").count()) {
       throw new Error("Hosted Owner unexpectedly already has a verified TOTP factor");
     }
@@ -334,6 +336,52 @@ async function securityPostFromPage(page, path, payload) {
     });
     return { status: response.status, body: await response.json().catch(() => ({})), path };
   }, { path, payload }));
+}
+
+async function logOwnerBootstrapDiagnostics(page, label) {
+  const previousPhase = page.__phase;
+  try {
+    const panel = page.locator("[data-dd011b-bootstrap]");
+    const selectors = [
+      "[data-dd011b-bootstrap]",
+      "[data-dd011b-owner-mfa-enroll]",
+      "[data-dd011b-owner-mfa-challenge]",
+      "[data-dd011b-owner-bootstrap]",
+      "[data-dd011b-refresh]",
+      "[data-dd011b-retry]"
+    ];
+    const controls = {};
+    for (const selector of selectors) {
+      const locator = page.locator(selector);
+      const count = await locator.count().catch(() => 0);
+      controls[selector] = {
+        count,
+        visible: count > 0 ? await locator.first().isVisible().catch(() => false) : false
+      };
+    }
+    const panelText = controls["[data-dd011b-bootstrap]"].count > 0
+      ? await panel.innerText().catch((error) => `TEXT_ERROR:${error?.message || error}`)
+      : "";
+    const security = await securityPostFromPage(page, "/api/security", { action: "status" })
+      .then((result) => ({ status: result.status, ...safeStatus(result.body) }))
+      .catch((error) => ({ status: 0, ok: false, reason: sanitize(error?.message || error) }));
+    console.log(`DD012C_OWNER_BOOTSTRAP_DIAG=${JSON.stringify({
+      label: sanitize(label),
+      urlHash: sanitize(new URL(page.url()).hash || ""),
+      controls,
+      panelText: sanitizePanelText(panelText),
+      security,
+      forbiddenResponses: (page.__forbiddenResponses || []).map((entry) => ({
+        phase: entry.phase,
+        method: entry.method,
+        status: entry.status,
+        path: entry.path,
+        reason: entry.reason
+      }))
+    })}`);
+  } finally {
+    page.__phase = previousPhase;
+  }
 }
 
 async function assertBackendDeviceSessionCookie(context, label) {
@@ -545,19 +593,22 @@ async function safeResponseReason(response) {
 function safeStatus(value = {}) {
   return {
     ok: value.ok === true,
+    reason: sanitize(value.reason || value.message || ""),
+    category: sanitize(value.category || ""),
     isOwner: value.isOwner === true,
     profile: value.profile ? {
-      id: value.profile.id,
-      username: value.profile.username,
       active: value.profile.active,
       provisioningStatus: value.profile.provisioning_status
     } : null,
     device: value.device ? {
       active: value.device.active === true,
       reason: value.device.reason,
-      deviceId: value.device.deviceId,
       locationId: value.device.locationId,
       workstationMode: value.device.workstationMode
+    } : null,
+    activation: value.activation ? {
+      status: value.activation.status,
+      activationKind: value.activation.activationKind
     } : null
   };
 }
@@ -601,6 +652,12 @@ function sanitize(value) {
     .replace(/x-vercel-protection-bypass\s*[:=]\s*[^\s,;]+/gi, "x-vercel-protection-bypass=[REDACTED]");
   for (const secret of secrets.filter(Boolean)) out = out.split(secret).join("[SECRET_REDACTED]");
   return out.slice(0, 1200);
+}
+function sanitizePanelText(value) {
+  return sanitize(value)
+    .replace(/\b[0-9]{6}\b/g, "[TOTP_CODE_REDACTED]")
+    .replace(/\b[A-Z2-7]{16,}\b/g, "[TOTP_SECRET_REDACTED]")
+    .slice(0, 800);
 }
 async function waitFor(fn, label, timeout = 20_000) { const started = Date.now(); let last; while (Date.now() - started < timeout) { try { if (await fn()) return; } catch (error) { last = error; } await sleep(200); } throw new Error(`Timeout waiting for ${label}${last ? `: ${sanitize(last?.message || last)}` : ""}`); }
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }

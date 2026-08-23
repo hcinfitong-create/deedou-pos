@@ -13,7 +13,7 @@ const config = {
   supabasePublishableKey: "sb_publishable_test_key"
 };
 
-function harness() {
+function harness({ deviceCredential = "dd012c-device" } = {}) {
   const calls = [];
   const client = {
     async rpc(name, params) {
@@ -33,7 +33,7 @@ function harness() {
   const api = createAdminComponentsBackendApi({
     config,
     authApi: { getClient: async () => client },
-    deviceStorage: { getItem: (key) => key === "deedou_device_credential" ? "dd012c-device" : null },
+    deviceStorage: { getItem: (key) => key === "deedou_device_credential" ? deviceCredential : null },
     authStateRef: () => ({ locationId: "deedou-demo", authorization: { workstationMode: "ADMIN" } })
   });
   return { api, calls };
@@ -104,6 +104,62 @@ test("DD-012C create adapter canonicalizes IDs/station and preserves integer qua
   assert.equal(calls[0].params.p_component_key, "main_plate");
   assert.equal(calls[0].params.p_qty, 2);
   assert.equal(calls[0].params.p_station_code, "KITCHEN_HOT");
+});
+
+test("DD-012C component adapter allows DD-011B backend-managed device sessions", async () => {
+  const { api, calls } = harness({ deviceCredential: null });
+  await api.createComponent({
+    parentProductId: " Breakfast-Combo ",
+    id: " Combo-Main ",
+    componentKey: " MAIN_PLATE ",
+    nameVi: "Phần chính",
+    nameEn: "Main plate",
+    qty: 2,
+    stationCode: " kitchen_hot ",
+    displayOrder: 1,
+    idempotencyKey: "dd012c-create"
+  });
+  await api.updateComponent({
+    id: " Combo-Main ",
+    componentKey: " MAIN_PLATE ",
+    nameVi: "Phần chính mới",
+    nameEn: "Updated plate",
+    qty: 3,
+    stationCode: " kitchen_finish ",
+    displayOrder: 2,
+    expectedUpdatedAt: "2026-08-21T20:31:00Z",
+    idempotencyKey: "dd012c-update"
+  });
+  await api.deleteComponent({
+    id: " Combo-Main ",
+    expectedUpdatedAt: "2026-08-21T20:32:00Z",
+    idempotencyKey: "dd012c-delete"
+  });
+
+  assert.deepEqual(calls.map((call) => call.name), [
+    "dd012_create_product_component",
+    "dd012_update_product_component",
+    "dd012_delete_product_component"
+  ]);
+  for (const call of calls) {
+    assert.equal(call.params.p_location_id, "deedou-demo");
+    assert.equal(call.params.p_workstation_mode, "ADMIN");
+    assert.equal(call.params.p_device_credential, "");
+  }
+  assert.equal(calls[0].params.p_parent_product_id, "breakfast-combo");
+  assert.equal(calls[0].params.p_component_id, "combo-main");
+  assert.equal(calls[0].params.p_component_key, "main_plate");
+  assert.equal(calls[0].params.p_name_vi, "Phần chính");
+  assert.equal(calls[0].params.p_name_en, "Main plate");
+  assert.equal(calls[0].params.p_qty, 2);
+  assert.equal(calls[0].params.p_station_code, "KITCHEN_HOT");
+  assert.equal(calls[0].params.p_display_order, 1);
+  assert.equal(calls[1].params.p_component_id, "combo-main");
+  assert.equal(calls[1].params.p_qty, 3);
+  assert.equal(calls[1].params.p_station_code, "KITCHEN_FINISH");
+  assert.equal(calls[1].params.p_expected_updated_at, "2026-08-21T20:31:00Z");
+  assert.equal(calls[2].params.p_component_id, "combo-main");
+  assert.equal(calls[2].params.p_expected_updated_at, "2026-08-21T20:32:00Z");
 });
 
 test("DD-012C adapter never truncates fractional quantity or display order", async () => {

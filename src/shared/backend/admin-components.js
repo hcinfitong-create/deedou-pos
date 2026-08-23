@@ -23,7 +23,7 @@ export function createAdminComponentsBackendApi(options = {}) {
     const client = await authApi?.getClient?.();
     if (!client?.rpc) return failure("BACKEND_UNAVAILABLE", "SUPABASE_CLIENT_MISSING");
     const context = authorityContext(locationId);
-    if (!context.locationId || !context.credential) return failure("FORBIDDEN", "ADMIN_CONTEXT_INCOMPLETE");
+    if (!context.locationId) return failure("FORBIDDEN", "ADMIN_CONTEXT_INCOMPLETE");
     const correlationId = createCorrelationId("admin-components");
     const { data, error } = await client.rpc(functionName, {
       p_location_id: context.locationId,
