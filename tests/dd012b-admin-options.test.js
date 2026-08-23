@@ -145,6 +145,39 @@ test("DD-012B variant adapter sends canonical identifiers and optimistic token",
   assert.equal(calls[1].params.p_expected_updated_at, "2026-08-21T18:30:00Z");
 });
 
+test("DD-011B admin options adapter keeps device proof key for backend-managed sessions", async () => {
+  const calls = [];
+  const api = createAdminOptionsBackendApi({
+    config,
+    authApi: {
+      getClient: async () => ({
+        rpc: async (name, params) => {
+          calls.push({ name, params });
+          return { data: [{ ok: true, category: "OK", payload: {} }], error: null };
+        }
+      })
+    },
+    deviceStorage: { getItem: () => null },
+    authStateRef: () => ({ locationId: "deedou-demo", authorization: { workstationMode: "ADMIN" } })
+  });
+
+  const result = await api.createVariant({
+    productId: "espresso",
+    id: "espresso-large",
+    variantKey: "large",
+    nameVi: "Lớn",
+    nameEn: "Large",
+    priceDeltaVnd: 10000,
+    idempotencyKey: "dd011b-empty-browser-credential"
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(calls[0].name, "dd012_create_variant");
+  assert.equal(calls[0].params.p_location_id, "deedou-demo");
+  assert.equal(calls[0].params.p_workstation_mode, "ADMIN");
+  assert.equal(calls[0].params.p_device_credential, "");
+});
+
 test("DD-012B modifier adapters preserve integer bounds and never truncate fractional deltas", async () => {
   const { api, calls } = harness();
   await api.createModifierGroup({
