@@ -15,80 +15,100 @@ Before implementing anything:
 7. Compare repository state with this handoff.
 8. Only then code/debug.
 
-## Current working task
+## Current repository state
 
-**DD-011B — Issue #47 / PR #48**
+Current `main` source review: `ff615b5874c0ad1ff9379c0eb2c6b8a9b98b7675`.
 
-- PR: `#48 DD-011B: single Owner and backend-managed device activation`
-- Branch: `agent/dd011b-owner-device-hardening`
-- Pre-documentation implementation head finalized for docs: `1b0d4931693891ee343c037399d250beb9e146b7`
-- PR state at DD-011B docs finalization: open, Draft, mergeable. Implementation and exact-head Vercel Preview hosted acceptance are complete; move to Ready only after this docs-only commit has fresh exact-head checks and Production rollout prerequisites are verified.
-- PR #46/DD-012C remains a separate open Draft.
+DD-011B is no longer an open implementation task. It is merged, deployed and production-verified.
 
-Always fetch the latest head before continuing; documentation commits and later fixes may advance this SHA.
+Completed merge sequence:
 
-## Completed work on DD-011B
+- PR #48 — `DD-011B: single Owner and backend-managed device activation`
+  - merged as `834049bb89a08968e5f69d77f9bb3718ba908d5b`;
+- PR #49 — `Hotfix DD-011B: allow Owner AAL2 re-challenge with active device`
+  - merged as `ff615b5874c0ad1ff9379c0eb2c6b8a9b98b7675`.
 
-Repository implementation already includes the DD-011B schema/security direction:
+Issue #47 is still open as tracking metadata at this handoff, but its implementation and production acceptance are complete. Close it separately after the final docs sync if no intentional follow-up acceptance item remains.
 
-- `staff_profiles.username` and provisioning status.
-- case-insensitive username uniqueness.
-- single-active-OWNER database guard.
-- `workstation_device_secrets` backend secret storage.
-- `workstation_device_sessions` hashed backend session tokens.
-- `staff_activation_requests` for FIRST_LOGIN/NEW_DEVICE challenges.
-- same-origin backend security endpoints.
-- Owner bootstrap/device/session flow.
-- Owner security Admin UI.
-- browser-side device-session transport that removes legacy workstation secret usage from production browser storage.
+## DD-011B production-complete behavior
 
-Recent Part 5 fixes added a browser-smoke compatibility adapter so old DD-008 regression suites can exercise the new backend device-session model without restoring browser-readable secrets. DD-011B now also has its own PR #48 Vercel Preview hosted security acceptance job inside the existing DD-011 hosted workflow, leaving the PR #38 job intact. The staging bootstrap Edge Function source is versioned at `supabase/functions/dd008-hosted-smoke-bootstrap/index.ts`.
+The current implementation and Production rollout provide:
 
-Hosted acceptance fixes now resolved on pre-documentation head `1b0d4931693891ee343c037399d250beb9e146b7`:
+- exactly one active OWNER globally;
+- Owner TOTP MFA/AAL2 for accepted privileged security paths;
+- staff `display_name` plus case-insensitive unique `username`;
+- Owner-created pending staff accounts;
+- six-digit first-login/new-device activation challenge with explicit Owner approval;
+- backend-managed trusted device sessions;
+- Secure/HttpOnly/SameSite cookie transport for device-session proof;
+- no workstation/device secret authority in frontend JS-readable storage;
+- immediate device revoke and staff/location/role disable semantics;
+- sole-Owner protection against normal application deactivation/revoke flows;
+- public QR remains outside staff security gating.
 
-- Username pattern failure: resolved; Chromium accepts the intended username pattern without invalid regex syntax.
-- Hosted async 403 classification failure: resolved; only phase/path/method/reason-proven expected 403s are tolerated, while unrelated console/page/network errors remain fatal.
+Production Supabase project: `nwohsyzpmogqjbmknwbl`.
 
-## Last confirmed debugging evidence
+Production rollout completed:
 
-### Symptom before Part 5 fix
+- DD-011B forward migrations applied in order;
+- Production Vercel server-only Supabase service credential configured separately from Preview/staging;
+- Owner TOTP factor verified;
+- backend-managed Owner ADMIN device/session established;
+- `dd011b_security_policy.backend_device_sessions_required = true`;
+- legacy ADMIN device revoked through the security UI/workflow and retained only as historical revoked state;
+- post-cutover Admin access verified with the current backend session after enforcement was enabled.
 
-`browser-smoke` and `dd008d-browser-smoke` failed after DD-011B while DB/Auth/security contracts were otherwise passing.
+## Production incident resolved by PR #49
 
-### Root cause confirmed
+### Symptom
 
-Old smoke fixtures injected `deedou_device_credential` into `localStorage` and ran a static server. DD-011B intentionally removes that secret from JS-readable storage and proxies staff RPCs through same-origin backend `/api/staff-rpc` using backend-managed device sessions. Therefore the old fixture model no longer matched production security architecture.
+After DD-011B cutover and legacy-device cleanup, Owner reached the auth gate with a message equivalent to insufficient access even though the backend-managed device/session remained active.
 
-### Fix direction
+### Evidence
 
-- Do **not** restore workstation/device secret to browser storage.
-- Keep production 401/403 authorization semantics.
-- Adapt smoke fixture infrastructure to create/use backend device sessions.
-- Reuse the actual requested route permission; do not maintain a duplicate permission map in the test adapter.
-- Ignore only a browser console signal proven to be an intentional denial in a negative authorization test; all unexpected console/page/network errors still fail.
+Production checks showed:
 
-## Validation status rule
+- Owner staff profile/role/location/permissions remained valid;
+- current backend-managed Owner device/session remained active and continued receiving usage;
+- `backend_device_sessions_required` remained enabled;
+- latest Owner Supabase Auth session had fallen back to AAL1 while privileged Owner authorization requires AAL2.
 
-Do not say DD-011B is complete merely because a previous run was green.
+### Root cause
 
-At the DD-011B hosted acceptance update, exact-head status must include:
+`security-bootstrap-ui.js` rendered the active-device "continue" state before the Owner AAL2 re-challenge state. Therefore an Owner with a valid active device but an AAL1 Auth session had no UI path to enter TOTP and elevate back to AAL2.
 
-- DeeDou CI syntax/unit/backend/Auth/browser gates;
-- DD-011 security contract;
-- DD-011B Vercel Preview hosted security acceptance;
-- hosted fixture cleanup with run-scoped staff/device/session/location data returning to baseline.
+### Fix
 
-Confirmed evidence on pre-documentation head `1b0d4931693891ee343c037399d250beb9e146b7`:
+PR #49 moved the Owner AAL2 re-challenge guard ahead of the active-device continue state. It did not weaken RBAC, RLS, AAL2, backend-session enforcement or device revoke semantics.
 
-- DeeDou CI `32659206957`: PASS.
-- DD-011 Security Hardening Contract `32659206967`: PASS.
-- DD-010A Table Authority Contract `32659206939`: PASS.
-- DD-012 Catalog Contract `32659206898`: PASS.
-- DD-011 Vercel Preview Hosted Security Smoke `32659206888`, job `97242678394`: PASS.
-- Hosted cleanup baseline: `DD011B_PREVIEW_CLEANUP_BASELINE=PASS`.
-- Hosted completion marker: `DD-011B Vercel Preview hosted security acceptance passed.`
+Post-deploy verification confirmed:
 
-Any documentation commit changes the head and may trigger a new CI run. Fetch current checks before reporting status.
+- Owner successfully completed TOTP challenge and re-entered Admin;
+- latest Owner Auth session is AAL2;
+- current Owner ADMIN device remains active;
+- backend device session remains active and unrevoked;
+- legacy ADMIN device remains revoked;
+- `backend_device_sessions_required = true` remains enforced.
+
+## Validation evidence
+
+PR #49 exact head before merge: `039246cd56f5478ceb4b188b20845abe70b052ef`.
+
+Confirmed passing checks:
+
+- DeeDou CI run `32662677868` — PASS.
+  - syntax/check gate PASS;
+  - 275/275 unit tests PASS;
+  - browser smoke PASS;
+  - DD-008D multi-context browser smoke PASS;
+  - Auth + TOTP AAL2 integration PASS;
+  - backend DB contracts PASS;
+  - DD-008C authoritative command/realtime integration PASS.
+- DD-010A Table Authority Contract `32662677890` — PASS.
+- DD-011 Security Hardening Contract `32662677908` — PASS.
+- DD-012 Catalog Contract `32662677907` — PASS.
+- Vercel Preview — success.
+- Production Vercel deployment for `ff615b5874c0ad1ff9379c0eb2c6b8a9b98b7675` — success.
 
 ## Protected behavior — do not regress
 
@@ -100,28 +120,48 @@ Any documentation commit changes the head and may trigger a new CI run. Fetch cu
 - KDS `prepStatus` workflow and FOH serving separation.
 - append-only payment ledger and bounded refund semantics.
 - DD-012 immutable historical configured-order snapshots.
-- OWNER AAL2 and sole-Owner protection.
+- sole OWNER and Owner AAL2 requirements.
 - no JS-readable device secret.
+- backend-device-session enforcement remains authoritative after cutover.
+- an Owner whose Auth session is AAL1 must receive a TOTP re-challenge even when the workstation device/session is already active.
 
-## Parallel PR interaction
+## Current working engineering task after docs sync
 
-PR #46 is DD-012C combo/components. It must stay business-logically independent from DD-011B.
+**DD-012C — PR #46 `authoritative combo component management`**
 
-Expected integration hotspots if both remain open:
+Branch: `agent/dd012c-combo-components`
+Head at this handoff: `307e1868cac3cc1f1c593353ff3c51fa0878ce32`
+State: open, Draft, currently `mergeable=false` against latest `main`.
 
-- `index.html`;
-- `package.json`;
-- possibly Admin composition if both add UI wiring.
+Current compare against `main` after DD-011B/hotfix merges:
 
-Resolve these after one branch advances/merges; do not copy unrelated modules between PRs.
+- ahead by 15 commits;
+- behind by 73 commits;
+- merge base remains the older `f431e9e49d32e93cb6b460ea6efe80a79ac21a5c` baseline.
+
+Do **not** continue implementation from the stale branch as though it were current. First rebase/update it onto latest `main`, inspect the actual conflicts, and resolve only integration conflicts.
+
+DD-012C scope remains:
+
+- authoritative CRUD for existing `product_components`;
+- existing Admin catalog component editor;
+- no parallel combo model;
+- preserve immutable submitted-order snapshots;
+- no invented production menu data;
+- import/duplicate helper only if real operator provisioning later proves it useful.
+
+Likely integration hotspots include `index.html`, `package.json`, shared backend composition and Admin wiring. Do not pull DD-011B security logic into DD-012C beyond what latest `main` already requires.
 
 ## Next concrete action
 
-1. Fetch PR #48 latest head after the docs-only finalization commit.
-2. Inspect fresh exact-head GitHub and Vercel checks; do not reuse the `1b0d493` conclusions for the new docs SHA.
-3. Verify Production Vercel server-only service-role environment for the production Supabase project before claiming production rollout readiness.
-4. If all post-doc checks and production prerequisites are green, move PR #48 from Draft to Ready and perform final merge-readiness review.
-5. If any post-doc check fails, report the exact failing boundary and do not make production/security changes as part of the docs-only finalization.
+1. Finish/merge the docs-only DD-011B final-state sync.
+2. Optionally close Issue #47 as completed after docs merge.
+3. Rebase/update PR #46 onto latest `main`.
+4. Inspect conflict resolution against current DD-011B/hotfix source rather than copying old branch assumptions.
+5. Run fresh exact-head CI/database/Auth/browser contracts after rebase.
+6. Run DD-012C staging hosted Admin + public QR/order acceptance and cleanup.
+7. Only after staging success consider Production migration for DD-012C.
+8. Provision real DeeDou menu data only from user-supplied source data after Slice C acceptance.
 
 ## Handoff template for future sessions
 
