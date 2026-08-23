@@ -60,3 +60,39 @@ test("DD011B coalesces repeated stable auth events without hiding security-signi
   subscription.unsubscribe();
   assert.equal(unsubscribed, true);
 });
+
+test("DD011B password sign-in event does not invalidate the caller's in-flight authorization", async () => {
+  let authStateCallback = null;
+  const delivered = [];
+  const user = { user: { id: "admin-user", email: "admin@example.invalid" } };
+
+  const client = {
+    auth: {
+      onAuthStateChange(callback) {
+        authStateCallback = callback;
+        return { data: { subscription: { unsubscribe() {} } } };
+      },
+      async signInWithPassword() {
+        authStateCallback?.("SIGNED_IN", user);
+        return { data: { session: user }, error: null };
+      }
+    }
+  };
+
+  const api = createSupabasePasswordAuthApi({ config, client });
+  api.onAuthStateChange((event) => delivered.push(event));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof authStateCallback, "function");
+
+  const signedIn = await api.signInWithPassword({ email: "admin@example.invalid", password: "test-password" });
+  assert.equal(signedIn.ok, true);
+  assert.equal(signedIn.session.userId, "admin-user");
+  assert.deepEqual(delivered, [], "SIGNED_IN emitted by the same password sign-in must not reset route authorization state");
+
+  authStateCallback("SIGNED_IN", user);
+  authStateCallback("TOKEN_REFRESHED", user);
+  assert.deepEqual(delivered, [], "stable events for the same authenticated identity remain coalesced");
+
+  authStateCallback("MFA_CHALLENGE_VERIFIED", user);
+  assert.deepEqual(delivered.map(({ event }) => event), ["MFA_CHALLENGE_VERIFIED"]);
+});
