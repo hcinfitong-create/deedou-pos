@@ -69,11 +69,24 @@ export function firstRow(value) {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function isLoopbackHostname(value) {
+  return value === "127.0.0.1" || value === "localhost" || value === "::1";
+}
+
+function allowedBackendUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" || (parsed.protocol === "http:" && isLoopbackHostname(parsed.hostname));
+  } catch {
+    return false;
+  }
+}
+
 export function backendConfig(env = process.env) {
   const supabaseUrl = String(env.DEEDOU_SUPABASE_URL || env.SUPABASE_URL || "").trim();
   const publishableKey = String(env.DEEDOU_SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY || "").trim();
   const serviceRoleKey = String(env.DEEDOU_SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
-  if (!supabaseUrl.startsWith("https://") || !publishableKey || !serviceRoleKey) return null;
+  if (!allowedBackendUrl(supabaseUrl) || !publishableKey || !serviceRoleKey) return null;
   return { supabaseUrl, publishableKey, serviceRoleKey };
 }
 
@@ -89,7 +102,9 @@ export function sameOriginAllowed(request) {
   if (!forwardedHost) return false;
   try {
     const parsed = new URL(origin);
-    return parsed.protocol === "https:" && parsed.host === forwardedHost;
+    if (parsed.host !== forwardedHost) return false;
+    if (parsed.protocol === "https:") return true;
+    return parsed.protocol === "http:" && isLoopbackHostname(parsed.hostname);
   } catch {
     return false;
   }

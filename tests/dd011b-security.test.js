@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   DEVICE_SESSION_COOKIE,
+  backendConfig,
   secureCookie,
   normalizeUsername,
   isValidUsername,
+  sameOriginAllowed,
   staffLoginEmail
 } from "../api/_dd011b.js";
 import {
@@ -31,6 +33,24 @@ test("DD011B device session cookie is JS-inaccessible and strict same-origin", (
   assert.match(cookie, /Secure/);
   assert.match(cookie, /SameSite=Strict/);
   assert.match(cookie, /Path=\//);
+});
+
+test("DD011B local backend allows loopback HTTP without allowing remote insecure origins", () => {
+  const local = backendConfig({
+    DEEDOU_SUPABASE_URL: "http://127.0.0.1:54321",
+    DEEDOU_SUPABASE_PUBLISHABLE_KEY: "publishable",
+    DEEDOU_SUPABASE_SERVICE_ROLE_KEY: "service"
+  });
+  assert.equal(local?.supabaseUrl, "http://127.0.0.1:54321");
+  assert.equal(backendConfig({
+    DEEDOU_SUPABASE_URL: "http://example.com",
+    DEEDOU_SUPABASE_PUBLISHABLE_KEY: "publishable",
+    DEEDOU_SUPABASE_SERVICE_ROLE_KEY: "service"
+  }), null);
+  assert.equal(sameOriginAllowed({ headers: { origin: "http://127.0.0.1:8099", host: "127.0.0.1:8099" } }), true);
+  assert.equal(sameOriginAllowed({ headers: { origin: "http://localhost:8099", host: "localhost:8099" } }), true);
+  assert.equal(sameOriginAllowed({ headers: { origin: "http://example.com", host: "example.com" } }), false);
+  assert.equal(sameOriginAllowed({ headers: { origin: "https://pos.deedou.example", host: "pos.deedou.example" } }), true);
 });
 
 test("DD011B proxies only RPCs carrying workstation proof", () => {
