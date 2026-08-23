@@ -39,10 +39,10 @@ try {
     table: { id: tableId, code: "C12", zone: "DD012C", qrToken }
   });
   assert(setup.ok === true, `bootstrap setup failed: ${JSON.stringify(setup)}`);
+  setupComplete = true;
   assert(Number(setup.diagnostic?.locations || 0) === 1, "bootstrap did not create one location");
   assert(Number(setup.diagnostic?.authUsers || 0) === 1, "bootstrap did not create one auth user");
   assert(Number(setup.diagnostic?.tables || 0) === 1, "bootstrap did not create one table");
-  setupComplete = true;
   console.log("DD012C_STAGING_BOOTSTRAP=PASS");
 
   const ownerClient = runtimeClient(memoryStorage());

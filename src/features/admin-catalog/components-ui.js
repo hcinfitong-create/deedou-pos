@@ -3,40 +3,42 @@ import {
   createAdminBackendApi,
   createAdminComponentsBackendApi,
   getBackendConfig
-} from "./index.js";
-import { normalizeAdminProduct } from "../../features/admin-catalog/index.js";
+} from "../../shared/backend/index.js";
 import {
+  componentAuthorityContextKey,
+  createInitialComponentsUiState,
+  markComponentsMenuLoadFailed,
+  markComponentsMenuLoadStarted,
   normalizeAdminComponent,
+  normalizeAdminProduct,
+  reconcileComponentsUiContext,
+  resultMessage,
+  shouldLoadComponentsMenu,
   validateComponentDraft
-} from "../../features/admin-catalog/components.js";
+} from "./index.js";
 import {
   DEFAULT_LOCATION_ID,
   STAFF_LOCATION_KEY,
   WORKSTATION_MODE_KEY,
   createSupabasePasswordAuthApi
-} from "../auth/index.js";
+} from "../../shared/auth/index.js";
 
 const config = getBackendConfig();
 const authApi = createSupabasePasswordAuthApi({ config, storage: localStorage, deviceStorage: localStorage });
 const authStateRef = () => ({
-  locationId: localStorage.getItem(STAFF_LOCATION_KEY) || DEFAULT_LOCATION_ID,
-  workstationMode: localStorage.getItem(WORKSTATION_MODE_KEY) || "ADMIN",
+  locationId: currentLocationId(),
+  workstationMode: currentWorkstationMode(),
   authorization: { workstationMode: "ADMIN" }
 });
 const adminApi = createAdminBackendApi({ config, authApi, deviceStorage: localStorage, authStateRef });
 const componentsApi = createAdminComponentsBackendApi({ config, authApi, deviceStorage: localStorage, authStateRef });
 
-let state = {
-  loading: false,
-  loaded: false,
-  saving: false,
-  products: [],
-  components: [],
-  selectedProductId: "",
-  message: ""
-};
+let state = createInitialComponentsUiState();
 
 window.addEventListener("hashchange", () => queueMicrotask(render));
+window.addEventListener("storage", (event) => {
+  if (event.key === STAFF_LOCATION_KEY || event.key === WORKSTATION_MODE_KEY) queueMicrotask(render);
+});
 document.addEventListener("click", handleClick);
 document.addEventListener("change", handleChange);
 
@@ -60,8 +62,11 @@ function render() {
   const adminPage = document.querySelector("#app .admin-page") || document.querySelector("#app .page");
   if (!adminPage || adminPage.querySelector("[data-auth-login]")) {
     existing?.remove();
+    state = reconcileComponentsUiContext(state, "", { authenticated: false });
     return;
   }
+
+  state = reconcileComponentsUiContext(state, currentAuthorityContextKey());
 
   const panel = existing || document.createElement("section");
   panel.dataset.dd012cAdminComponents = "";
@@ -81,7 +86,7 @@ function render() {
     ${config.mode !== BACKEND_MODES.SUPABASE ? `<p class="muted">Component authority chỉ bật ở SUPABASE.</p>` : renderBody()}
   `;
 
-  if (config.mode === BACKEND_MODES.SUPABASE && !state.loaded && !state.loading) {
+  if (shouldLoadComponentsMenu(state, { supabaseMode: config.mode === BACKEND_MODES.SUPABASE })) {
     queueMicrotask(() => loadMenu());
   }
 }
@@ -154,28 +159,32 @@ function handleChange(event) {
 }
 
 async function loadMenu({ force = false } = {}) {
-  if (state.loading || (state.loaded && !force)) return;
-  state.loading = true;
-  state.message = "";
+  ensureCurrentAuthorityContext();
+  if (!shouldLoadComponentsMenu(state, { force, supabaseMode: config.mode === BACKEND_MODES.SUPABASE })) return;
+  state = markComponentsMenuLoadStarted(state);
   render();
 
   const result = await adminApi.fetchMenu({ locationId: currentLocationId() });
-  state.loading = false;
   if (!result.ok) {
-    state.loaded = false;
-    state.message = resultMessage(result);
+    state = markComponentsMenuLoadFailed(state, result);
     render();
     return;
   }
 
-  state.products = asArray(result.payload?.products).map(normalizeAdminProduct);
-  state.components = asArray(result.payload?.components).map(normalizeAdminComponent);
-  state.loaded = true;
+  state = {
+    ...state,
+    loading: false,
+    loaded: true,
+    loadAttempted: true,
+    products: asArray(result.payload?.products).map(normalizeAdminProduct),
+    components: asArray(result.payload?.components).map(normalizeAdminComponent)
+  };
   ensureSelectedProduct();
   render();
 }
 
 async function createComponent() {
+  if (!ensureCurrentAuthorityContext()) return;
   const form = document.querySelector("[data-dd012c-create-form]");
   if (!form || !state.selectedProductId) return;
 
@@ -200,6 +209,7 @@ async function createComponent() {
 }
 
 async function saveComponent(componentId) {
+  if (!ensureCurrentAuthorityContext()) return;
   const existing = state.components.find((component) => component.id === componentId);
   const row = document.querySelector(`[data-dd012c-row="${cssEscape(componentId)}"]`);
   if (!existing || !row) return;
@@ -225,6 +235,7 @@ async function saveComponent(componentId) {
 }
 
 async function deleteComponent(componentId) {
+  if (!ensureCurrentAuthorityContext()) return;
   const existing = state.components.find((component) => component.id === componentId);
   if (!existing?.updatedAt) return setMessage("EXPECTED_UPDATED_AT_REQUIRED");
 
@@ -250,7 +261,10 @@ async function mutate(action, successMessage) {
     return;
   }
 
-  state.loaded = false;
+  state = {
+    ...state,
+    loaded: false
+  };
   state.message = successMessage;
   await loadMenu({ force: true });
   state.message = successMessage;
@@ -280,6 +294,25 @@ function currentLocationId() {
   return localStorage.getItem(STAFF_LOCATION_KEY) || DEFAULT_LOCATION_ID;
 }
 
+function currentWorkstationMode() {
+  return localStorage.getItem(WORKSTATION_MODE_KEY) || "ADMIN";
+}
+
+function currentAuthorityContextKey() {
+  return componentAuthorityContextKey({
+    locationId: currentLocationId(),
+    workstationMode: currentWorkstationMode()
+  });
+}
+
+function ensureCurrentAuthorityContext() {
+  const nextState = reconcileComponentsUiContext(state, currentAuthorityContextKey());
+  if (nextState === state) return true;
+  state = nextState;
+  render();
+  return false;
+}
+
 function commandKey(action, id) {
   const suffix = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   return `dd012c-ui-${action}-${id}-${suffix}`;
@@ -288,10 +321,6 @@ function commandKey(action, id) {
 function setMessage(message) {
   state.message = message;
   render();
-}
-
-function resultMessage(result) {
-  return [result?.category, result?.reason].filter(Boolean).join(" · ") || "COMPONENT_COMMAND_FAILED";
 }
 
 function fieldValue(root, selector) {

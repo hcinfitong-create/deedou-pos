@@ -2,9 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  componentAuthorityContextKey,
+  createInitialComponentsUiState,
+  markComponentsMenuLoadFailed,
+  markComponentsMenuLoadStarted,
   normalizeAdminComponent,
+  reconcileComponentsUiContext,
+  shouldLoadComponentsMenu,
   validateComponentDraft
-} from "../src/features/admin-catalog/components.js";
+} from "../src/features/admin-catalog/index.js";
 import { BACKEND_MODES, createAdminComponentsBackendApi } from "../src/shared/backend/index.js";
 
 const config = {
@@ -160,6 +166,54 @@ test("DD-012C component adapter allows DD-011B backend-managed device sessions",
   assert.equal(calls[1].params.p_expected_updated_at, "2026-08-21T20:31:00Z");
   assert.equal(calls[2].params.p_component_id, "combo-main");
   assert.equal(calls[2].params.p_expected_updated_at, "2026-08-21T20:32:00Z");
+});
+
+test("DD-012C component UI cache invalidates across auth and location contexts", () => {
+  const locationA = componentAuthorityContextKey({ locationId: "loc-a", workstationMode: "ADMIN" });
+  const locationB = componentAuthorityContextKey({ locationId: "loc-b", workstationMode: "ADMIN" });
+  const loaded = createInitialComponentsUiState({
+    contextKey: locationA,
+    loaded: true,
+    loadAttempted: true,
+    products: [{ id: "combo-a" }],
+    components: [{ id: "combo-a-main", parentProductId: "combo-a" }],
+    selectedProductId: "combo-a",
+    message: "Loaded"
+  });
+
+  assert.equal(reconcileComponentsUiContext(loaded, locationA), loaded);
+
+  const changedLocation = reconcileComponentsUiContext(loaded, locationB);
+  assert.equal(changedLocation.contextKey, locationB);
+  assert.equal(changedLocation.loaded, false);
+  assert.equal(changedLocation.loadAttempted, false);
+  assert.deepEqual(changedLocation.products, []);
+  assert.deepEqual(changedLocation.components, []);
+  assert.equal(changedLocation.selectedProductId, "");
+  assert.equal(shouldLoadComponentsMenu(changedLocation), true);
+
+  const signedOut = reconcileComponentsUiContext(changedLocation, locationB, { authenticated: false });
+  assert.equal(signedOut.contextKey, "");
+  assert.equal(signedOut.loaded, false);
+  assert.equal(signedOut.loadAttempted, false);
+  assert.deepEqual(signedOut.products, []);
+  assert.deepEqual(signedOut.components, []);
+});
+
+test("DD-012C failed component menu load does not self-loop and explicit refresh can retry", () => {
+  const contextKey = componentAuthorityContextKey({ locationId: "loc-a", workstationMode: "ADMIN" });
+  let state = createInitialComponentsUiState({ contextKey });
+
+  assert.equal(shouldLoadComponentsMenu(state), true);
+  state = markComponentsMenuLoadStarted(state);
+  assert.equal(shouldLoadComponentsMenu(state), false);
+
+  state = markComponentsMenuLoadFailed(state, { category: "FORBIDDEN", reason: "TOKEN_EXPIRED" });
+  assert.equal(state.loaded, false);
+  assert.equal(state.loadAttempted, true);
+  assert.equal(state.message, "FORBIDDEN · TOKEN_EXPIRED");
+  assert.equal(shouldLoadComponentsMenu(state), false);
+  assert.equal(shouldLoadComponentsMenu(state, { force: true }), true);
 });
 
 test("DD-012C adapter never truncates fractional quantity or display order", async () => {
