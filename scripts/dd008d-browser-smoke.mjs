@@ -691,17 +691,29 @@ function markSmokePhase(phase) {
 }
 
 async function printLoginDiagnostics(page, label, lastSuccessfulStep, error) {
-  const snapshot = await captureLoginDomSnapshot(page);
   console.log(`[DD011B login] ${label} route-failure lastSuccessfulStep=${sanitize(lastSuccessfulStep)} error=${sanitize(error?.message || error)}`);
+  const snapshot = await captureLoginDomSnapshotSafely(page);
   console.log(`[DD011B login] ${label} dom=${JSON.stringify(snapshot)}`);
   printPageDiagnostics("login", page, label);
 }
 
 async function printAdminTimeoutDiagnostics(page, label, error) {
-  const snapshot = await captureLoginDomSnapshot(page);
   console.log(`[DD011B admin-timeout] ${label}: ${sanitize(error?.message || error)}`);
+  const snapshot = await captureLoginDomSnapshotSafely(page);
   console.log(`[DD011B admin-timeout] dom=${JSON.stringify(snapshot)}`);
   printPageDiagnostics("admin-timeout", page, label);
+}
+
+async function captureLoginDomSnapshotSafely(page) {
+  try {
+    return await withTimeout(
+      captureLoginDomSnapshot(page),
+      5_000,
+      () => new Error("DOM_DIAGNOSTIC_TIMEOUT")
+    );
+  } catch (error) {
+    return { error: sanitize(error?.message || error) };
+  }
 }
 
 async function captureLoginDomSnapshot(page) {
