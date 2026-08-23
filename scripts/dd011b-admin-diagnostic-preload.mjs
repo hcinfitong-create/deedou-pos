@@ -11,10 +11,49 @@ chromium.launch = async (...launchArgs) => {
     const originalAddInitScript = context.addInitScript.bind(context);
     const originalNewPage = context.newPage.bind(context);
     let isAdminFixture = false;
+    let authTraceInstalled = false;
 
     context.addInitScript = async (script, arg) => {
       const mode = String(arg?.mode || arg?.storage?.deedou_workstation_mode || "");
-      if (mode === "ADMIN") isAdminFixture = true;
+      if (mode === "ADMIN") {
+        isAdminFixture = true;
+        if (!authTraceInstalled) {
+          authTraceInstalled = true;
+          await originalAddInitScript(() => {
+            let supabaseGlobal;
+            const wrap = (value) => {
+              if (!value || typeof value.createClient !== "function" || value.__dd011bDiagnoseWrapped) return value;
+              const originalCreateClient = value.createClient.bind(value);
+              value.createClient = (...args) => {
+                const client = originalCreateClient(...args);
+                const auth = client?.auth;
+                if (auth && typeof auth.onAuthStateChange === "function" && !auth.__dd011bDiagnoseWrapped) {
+                  const originalOnAuthStateChange = auth.onAuthStateChange.bind(auth);
+                  auth.onAuthStateChange = (callback) => originalOnAuthStateChange((event, session) => {
+                    const identity = String(session?.user?.id || session?.user?.email || "").slice(0, 80);
+                    console.info(`[DD011B auth-event] ${event} identity=${identity || "none"}`);
+                    return callback(event, session);
+                  });
+                  auth.__dd011bDiagnoseWrapped = true;
+                }
+                return client;
+              };
+              value.__dd011bDiagnoseWrapped = true;
+              return value;
+            };
+            try {
+              Object.defineProperty(globalThis, "supabase", {
+                configurable: true,
+                enumerable: true,
+                get() { return supabaseGlobal; },
+                set(value) { supabaseGlobal = wrap(value); }
+              });
+            } catch {
+              // Diagnostic only; normal smoke behavior must remain unchanged.
+            }
+          });
+        }
+      }
       return originalAddInitScript(script, arg);
     };
 
@@ -25,8 +64,11 @@ chromium.launch = async (...launchArgs) => {
         if (isAdminFixture) console.log(`[DD011B diagnose] ADMIN pageerror ${safe(error?.message)}`);
       });
       page.on("console", (message) => {
-        if (isAdminFixture && message.type() === "error") {
+        if (!isAdminFixture) return;
+        if (message.type() === "error") {
           console.log(`[DD011B diagnose] ADMIN console ${safe(message.text())}`);
+        } else if (message.type() === "info" && message.text().startsWith("[DD011B auth-event]")) {
+          console.log(message.text());
         }
       });
       page.on("response", async (response) => {
