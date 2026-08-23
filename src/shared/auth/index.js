@@ -392,6 +392,7 @@ export function createSupabasePasswordAuthApi(options = {}) {
             const normalizedSession = normalizeAuthSession(session);
             const identity = sessionIdentity(normalizedSession);
             const stableEvent = ["INITIAL_SESSION", "SIGNED_IN", "TOKEN_REFRESHED"].includes(event);
+            if (event === "INITIAL_SESSION" && !identity && lastStableAuthIdentity) return;
             if (passwordSignInInProgress && event === "SIGNED_IN" && identity) {
               lastStableAuthIdentity = identity;
               return;
