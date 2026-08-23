@@ -47,6 +47,11 @@ jobs:
           DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
           psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd012b_variants_modifiers_contract.sql
 
+      - name: Run DD-012C combo components contract
+        run: |
+          DB_URL="postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/dd012c_combo_components_contract.sql
+
       - name: Stop Supabase local stack
         if: always()
         run: npx supabase stop
