@@ -261,14 +261,15 @@ function installSafeWorkstationDiagnostics(request, response) {
   const action = pathname === "/api/staff-rpc"
     ? String(request.body?.functionName || "unknown-rpc")
     : String(request.body?.action || "status");
+  const requestDiagnostic = formatWorkstationRequestDiagnostic(action, request.body?.params);
   const originalJson = response.json.bind(response);
   response.json = (body) => {
-    console.log(`[DD011B smoke] ${safeModeLabel(fixture)} ${pathname} ${safeDiagnosticReason(action)} -> ${response.statusCode || 200} ${formatWorkstationDiagnosticBody(body)}`);
+    console.log(`[DD011B smoke] ${safeModeLabel(fixture)} ${pathname} ${safeDiagnosticReason(action)} -> ${response.statusCode || 200} ${formatWorkstationDiagnosticBody(body, action)}${requestDiagnostic ? ` request=${requestDiagnostic}` : ""}`);
     return originalJson(body);
   };
 }
 
-function formatWorkstationDiagnosticBody(body) {
+function formatWorkstationDiagnosticBody(body, action = "") {
   const shape = Array.isArray(body) ? "array" : body && typeof body === "object" ? "object" : typeof body;
   const row = Array.isArray(body) ? body[0] : body;
   const length = Array.isArray(body) ? body.length : "";
@@ -285,7 +286,76 @@ function formatWorkstationDiagnosticBody(body) {
   parts.push(`deviceId=${deviceId}`);
   parts.push(`workstationMode=${workstationMode || "none"}`);
   parts.push(`locationId=${locationId}`);
+  const version = numericDiagnostic(row.version ?? row.payload?.order?.version);
+  const currentVersion = numericDiagnostic(row.payload?.currentVersion ?? row.payload?.current_version);
+  if (version) parts.push(`version=${version}`);
+  if (currentVersion) parts.push(`currentVersion=${currentVersion}`);
+  const snapshot = action === "dd008c_get_location_snapshot" ? formatSnapshotDiagnostic(row.payload) : "";
+  if (snapshot) parts.push(`snapshot=${snapshot}`);
   return parts.join(" ");
+}
+
+function formatWorkstationRequestDiagnostic(action, params = {}) {
+  if (!params || typeof params !== "object") return "";
+  const parts = [];
+  if (action === "serve_order_line") {
+    parts.push(`order=${safeDiagnosticReason(params.p_order_id || "") || "none"}`);
+    parts.push(`line=${safeDiagnosticReason(params.p_line_id || "") || "none"}`);
+    parts.push(`qty=${numericDiagnostic(params.p_qty) || "none"}`);
+    parts.push(`expectedVersion=${numericDiagnostic(params.p_expected_version) || "none"}`);
+  } else if (action === "update_kds_line_prep") {
+    const lineIds = Array.isArray(params.p_line_ids) ? params.p_line_ids.map((lineId) => safeDiagnosticReason(lineId)).join(".") : "";
+    parts.push(`order=${safeDiagnosticReason(params.p_order_id || "") || "none"}`);
+    parts.push(`lines=${lineIds || "none"}`);
+    parts.push(`next=${safeDiagnosticReason(params.p_next_prep_status || "") || "none"}`);
+    parts.push(`expectedVersion=${numericDiagnostic(params.p_expected_version) || "none"}`);
+  }
+  return parts.join(",");
+}
+
+function formatSnapshotDiagnostic(payload = {}) {
+  const orders = Array.isArray(payload.orders) ? payload.orders : [];
+  const matches = orders
+    .filter((order) => String(order?.note || "").startsWith("dd008d_"))
+    .slice(-4)
+    .map((order) => {
+      const readyLines = readyUnservedLineIds(order).join(".") || "none";
+      const progress = serviceProgressDiagnostic(order);
+      return [
+        safeDiagnosticReason(order.id || "order"),
+        `v${numericDiagnostic(order.version) || "none"}`,
+        safeDiagnosticReason(order.status || "UNKNOWN"),
+        `ready=${readyLines}`,
+        `served=${progress.served}/${progress.total}`
+      ].join(":");
+    });
+  return matches.join("|");
+}
+
+function readyUnservedLineIds(order = {}) {
+  return (Array.isArray(order.items) ? order.items : [])
+    .filter((line) => (
+      !line.isComponent
+      && line.station !== "COMBO"
+      && (line.prepStatus || line.status) === "READY"
+      && Number(line.servedQty || 0) < Number(line.qty || 0)
+    ))
+    .map((line) => safeDiagnosticReason(line.lineId || line.id || "line"))
+    .slice(0, 6);
+}
+
+function serviceProgressDiagnostic(order = {}) {
+  return (Array.isArray(order.items) ? order.items : []).reduce((progress, line) => {
+    if (line.isComponent || line.station === "COMBO") return progress;
+    progress.total += Math.max(0, Number(line.qty || 0));
+    progress.served += Math.max(0, Number(line.servedQty || 0));
+    return progress;
+  }, { served: 0, total: 0 });
+}
+
+function numericDiagnostic(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? String(number) : "";
 }
 
 function safeModeLabel(fixture) {
