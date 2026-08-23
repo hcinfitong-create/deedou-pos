@@ -35,14 +35,24 @@ let server;
 let browser;
 const contexts = [];
 const pages = [];
+let smokePhase = "startup";
+const smokeStartedAt = Date.now();
+const smokeWatchdog = setTimeout(() => {
+  console.error(`[DD011B smoke-watchdog] phase=${sanitize(smokePhase)} elapsedMs=${Date.now() - smokeStartedAt}`);
+  process.exit(1);
+}, 8 * 60 * 1000);
 
 try {
+  markSmokePhase("provision users");
   await provisionUsers();
+  markSmokePhase("provision database");
   provisionDatabase();
 
+  markSmokePhase("node logins");
   const runtimeClients = {};
   for (const [name, spec] of Object.entries(accounts)) runtimeClients[name] = await loginNode(spec);
 
+  markSmokePhase("start browser and contexts");
   server = await startStaticServer();
   browser = await chromium.launch({ headless: true });
 
@@ -61,6 +71,7 @@ try {
   const cashierPage = await trackedPage(cashierContext, "cashier");
   const adminPage = await trackedPage(adminContext, "admin");
 
+  markSmokePhase("login staff routes and admin");
   await Promise.all([
     loginRoute(staffPage, "staff", accounts.staff),
     loginRoute(kitchenPage, "kitchen", accounts.kitchen),
@@ -69,6 +80,7 @@ try {
     loginAdmin(adminPage, accounts.admin)
   ]);
 
+  markSmokePhase("wait staff connectivity online");
   await Promise.all([
     waitConnectivityOnline(staffPage),
     waitConnectivityOnline(kitchenPage),
@@ -78,6 +90,7 @@ try {
   ]);
 
   // Admin authority: PostgreSQL availability must immediately control the public QR catalog.
+  markSmokePhase("admin menu authority availability");
   await adminPage.locator("[data-dd008d-admin-refresh]").click();
   const adminFriedRice = adminPage.locator('[data-dd008d-admin-product="fried-rice"]');
   await adminFriedRice.waitFor({ timeout: 20_000 });
@@ -95,6 +108,7 @@ try {
   await customerPage.locator('[data-add="fried-rice"]').waitFor({ timeout: 20_000 });
 
   // Direct tamper with a legitimate CASHIER session/device must still fail server-side menu.manage.
+  markSmokePhase("cashier menu tamper denial");
   const tamper = await rpc(runtimeClients.cashier, "dd008d_set_product_availability", {
     p_location_id: LOCATION_ID,
     p_product_id: "fried-rice",
@@ -107,6 +121,7 @@ try {
   assert(tamper.ok === false && tamper.category === "FORBIDDEN", `cashier menu tamper not denied: ${JSON.stringify(tamper)}`);
 
   // Migration UI is explicit: import stays locked until exact server preview of the local export.
+  markSmokePhase("admin migration preview");
   const importButton = adminPage.locator("[data-dd008d-import]");
   assert(await importButton.isDisabled(), "legacy import should be locked initially");
   await adminPage.locator("[data-dd008d-build-export]").click();
@@ -119,6 +134,7 @@ try {
   await waitForBody(adminPage, '"blockingChecksOk": true');
 
   // First QR batch: configured mango tea + fried rice. Fill note before second add to regression-test note preservation.
+  markSmokePhase("customer first QR batch");
   const note1 = `${runId} configured hold-fire batch`;
   await customerPage.locator('[data-add-config="mango-tea"]').click();
   await customerPage.locator("#note").fill(note1);
@@ -138,6 +154,7 @@ try {
   assert(Array.isArray(mangoLine?.optionSnapshot?.modifierGroups) && mangoLine.optionSnapshot.modifierGroups.length > 0, "configured mango tea modifier snapshot missing");
   assert(riceLine?.lineId, "fried-rice line missing");
 
+  markSmokePhase("staff accept and hold-fire first batch");
   const staffCard = staffPage.locator(".order-card").filter({ hasText: note1 }).first();
   await staffCard.waitFor({ timeout: 30_000 });
   const riceFamily = staffCard.locator(".course-family").filter({ hasText: /Seafood Fried Rice|Cơm chiên hải sản/ }).first();
@@ -150,6 +167,7 @@ try {
   await staffPage.locator(".order-card").filter({ hasText: note1 }).first().locator('button[data-status="ACCEPTED"]').click();
 
   // Bar line is fired and can progress; held kitchen line must not surface until explicit Fire.
+  markSmokePhase("bar and kitchen KDS first batch");
   await progressTicket(barPage, note1, ["ACKNOWLEDGED", "PREPARING", "READY"]);
   await sleep(400);
   assert(await kitchenPage.locator(".ticket").filter({ hasText: note1 }).count() === 0, "held kitchen line leaked to KDS before Fire");
@@ -161,10 +179,12 @@ try {
   await expectText(kitchenTicket, "Course 1", "kitchen ticket missing assigned course after Fire");
   await progressTicket(kitchenPage, note1, ["ACKNOWLEDGED", "PREPARING", "READY"]);
 
+  markSmokePhase("serve first batch");
   await serveAllReadyForNote(staffPage, note1, 2);
   await waitOrderStatus(runtimeClients.cashier, firstOrder.id, "SERVED", accounts.cashier);
 
   // Second order batch must reuse the same active visit.
+  markSmokePhase("customer second QR batch");
   const note2 = `${runId} second visit batch`;
   await customerPage.locator('[data-add="espresso"]').click();
   await customerPage.locator("#note").fill(note2);
@@ -175,6 +195,7 @@ try {
   const secondOrder = secondPublic.orders.find((order) => order.note === note2);
   assert(secondOrder, "second order batch missing");
 
+  markSmokePhase("staff accept and serve second batch");
   const secondStaffCard = staffPage.locator(".order-card").filter({ hasText: note2 }).first();
   await secondStaffCard.waitFor({ timeout: 30_000 });
   await secondStaffCard.locator('button[data-status="ACCEPTED"]').click();
@@ -183,6 +204,7 @@ try {
   await waitOrderStatus(runtimeClients.cashier, secondOrder.id, "SERVED", accounts.cashier);
 
   // Transfer the open visit A01 -> A02 through actual cashier UI.
+  markSmokePhase("cashier transfer session");
   await cashierPage.locator('[data-select-table="A01"]').click();
   const transfer = cashierPage.locator(`[data-transfer-session="${sessionId}"][data-transfer-to="A02"]`);
   await transfer.waitFor({ timeout: 20_000 });
@@ -192,6 +214,7 @@ try {
     return snapshot.tableSessions.some((session) => session.id === sessionId && session.tableCode === "A02" && session.status === "OPEN");
   }, "table transfer A01 to A02", 30_000);
 
+  markSmokePhase("cashier mixed tender and close");
   await cashierPage.locator('[data-select-table="A02"]').click();
   const tableAmount = cashierPage.locator('[data-payment-amount="A02"]');
   await tableAmount.waitFor({ timeout: 20_000 });
@@ -213,6 +236,7 @@ try {
   await waitConnectivityOnline(cashierPage);
 
   // Targeted refund after close must not reopen visit or KDS workflow.
+  markSmokePhase("closed order targeted refund");
   const settled = await staffSnapshot(runtimeClients.cashier, accounts.cashier);
   const settledFirst = settled.orders.find((order) => order.id === firstOrder.id);
   const originalPayment = settledFirst?.payments?.find((payment) => payment.type === "PAYMENT");
@@ -237,6 +261,7 @@ try {
   assert(await barPage.locator(".ticket").filter({ hasText: note1 }).count() === 0, "refund reopened bar workflow");
 
   // Duplicate idempotency key must produce one authoritative availability mutation.
+  markSmokePhase("admin availability idempotency");
   const adminMenu = await rpc(runtimeClients.admin, "dd008d_get_admin_menu_snapshot", {
     p_location_id: LOCATION_ID,
     p_workstation_mode: "ADMIN",
@@ -277,6 +302,7 @@ try {
   });
 
   // Disconnect staff and keep exercising the existing business-signal path until a real authoritative refetch observes the offline transport.
+  markSmokePhase("offline reconnect convergence");
   await staffContext.setOffline(true);
   await waitFor(async () => {
     await staffPage.evaluate(() => window.dispatchEvent(new StorageEvent("storage", { key: "deedou_products_full" })));
@@ -297,12 +323,14 @@ try {
   await waitForBody(staffPage, "A01");
 
   assertNoPageErrors();
+  markSmokePhase("complete");
   console.log("DD-008D browser smoke passed: migration preview, admin authority, configured QR order, Hold/Fire, KDS, second batch, transfer, mixed tender, close/refund, idempotency, and reconnect convergence.");
 } finally {
   for (const context of contexts) await context.close().catch(() => {});
   await browser?.close().catch(() => {});
   await new Promise((resolveClose) => server?.close?.(resolveClose) || resolveClose());
   for (const userId of createdUserIds) await adminClient.auth.admin.deleteUser(userId).catch(() => {});
+  clearTimeout(smokeWatchdog);
 }
 
 function account(name, role, mode) {
@@ -602,6 +630,10 @@ async function expectText(locator, text, message) {
 function assertNoPageErrors() {
   const failures = pages.flatMap((page) => page.__errors.map((error) => `${page.__label}:${error}`));
   if (failures.length) throw new Error(`browser errors:\n${failures.join("\n")}`);
+}
+
+function markSmokePhase(phase) {
+  smokePhase = String(phase || "unknown");
 }
 
 async function printAdminTimeoutDiagnostics(page, label, error) {
