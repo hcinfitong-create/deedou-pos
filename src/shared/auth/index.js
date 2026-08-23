@@ -271,6 +271,12 @@ export function createSupabasePasswordAuthApi(options = {}) {
 
   let client = options.client || null;
   let lastStableAuthIdentity = "";
+  let passwordSignInInProgress = false;
+
+  function sessionIdentity(session) {
+    return normalizeText(session?.userId || session?.userEmail).toLowerCase();
+  }
+
   const getClient = async () => {
     if (client) return client;
     const createClient = await resolveSupabaseCreateClient(options.createClient);
@@ -312,14 +318,20 @@ export function createSupabasePasswordAuthApi(options = {}) {
     restoreSession: currentSessionInfo,
     async signInWithPassword({ email, password } = {}) {
       const activeClient = await getClient();
-      const { data, error } = await activeClient.auth.signInWithPassword({
-        email: normalizeText(email),
-        password: String(password || "")
-      });
-      if (error) return { ok: false, reason: error.message || AUTH_DENIAL_REASONS.SIGN_IN_REQUIRED };
-      const session = normalizeAuthSession(data?.session);
-      if (!session) return { ok: false, reason: "SESSION_MISSING" };
-      return { ok: true, session };
+      passwordSignInInProgress = true;
+      try {
+        const { data, error } = await activeClient.auth.signInWithPassword({
+          email: normalizeText(email),
+          password: String(password || "")
+        });
+        if (error) return { ok: false, reason: error.message || AUTH_DENIAL_REASONS.SIGN_IN_REQUIRED };
+        const session = normalizeAuthSession(data?.session);
+        if (!session) return { ok: false, reason: "SESSION_MISSING" };
+        lastStableAuthIdentity = sessionIdentity(session);
+        return { ok: true, session };
+      } finally {
+        passwordSignInInProgress = false;
+      }
     },
     async authorize({ locationId, permission, workstationMode, routeName } = {}) {
       const sessionResult = await currentSessionInfo();
@@ -367,6 +379,7 @@ export function createSupabasePasswordAuthApi(options = {}) {
       const activeClient = await getClient();
       const { error } = await activeClient.auth.signOut({ scope: "local" });
       if (error) return { ok: false, reason: error.message || "LOGOUT_FAILED" };
+      lastStableAuthIdentity = "";
       return { ok: true };
     },
     onAuthStateChange(callback) {
@@ -377,8 +390,12 @@ export function createSupabasePasswordAuthApi(options = {}) {
           if (!active) return;
           const { data } = activeClient.auth.onAuthStateChange((event, session) => {
             const normalizedSession = normalizeAuthSession(session);
-            const identity = normalizeText(normalizedSession?.userId || normalizedSession?.userEmail).toLowerCase();
+            const identity = sessionIdentity(normalizedSession);
             const stableEvent = ["INITIAL_SESSION", "SIGNED_IN", "TOKEN_REFRESHED"].includes(event);
+            if (passwordSignInInProgress && event === "SIGNED_IN" && identity) {
+              lastStableAuthIdentity = identity;
+              return;
+            }
             if (stableEvent && identity && identity === lastStableAuthIdentity) return;
             if (stableEvent) lastStableAuthIdentity = identity;
             if (event === "SIGNED_OUT" || !identity) lastStableAuthIdentity = "";
