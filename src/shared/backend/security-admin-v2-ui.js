@@ -6,7 +6,10 @@ let scheduled = false;
 
 const root = document.getElementById("app");
 if (root && "MutationObserver" in window) {
-  new MutationObserver(schedule).observe(root, { childList: true, subtree: true });
+  new MutationObserver((mutations) => {
+    const hasExternalMutation = mutations.some(({ target }) => !target.closest?.("[data-dd011b-security-admin]"));
+    if (hasExternalMutation) schedule();
+  }).observe(root, { childList: true, subtree: true });
 }
 window.addEventListener("hashchange", schedule);
 document.addEventListener("click", handleClick);
