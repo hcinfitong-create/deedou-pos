@@ -105,12 +105,14 @@ chromium.launch = async (...launchArgs) => {
         try { responseBody = await response.json(); } catch { responseBody = null; }
         const row = Array.isArray(responseBody) ? responseBody[0] : responseBody;
         const params = requestBody?.params && typeof requestBody.params === "object" ? requestBody.params : {};
-        const shape = Array.isArray(responseBody)
-          ? `array:${responseBody.length}`
-          : responseBody && typeof responseBody === "object"
-            ? `object:${Object.keys(responseBody).sort().join(",")}`
-            : typeof responseBody;
-        console.log(`[DD011B diagnose] ADMIN ${functionName} http=${response.status()} elapsedMs=${elapsedMs} shape=${safe(shape)} location=${safe(params.p_location_id || "")} permission=${safe(params.p_permission_key || "")} requestedMode=${safe(params.p_workstation_mode || "")} ok=${row?.ok === true} reason=${safe(row?.reason || "")} device=${safe(row?.device_id || "")} mode=${safe(row?.workstation_mode || "")}`);
+        const shape = responseBody === null
+          ? "null"
+          : Array.isArray(responseBody)
+            ? `array:${responseBody.length}`
+            : typeof responseBody === "object"
+              ? `object:${Object.keys(responseBody).sort().join(",")}`
+              : typeof responseBody;
+        console.log(`[DD011B diagnose] ADMIN ${functionName} http=${response.status()} elapsedMs=${elapsedMs} shape=${safe(shape)} contentType=${safe(response.headers()["content-type"] || "")} location=${safe(params.p_location_id || "")} permission=${safe(params.p_permission_key || "")} requestedMode=${safe(params.p_workstation_mode || "")} ok=${row?.ok === true} reason=${safe(row?.reason || "")} device=${safe(row?.device_id || "")} mode=${safe(row?.workstation_mode || "")}`);
 
         if (functionName === "authorize_staff_access") {
           await dumpAdminDom(page, "authz-response");
@@ -138,8 +140,12 @@ async function installAppStateTrace(page) {
         "console.info(`[DD011B auth-state] refresh-start next=${nextKey} pending=${pendingStaffAuthKey} version=${staffAuthState.authVersion || 0} status=${staffAuthState.status}`);\n  pendingStaffAuthKey = nextKey;\n  staffAuthState = {"
       ],
       [
-        "if (pendingStaffAuthKey !== nextKey) return;\n\n  staffAuthState = {",
-        "console.info(`[DD011B auth-state] refresh-resolved next=${nextKey} pending=${pendingStaffAuthKey} version=${staffAuthState.authVersion || 0} status=${staffAuthState.status} ok=${authorization?.ok === true} contextRows=${Array.isArray(staffContext) ? staffContext.length : -1}`);\n  if (pendingStaffAuthKey !== nextKey) {\n    console.info(`[DD011B auth-state] refresh-discard next=${nextKey} pending=${pendingStaffAuthKey} version=${staffAuthState.authVersion || 0}`);\n    return;\n  }\n\n  staffAuthState = {"
+        "    ]);\n    if (pendingStaffAuthKey !== nextKey) return;\n    staffAuthState = {",
+        "    ]);\n    console.info(`[DD011B auth-state] refresh-resolved next=${nextKey} pending=${pendingStaffAuthKey} version=${staffAuthState.authVersion || 0} status=${staffAuthState.status} ok=${authorization?.ok === true} reason=${authorization?.reason || \"\"} contextRows=${Array.isArray(staffContext) ? staffContext.length : -1}`);\n    if (pendingStaffAuthKey !== nextKey) {\n      console.info(`[DD011B auth-state] refresh-discard next=${nextKey} pending=${pendingStaffAuthKey} version=${staffAuthState.authVersion || 0}`);\n      return;\n    }\n    staffAuthState = {"
+      ],
+      [
+        "  } catch (error) {\n    if (pendingStaffAuthKey !== nextKey) return;\n    staffAuthState = {",
+        "  } catch (error) {\n    console.info(`[DD011B auth-state] refresh-error next=${nextKey} pending=${pendingStaffAuthKey} version=${staffAuthState.authVersion || 0} status=${staffAuthState.status} error=${error?.message || error || \"UNKNOWN\"}`);\n    if (pendingStaffAuthKey !== nextKey) {\n      console.info(`[DD011B auth-state] refresh-error-discard next=${nextKey} pending=${pendingStaffAuthKey} version=${staffAuthState.authVersion || 0}`);\n      return;\n    }\n    staffAuthState = {"
       ],
       [
         "pendingStaffAuthKey = \"\";\n  render();\n}\n\nfunction syncStaffAuthSession",
