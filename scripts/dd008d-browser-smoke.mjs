@@ -376,9 +376,17 @@ async function trackedPage(context, label) {
   const page = await context.newPage();
   page.__label = label;
   page.__errors = [];
+  page.__networkDiagnostics = [];
   page.on("pageerror", (error) => page.__errors.push(`pageerror:${error.message}`));
   page.on("console", (message) => {
     if (message.type() === "error") page.__errors.push(`console:${message.text()}`);
+  });
+  page.on("requestfailed", (request) => {
+    recordSafeNetworkDiagnostic(page, "requestfailed", request.url(), request.failure()?.errorText || "REQUEST_FAILED");
+  });
+  page.on("response", (response) => {
+    const status = response.status();
+    if (status >= 400) recordSafeNetworkDiagnostic(page, "response", response.url(), String(status));
   });
   pages.push(page);
   return page;
@@ -407,8 +415,17 @@ async function loginAdmin(page, spec) {
   await form.locator('input[name="locationId"]').fill(LOCATION_ID);
   await form.locator('select[name="workstationMode"]').selectOption(spec.mode);
   await form.locator('button[type="submit"]').click();
-  await page.locator("[data-dd008d-admin-menu]").waitFor({ timeout: 30_000 });
-  await page.locator("[data-dd008d-migration-panel]").waitFor({ timeout: 30_000 });
+  await waitForAdminPanel(page, "[data-dd008d-admin-menu]", "admin menu");
+  await waitForAdminPanel(page, "[data-dd008d-migration-panel]", "migration panel");
+}
+
+async function waitForAdminPanel(page, selector, label) {
+  try {
+    await page.locator(selector).waitFor({ timeout: 30_000 });
+  } catch (error) {
+    await printAdminTimeoutDiagnostics(page, label, error);
+    throw error;
+  }
 }
 
 async function waitForAuthGateReady(page, label) {
@@ -585,6 +602,83 @@ async function expectText(locator, text, message) {
 function assertNoPageErrors() {
   const failures = pages.flatMap((page) => page.__errors.map((error) => `${page.__label}:${error}`));
   if (failures.length) throw new Error(`browser errors:\n${failures.join("\n")}`);
+}
+
+async function printAdminTimeoutDiagnostics(page, label, error) {
+  const snapshot = await page.evaluate(() => {
+    const exists = (selector) => Boolean(document.querySelector(selector));
+    const visible = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) return false;
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const displayState = (selector) => {
+      const element = document.querySelector(selector);
+      if (!element) return { exists: false };
+      const style = getComputedStyle(element);
+      return {
+        exists: true,
+        visible: visible(selector),
+        display: style.display,
+        visibility: style.visibility,
+        opacity: style.opacity,
+        width: Math.round(element.getBoundingClientRect().width),
+        height: Math.round(element.getBoundingClientRect().height)
+      };
+    };
+    const text = (selector) => {
+      const element = document.querySelector(selector);
+      return String(element?.innerText || "")
+        .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 600);
+    };
+    return {
+      href: location.href.replace(location.origin, ""),
+      hash: location.hash,
+      appExists: exists("#app"),
+      adminPageExists: exists("#app .admin-page"),
+      pageExists: exists("#app .page"),
+      authLoginExists: exists("[data-auth-login]"),
+      authLoginVisible: visible("[data-auth-login]"),
+      authGateText: text(".auth-gate"),
+      adminMenu: displayState("[data-dd008d-admin-menu]"),
+      migrationPanel: displayState("[data-dd008d-migration-panel]"),
+      connectivityState: document.querySelector("[data-dd008d-connectivity]")?.getAttribute("data-state") || ""
+    };
+  }).catch((diagnosticError) => ({ error: sanitize(diagnosticError?.message || diagnosticError) }));
+  console.log(`[DD011B admin-timeout] ${label}: ${sanitize(error?.message || error)}`);
+  console.log(`[DD011B admin-timeout] dom=${JSON.stringify(snapshot)}`);
+  const pageErrors = (page.__errors || []).slice(-12).map(sanitize);
+  if (pageErrors.length) console.log(`[DD011B admin-timeout] browserErrors=${JSON.stringify(pageErrors)}`);
+  const network = (page.__networkDiagnostics || []).slice(-20).map(sanitize);
+  if (network.length) console.log(`[DD011B admin-timeout] network=${JSON.stringify(network)}`);
+}
+
+function recordSafeNetworkDiagnostic(page, type, rawUrl, detail) {
+  const label = safeNetworkLabel(rawUrl);
+  if (!label) return;
+  page.__networkDiagnostics.push(`${type}:${label}:${safeNetworkDetail(detail)}`);
+}
+
+function safeNetworkLabel(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ""), BASE_URL);
+    const base = new URL(BASE_URL);
+    if (url.origin !== base.origin) return "";
+    return url.pathname.replace(/[^A-Za-z0-9_./:-]+/g, "_").slice(0, 160);
+  } catch {
+    return "";
+  }
+}
+
+function safeNetworkDetail(value) {
+  return String(value || "")
+    .replace(/[^A-Za-z0-9_./:-]+/g, "_")
+    .slice(0, 120);
 }
 
 function assert(condition, message) {

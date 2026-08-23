@@ -192,10 +192,29 @@ function installSafeAdminDiagnostics(request, response) {
     : String(request.body?.action || "status");
   const originalJson = response.json.bind(response);
   response.json = (body) => {
-    const outcome = body?.ok === true ? "OK" : safeDiagnosticReason(body?.reason || "DENIED");
-    console.log(`[DD011B smoke] ADMIN ${pathname} ${safeDiagnosticReason(action)} -> ${response.statusCode || 200} ${outcome}`);
+    console.log(`[DD011B smoke] ADMIN ${pathname} ${safeDiagnosticReason(action)} -> ${response.statusCode || 200} ${formatAdminDiagnosticBody(body)}`);
     return originalJson(body);
   };
+}
+
+function formatAdminDiagnosticBody(body) {
+  const shape = Array.isArray(body) ? "array" : body && typeof body === "object" ? "object" : typeof body;
+  const row = Array.isArray(body) ? body[0] : body;
+  const length = Array.isArray(body) ? body.length : "";
+  if (!row || typeof row !== "object") return `shape=${shape}${length === "" ? "" : ` length=${length}`} ok=missing reason=EMPTY`;
+  const ok = Object.prototype.hasOwnProperty.call(row, "ok") ? String(row.ok === true) : "missing";
+  const reason = safeDiagnosticReason(row.reason || row.message || row.code || "");
+  const deviceId = row.device_id || row.deviceId ? "yes" : "no";
+  const workstationMode = safeDiagnosticReason(row.workstation_mode || row.workstationMode || "");
+  const locationId = row.location_id || row.locationId ? "yes" : "no";
+  const parts = [`shape=${shape}`];
+  if (length !== "") parts.push(`length=${length}`);
+  parts.push(`ok=${ok}`);
+  parts.push(`reason=${reason || "none"}`);
+  parts.push(`deviceId=${deviceId}`);
+  parts.push(`workstationMode=${workstationMode || "none"}`);
+  parts.push(`locationId=${locationId}`);
+  return parts.join(" ");
 }
 
 function safeDiagnosticReason(value) {
