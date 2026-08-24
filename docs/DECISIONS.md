@@ -6,6 +6,7 @@
 > - **IMPLEMENTED** — represented in current repository/runtime.
 > - **ACCEPTED / IN PROGRESS** — explicitly accepted and currently being implemented.
 > - **ACCEPTED / NOT IMPLEMENTED** — product decision exists but code is not yet present.
+> - **ACCEPTED INTENT / LEGAL RECONCILIATION REQUIRED** — user intent is recorded, but current law/accounting/provider rules must be reconciled before implementation semantics become binding.
 > - **PROPOSED** — not binding; must not be implemented as a rule without approval.
 
 ## Architecture
@@ -134,15 +135,28 @@ Role/device issuance is Owner-authoritative. Manager can retain explicitly grant
 
 ## Billing / e-invoice product direction
 
-### D-021 — VAT/e-invoice is an explicit checkout option, not automatic for every bill
-**Status: ACCEPTED / NOT IMPLEMENTED**
+### D-021 — Cashier supports an explicit customer invoice-information/request workflow; invoice issuance itself follows current law
+**Status: ACCEPTED INTENT / LEGAL RECONCILIATION REQUIRED**
 
-User-confirmed product direction: normal orders do not automatically trigger the VAT/e-invoice flow; Cashier has an explicit option when the customer requests VAT/e-invoice.
+The original user intent was that normal checkout should not add VAT/e-invoice handling unless the customer requests it, with an explicit Cashier option for the request.
 
-### D-022 — Requested VAT flow currently targets +8% VAT and +2% service fee
-**Status: ACCEPTED / NOT IMPLEMENTED — REQUIRES LEGAL/TAX VALIDATION BEFORE CODING**
+Current legal research for Phase 2 indicates that Vietnamese electronic-invoice obligations in force in 2026 may require the seller to create an electronic invoice when goods/services are sold, including rules relevant to direct-to-consumer/F&B transactions. Therefore the old intent must **not** be implemented as “no invoice exists unless the customer asks”.
 
-The intended POS behavior discussed by the user is: when the VAT option is selected, add 8% VAT and 2% service fee. This records product intent only; it is **not a statement that the rates/treatment are legally correct for the eventual entity, goods/services or date**. Before implementation, verify current Vietnamese tax/e-invoice requirements and define tax base, rounding, accounting and provider/API contracts. Do not hard-code this rule solely from memory.
+Phase 2 must distinguish at least:
+
+- the legal obligation/timing to create the required electronic invoice or cash-register electronic invoice; and
+- the optional customer-request workflow for collecting buyer/tax information or delivering an invoice in the form requested by the customer.
+
+The final behavior becomes binding only after current legal/accounting requirements and the chosen e-invoice provider contract are verified and recorded. Do not suppress legally required invoice issuance based solely on the customer-request toggle.
+
+### D-022 — Requested pricing intent currently targets +8% VAT and +2% service fee
+**Status: ACCEPTED INTENT / LEGAL RECONCILIATION REQUIRED**
+
+The intended POS behavior previously discussed is: when the relevant VAT/service-fee flow applies, the UI/business calculation targets 8% VAT and 2% service fee.
+
+This records product intent only. Current legal research indicates the 8% VAT reduction applies only to eligible goods/services and is time-bounded under current legislation; it is not a universal permanent rate. The tax base, eligibility by product, treatment of alcoholic/special-tax goods if applicable, service-fee tax treatment, rounding, invoice timing and accounting entries are not yet verified for DeeDou's eventual legal entity and menu.
+
+Before implementation, Phase 2 must define a current legal/accounting tax contract and provider/API contract. Do not hard-code 8% or 2% as universal rules solely from conversation history.
 
 ## Confirmed implementation sequencing
 
@@ -156,7 +170,9 @@ Real menu population and broad UI/UX redesign are intentionally deferred while t
 ### D-024 — Phase 2 is billing/VAT/service-fee/e-invoice checkout authority
 **Status: ACCEPTED / NOT IMPLEMENTED**
 
-After Phase 1, DeeDou will implement the billing/VAT/service-fee/e-invoice checkout contract as a dedicated scoped milestone. It must preserve the append-only payment ledger and existing order/table/KDS history, and it must not hard-code legally sensitive tax/provider behavior until the current legal/accounting/provider contract is verified.
+After Phase 1, DeeDou will implement the billing/VAT/service-fee/e-invoice checkout contract as a dedicated scoped milestone. Legal/tax/accounting reconciliation is the first gate of the milestone, before database/API/UI semantics are fixed.
+
+The implementation must preserve the append-only payment ledger and existing order/table/KDS history, and it must not hard-code legally sensitive tax, invoice-issuance or provider behavior until the current legal/accounting/provider contract is verified.
 
 ### D-025 — Phase 3 wider POS/back-office capabilities are accepted future work
 **Status: ACCEPTED / NOT IMPLEMENTED**
