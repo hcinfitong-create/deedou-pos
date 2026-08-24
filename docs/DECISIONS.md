@@ -84,9 +84,11 @@ A valid CASHIER role on a valid CASHIER workstation may execute the accepted ref
 ## Catalog
 
 ### D-012 — Reuse the existing catalog graph
-**Status: IMPLEMENTED / IN PROGRESS**
+**Status: IMPLEMENTED**
 
 Use `products`, `product_variants`, `modifier_groups`, `modifier_options`, `product_modifier_groups`, `product_components`. Do not create a parallel catalog/combo model.
+
+DD-012 A/B/C are Production-complete. Future recipe/inventory work must extend the existing catalog authority rather than replacing it.
 
 ### D-013 — Historical submitted order snapshots are immutable
 **Status: IMPLEMENTED**
@@ -101,32 +103,32 @@ Real DeeDou menu provisioning must use user-provided business data. Implementati
 ## Identity / security
 
 ### D-015 — Exactly one active OWNER globally
-**Status: ACCEPTED / IN PROGRESS (DD-011B)**
+**Status: IMPLEMENTED**
 
 No second active OWNER may be granted. The sole Owner account/role/location cannot be deactivated/revoked through normal application flows.
 
 ### D-016 — Owner privileged security actions require AAL2
-**Status: ACCEPTED / IN PROGRESS**
+**Status: IMPLEMENTED**
 
 Owner controls MFA/TOTP. Staff creation, activation approval, role changes, device revoke/rotate and account/location security mutations require Owner AAL2 according to the DD-011B contract.
 
 ### D-017 — Staff identity uses Name + username + role/location
-**Status: ACCEPTED / IN PROGRESS**
+**Status: IMPLEMENTED**
 
 Staff has `display_name` and unique case-insensitive `username`. Owner creates staff with Name + username + temporary password + initial role/location. Do not create a parallel user identity system.
 
 ### D-018 — Password login alone does not trust a new staff device
-**Status: ACCEPTED / IN PROGRESS**
+**Status: IMPLEMENTED**
 
 First login/new device creates a short-lived 6-digit verification challenge. Owner compares the code and explicitly approves. Pending staff/device is not operationally trusted before approval.
 
 ### D-019 — Device trust is backend-managed
-**Status: ACCEPTED / IN PROGRESS**
+**Status: IMPLEMENTED**
 
 Device secrets/session proof must not be stored in localStorage/sessionStorage/IndexedDB or exposed to frontend JavaScript. Trust uses backend-managed device session state plus Secure/HttpOnly/SameSite cookie proof. Revoke/disable takes effect on subsequent staff requests.
 
 ### D-020 — Manager cannot mint Owner/device trust
-**Status: ACCEPTED / IN PROGRESS**
+**Status: IMPLEMENTED**
 
 Role/device issuance is Owner-authoritative. Manager can retain explicitly granted operational permissions but cannot create/grant Owner or issue trusted device access.
 
@@ -140,7 +142,53 @@ User-confirmed product direction: normal orders do not automatically trigger the
 ### D-022 — Requested VAT flow currently targets +8% VAT and +2% service fee
 **Status: ACCEPTED / NOT IMPLEMENTED — REQUIRES LEGAL/TAX VALIDATION BEFORE CODING**
 
-The intended POS behavior discussed by the user is: when the VAT option is selected, add 8% VAT and 2% service fee. This records product intent only; it is **not a statement that the rates/treatment are legally correct for the eventual entity, goods/services or date**. Before implementation, verify current Vietnamese tax/e-invoice requirements and define rounding/accounting/API contracts. Do not hard-code this rule solely from memory.
+The intended POS behavior discussed by the user is: when the VAT option is selected, add 8% VAT and 2% service fee. This records product intent only; it is **not a statement that the rates/treatment are legally correct for the eventual entity, goods/services or date**. Before implementation, verify current Vietnamese tax/e-invoice requirements and define tax base, rounding, accounting and provider/API contracts. Do not hard-code this rule solely from memory.
+
+## Confirmed implementation sequencing
+
+### D-023 — Complete operational hardening before the next functional billing phase
+**Status: ACCEPTED / IN PROGRESS**
+
+After DD-012C, the immediate engineering priority is Production operational hardening tracked by Issue #40: backup/restore posture, RPO/RTO, Auth configuration, signup/password-protection posture, rate limits and audit/log retention/redaction.
+
+Real menu population and broad UI/UX redesign are intentionally deferred while these production controls and confirmed functional backend capabilities are completed.
+
+### D-024 — Phase 2 is billing/VAT/service-fee/e-invoice checkout authority
+**Status: ACCEPTED / NOT IMPLEMENTED**
+
+After Phase 1, DeeDou will implement the billing/VAT/service-fee/e-invoice checkout contract as a dedicated scoped milestone. It must preserve the append-only payment ledger and existing order/table/KDS history, and it must not hard-code legally sensitive tax/provider behavior until the current legal/accounting/provider contract is verified.
+
+### D-025 — Phase 3 wider POS/back-office capabilities are accepted future work
+**Status: ACCEPTED / NOT IMPLEMENTED**
+
+The following capability groups are confirmed for future implementation, each through its own scoped issue/contract and deployment gate:
+
+- inventory / recipe / COGS authority;
+- accounting export/integration and eventual Accounting Agent boundary;
+- provider-specific e-invoice integration after the Phase 2 contract/provider selection;
+- discounts/promotions/loyalty;
+- real PSP integrations after provider contracts are selected;
+- richer reports/operations analytics;
+- technical decomposition of large UI orchestration where justified by accepted feature work, without a framework/architecture rewrite;
+- explicit wider DeeDou Marketing/Accounting/local-AI integrations once cross-system contracts exist.
+
+Acceptance of the phase does not authorize inventing detailed business rules. Missing units, accounting treatment, provider behavior, discount precedence, loyalty economics or analytics definitions must still be specified before coding.
+
+## Inventory / recipe / menu provisioning
+
+### D-026 — Real menu provisioning is coupled to recipe, cost and inventory deduction
+**Status: ACCEPTED / NOT IMPLEMENTED**
+
+Real Production menu provisioning will not be treated as isolated name/price entry. When the real menu is provisioned, DeeDou must also have the recipe/cost/inventory authority needed for sold items to deduct stock correctly.
+
+The exact recipe/BOM structure, ingredient units, yield/waste treatment, direct-stock-item handling, costing method and inventory-consumption timing are **not yet defined** and must be specified in the dedicated inventory/recipe/COGS milestone rather than guessed during catalog entry.
+
+Existing DD-012 catalog tables/contracts remain authoritative and should be reused/extended; do not create a second product/menu graph.
+
+### D-027 — Broad UI/UX redesign follows core business/backend capability completion
+**Status: ACCEPTED / NOT IMPLEMENTED**
+
+Admin/POS/QR visual and interaction redesign is intentionally deferred until the confirmed operational/business backend phases stabilize. UI-only changes should reuse existing contracts; backend/schema changes require a proven capability gap.
 
 ## How decisions change
 
