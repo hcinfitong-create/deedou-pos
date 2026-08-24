@@ -6,6 +6,7 @@
 > - **IMPLEMENTED** — represented in current repository/runtime.
 > - **ACCEPTED / IN PROGRESS** — explicitly accepted and currently being implemented.
 > - **ACCEPTED / NOT IMPLEMENTED** — product decision exists but code is not yet present.
+> - **ACCEPTED INTENT / LEGAL RECONCILIATION REQUIRED** — user intent is recorded, but current law/accounting/provider rules must be reconciled before implementation semantics become binding.
 > - **PROPOSED** — not binding; must not be implemented as a rule without approval.
 
 ## Architecture
@@ -84,9 +85,11 @@ A valid CASHIER role on a valid CASHIER workstation may execute the accepted ref
 ## Catalog
 
 ### D-012 — Reuse the existing catalog graph
-**Status: IMPLEMENTED / IN PROGRESS**
+**Status: IMPLEMENTED**
 
 Use `products`, `product_variants`, `modifier_groups`, `modifier_options`, `product_modifier_groups`, `product_components`. Do not create a parallel catalog/combo model.
+
+DD-012 A/B/C are Production-complete. Future recipe/inventory work must extend the existing catalog authority rather than replacing it.
 
 ### D-013 — Historical submitted order snapshots are immutable
 **Status: IMPLEMENTED**
@@ -101,46 +104,107 @@ Real DeeDou menu provisioning must use user-provided business data. Implementati
 ## Identity / security
 
 ### D-015 — Exactly one active OWNER globally
-**Status: ACCEPTED / IN PROGRESS (DD-011B)**
+**Status: IMPLEMENTED**
 
 No second active OWNER may be granted. The sole Owner account/role/location cannot be deactivated/revoked through normal application flows.
 
 ### D-016 — Owner privileged security actions require AAL2
-**Status: ACCEPTED / IN PROGRESS**
+**Status: IMPLEMENTED**
 
 Owner controls MFA/TOTP. Staff creation, activation approval, role changes, device revoke/rotate and account/location security mutations require Owner AAL2 according to the DD-011B contract.
 
 ### D-017 — Staff identity uses Name + username + role/location
-**Status: ACCEPTED / IN PROGRESS**
+**Status: IMPLEMENTED**
 
 Staff has `display_name` and unique case-insensitive `username`. Owner creates staff with Name + username + temporary password + initial role/location. Do not create a parallel user identity system.
 
 ### D-018 — Password login alone does not trust a new staff device
-**Status: ACCEPTED / IN PROGRESS**
+**Status: IMPLEMENTED**
 
 First login/new device creates a short-lived 6-digit verification challenge. Owner compares the code and explicitly approves. Pending staff/device is not operationally trusted before approval.
 
 ### D-019 — Device trust is backend-managed
-**Status: ACCEPTED / IN PROGRESS**
+**Status: IMPLEMENTED**
 
 Device secrets/session proof must not be stored in localStorage/sessionStorage/IndexedDB or exposed to frontend JavaScript. Trust uses backend-managed device session state plus Secure/HttpOnly/SameSite cookie proof. Revoke/disable takes effect on subsequent staff requests.
 
 ### D-020 — Manager cannot mint Owner/device trust
-**Status: ACCEPTED / IN PROGRESS**
+**Status: IMPLEMENTED**
 
 Role/device issuance is Owner-authoritative. Manager can retain explicitly granted operational permissions but cannot create/grant Owner or issue trusted device access.
 
 ## Billing / e-invoice product direction
 
-### D-021 — VAT/e-invoice is an explicit checkout option, not automatic for every bill
+### D-021 — Cashier supports an explicit customer invoice-information/request workflow; invoice issuance itself follows current law
+**Status: ACCEPTED INTENT / LEGAL RECONCILIATION REQUIRED**
+
+The original user intent was that normal checkout should not add VAT/e-invoice handling unless the customer requests it, with an explicit Cashier option for the request.
+
+Current legal research for Phase 2 indicates that Vietnamese electronic-invoice obligations in force in 2026 may require the seller to create an electronic invoice when goods/services are sold, including rules relevant to direct-to-consumer/F&B transactions. Therefore the old intent must **not** be implemented as “no invoice exists unless the customer asks”.
+
+Phase 2 must distinguish at least:
+
+- the legal obligation/timing to create the required electronic invoice or cash-register electronic invoice; and
+- the optional customer-request workflow for collecting buyer/tax information or delivering an invoice in the form requested by the customer.
+
+The final behavior becomes binding only after current legal/accounting requirements and the chosen e-invoice provider contract are verified and recorded. Do not suppress legally required invoice issuance based solely on the customer-request toggle.
+
+### D-022 — Requested pricing intent currently targets +8% VAT and +2% service fee
+**Status: ACCEPTED INTENT / LEGAL RECONCILIATION REQUIRED**
+
+The intended POS behavior previously discussed is: when the relevant VAT/service-fee flow applies, the UI/business calculation targets 8% VAT and 2% service fee.
+
+This records product intent only. Current legal research indicates the 8% VAT reduction applies only to eligible goods/services and is time-bounded under current legislation; it is not a universal permanent rate. The tax base, eligibility by product, treatment of alcoholic/special-tax goods if applicable, service-fee tax treatment, rounding, invoice timing and accounting entries are not yet verified for DeeDou's eventual legal entity and menu.
+
+Before implementation, Phase 2 must define a current legal/accounting tax contract and provider/API contract. Do not hard-code 8% or 2% as universal rules solely from conversation history.
+
+## Confirmed implementation sequencing
+
+### D-023 — Complete operational hardening before the next functional billing phase
+**Status: ACCEPTED / IN PROGRESS**
+
+After DD-012C, the immediate engineering priority is Production operational hardening tracked by Issue #40: backup/restore posture, RPO/RTO, Auth configuration, signup/password-protection posture, rate limits and audit/log retention/redaction.
+
+Real menu population and broad UI/UX redesign are intentionally deferred while these production controls and confirmed functional backend capabilities are completed.
+
+### D-024 — Phase 2 is billing/VAT/service-fee/e-invoice checkout authority
 **Status: ACCEPTED / NOT IMPLEMENTED**
 
-User-confirmed product direction: normal orders do not automatically trigger the VAT/e-invoice flow; Cashier has an explicit option when the customer requests VAT/e-invoice.
+After Phase 1, DeeDou will implement the billing/VAT/service-fee/e-invoice checkout contract as a dedicated scoped milestone. Legal/tax/accounting reconciliation is the first gate of the milestone, before database/API/UI semantics are fixed.
 
-### D-022 — Requested VAT flow currently targets +8% VAT and +2% service fee
-**Status: ACCEPTED / NOT IMPLEMENTED — REQUIRES LEGAL/TAX VALIDATION BEFORE CODING**
+The implementation must preserve the append-only payment ledger and existing order/table/KDS history, and it must not hard-code legally sensitive tax, invoice-issuance or provider behavior until the current legal/accounting/provider contract is verified.
 
-The intended POS behavior discussed by the user is: when the VAT option is selected, add 8% VAT and 2% service fee. This records product intent only; it is **not a statement that the rates/treatment are legally correct for the eventual entity, goods/services or date**. Before implementation, verify current Vietnamese tax/e-invoice requirements and define rounding/accounting/API contracts. Do not hard-code this rule solely from memory.
+### D-025 — Phase 3 wider POS/back-office capabilities are accepted future work
+**Status: ACCEPTED / NOT IMPLEMENTED**
+
+The following capability groups are confirmed for future implementation, each through its own scoped issue/contract and deployment gate:
+
+- inventory / recipe / COGS authority;
+- accounting export/integration and eventual Accounting Agent boundary;
+- provider-specific e-invoice integration after the Phase 2 contract/provider selection;
+- discounts/promotions/loyalty;
+- real PSP integrations after provider contracts are selected;
+- richer reports/operations analytics;
+- technical decomposition of large UI orchestration where justified by accepted feature work, without a framework/architecture rewrite;
+- explicit wider DeeDou Marketing/Accounting/local-AI integrations once cross-system contracts exist.
+
+Acceptance of the phase does not authorize inventing detailed business rules. Missing units, accounting treatment, provider behavior, discount precedence, loyalty economics or analytics definitions must still be specified before coding.
+
+## Inventory / recipe / menu provisioning
+
+### D-026 — Real menu provisioning is coupled to recipe, cost and inventory deduction
+**Status: ACCEPTED / NOT IMPLEMENTED**
+
+Real Production menu provisioning will not be treated as isolated name/price entry. When the real menu is provisioned, DeeDou must also have the recipe/cost/inventory authority needed for sold items to deduct stock correctly.
+
+The exact recipe/BOM structure, ingredient units, yield/waste treatment, direct-stock-item handling, costing method and inventory-consumption timing are **not yet defined** and must be specified in the dedicated inventory/recipe/COGS milestone rather than guessed during catalog entry.
+
+Existing DD-012 catalog tables/contracts remain authoritative and should be reused/extended; do not create a second product/menu graph.
+
+### D-027 — Broad UI/UX redesign follows core business/backend capability completion
+**Status: ACCEPTED / NOT IMPLEMENTED**
+
+Admin/POS/QR visual and interaction redesign is intentionally deferred until the confirmed operational/business backend phases stabilize. UI-only changes should reuse existing contracts; backend/schema changes require a proven capability gap.
 
 ## How decisions change
 
