@@ -1,0 +1,163 @@
+name: Phase 1A Free-tier Logical Backup Restore Drill
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 18 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase1a-free-tier-backup-restore
+  cancel-in-progress: false
+
+jobs:
+  logical-backup-restore-drill:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      DEEDOU_BACKUP_SOURCE_REF: nwohsyzpmogqjbmknwbl
+      BACKUP_ROOT: ${{ runner.temp }}/deedou-phase1a-backup
+      ARTIFACT_DIR: artifacts/phase1a-backup
+      RESTORE_DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Confirm runner tools
+        run: |
+          node --version
+          psql --version
+          docker --version
+          npx supabase --version
+
+      - name: Verify required backup secrets
+        env:
+          DEEDOU_PRODUCTION_DB_URL: ${{ secrets.DEEDOU_PRODUCTION_DB_URL }}
+          DEEDOU_BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.DEEDOU_BACKUP_ENCRYPTION_PASSPHRASE }}
+        run: |
+          if [ -z "${DEEDOU_PRODUCTION_DB_URL:-}" ]; then
+            echo "::error::DEEDOU_PRODUCTION_DB_URL is required for the Phase 1A backup workflow."
+            exit 1
+          fi
+          if [ -z "${DEEDOU_BACKUP_ENCRYPTION_PASSPHRASE:-}" ]; then
+            echo "::error::DEEDOU_BACKUP_ENCRYPTION_PASSPHRASE is required for encrypted backup artifacts."
+            exit 1
+          fi
+
+      - name: Prepare temporary backup workspace
+        run: |
+          rm -rf "$BACKUP_ROOT"
+          mkdir -p "$BACKUP_ROOT/plain" "$BACKUP_ROOT/decrypted" "$ARTIFACT_DIR"
+
+      - name: Capture non-sensitive source verification counts
+        env:
+          DEEDOU_PRODUCTION_DB_URL: ${{ secrets.DEEDOU_PRODUCTION_DB_URL }}
+        run: |
+          psql "$DEEDOU_PRODUCTION_DB_URL" -v ON_ERROR_STOP=1 -tA -c "
+            select jsonb_pretty(jsonb_build_object(
+              'capturedAt', now(),
+              'sourceProjectRef', '${DEEDOU_BACKUP_SOURCE_REF}',
+              'counts', jsonb_build_object(
+                'locations', (select count(*) from public.locations),
+                'physicalTables', (select count(*) from public.physical_tables),
+                'products', (select count(*) from public.products),
+                'productComponents', (select count(*) from public.product_components),
+                'orders', (select count(*) from public.orders),
+                'staffProfiles', (select count(*) from public.staff_profiles),
+                'workstationDevices', (select count(*) from public.workstation_devices),
+                'backendDeviceSessions', (select count(*) from public.backend_device_sessions)
+              )
+            ));
+          " > "$BACKUP_ROOT/plain/verification.json"
+
+      - name: Dump roles, schema and data using Supabase logical export
+        env:
+          DEEDOU_PRODUCTION_DB_URL: ${{ secrets.DEEDOU_PRODUCTION_DB_URL }}
+        run: |
+          npx supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" --role-only -f "$BACKUP_ROOT/plain/roles.sql"
+          npx supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" -f "$BACKUP_ROOT/plain/schema.sql"
+          npx supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" --data-only --use-copy -f "$BACKUP_ROOT/plain/data.sql"
+
+      - name: Encrypt logical backup bundle
+        env:
+          DEEDOU_BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.DEEDOU_BACKUP_ENCRYPTION_PASSPHRASE }}
+        run: |
+          node scripts/phase1a-backup-bundle.mjs pack \
+            --input-dir "$BACKUP_ROOT/plain" \
+            --output "$ARTIFACT_DIR/deedou-production-logical-backup-${GITHUB_RUN_ID}.ddbak.enc" \
+            --source-ref "$DEEDOU_BACKUP_SOURCE_REF" \
+            --manifest-output "$ARTIFACT_DIR/backup-summary.json"
+
+      - name: Start disposable local Supabase restore target
+        run: npx supabase start
+
+      - name: Decrypt backup into temporary restore workspace
+        env:
+          DEEDOU_BACKUP_ENCRYPTION_PASSPHRASE: ${{ secrets.DEEDOU_BACKUP_ENCRYPTION_PASSPHRASE }}
+        run: |
+          rm -rf "$BACKUP_ROOT/decrypted"
+          mkdir -p "$BACKUP_ROOT/decrypted"
+          node scripts/phase1a-backup-bundle.mjs unpack \
+            --input "$ARTIFACT_DIR/deedou-production-logical-backup-${GITHUB_RUN_ID}.ddbak.enc" \
+            --output-dir "$BACKUP_ROOT/decrypted"
+
+      - name: Restore roles, schema and data into disposable database
+        run: |
+          RESTORE_STARTED_AT="$(date +%s)"
+          psql "$RESTORE_DB_URL" -v ON_ERROR_STOP=1 -f "$BACKUP_ROOT/decrypted/roles.sql"
+          psql "$RESTORE_DB_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          drop schema if exists public cascade;
+          create schema public;
+          grant usage on schema public to postgres, anon, authenticated, service_role;
+          grant all on schema public to postgres, service_role;
+          alter default privileges in schema public revoke all on tables from anon, authenticated;
+          SQL
+          psql "$RESTORE_DB_URL" -v ON_ERROR_STOP=1 -f "$BACKUP_ROOT/decrypted/schema.sql"
+          psql "$RESTORE_DB_URL" -v ON_ERROR_STOP=1 -f "$BACKUP_ROOT/decrypted/data.sql"
+          echo "DEEDOU_RESTORE_SECONDS=$(( $(date +%s) - RESTORE_STARTED_AT ))" >> "$GITHUB_ENV"
+
+      - name: Verify restored DeeDou objects and row counts
+        run: |
+          node scripts/phase1a-restore-verify.mjs \
+            --decrypted-dir "$BACKUP_ROOT/decrypted" \
+            --summary "$ARTIFACT_DIR/restore-summary.md" \
+            --restore-seconds "$DEEDOU_RESTORE_SECONDS"
+
+      - name: Remove plaintext backup workspaces
+        if: always()
+        run: rm -rf "$BACKUP_ROOT/plain" "$BACKUP_ROOT/decrypted"
+
+      - name: Stop disposable local Supabase restore target
+        if: always()
+        run: npx supabase stop
+
+      - name: Upload encrypted backup bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1a-encrypted-logical-backup
+          path: artifacts/phase1a-backup/*.ddbak.enc
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload non-sensitive backup and restore summaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase1a-backup-restore-summary
+          path: |
+            artifacts/phase1a-backup/backup-summary.json
+            artifacts/phase1a-backup/restore-summary.md
+          if-no-files-found: ignore
+          retention-days: 14
