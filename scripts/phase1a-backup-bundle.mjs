@@ -7,7 +7,15 @@ import { gzipSync, gunzipSync } from "node:zlib";
 
 export const BACKUP_FORMAT = "deedou.phase1a.logical-backup.v1";
 export const PASSPHRASE_ENV = "DEEDOU_BACKUP_ENCRYPTION_PASSPHRASE";
-export const REQUIRED_SQL_FILES = ["roles.sql", "schema.sql", "data.sql"];
+export const REQUIRED_SQL_FILES = [
+  "roles.sql",
+  "schema.sql",
+  "data.sql",
+  "migration_history_schema.sql",
+  "migration_history_data.sql",
+  "auth_schema.sql",
+  "auth_data.sql",
+];
 const OPTIONAL_FILES = ["verification.json"];
 const PBKDF2_ITERATIONS = 210000;
 
@@ -24,6 +32,47 @@ function requirePassphrase(passphrase = process.env[PASSPHRASE_ENV]) {
 
 function deriveKey(passphrase, salt) {
   return pbkdf2Sync(passphrase, salt, PBKDF2_ITERATIONS, 32, "sha256");
+}
+
+function canonicalJson(value) {
+  return JSON.stringify(value, Object.keys(value || {}).sort());
+}
+
+function hashJson(value) {
+  return sha256(Buffer.from(JSON.stringify(value), "utf8"));
+}
+
+function sanitizeVerificationForManifest(verification) {
+  if (!verification || typeof verification !== "object") return undefined;
+  const sanitized = {};
+  if (verification.capturedAt) sanitized.capturedAt = verification.capturedAt;
+  if (verification.sourceProjectRef) sanitized.sourceProjectRef = verification.sourceProjectRef;
+  if (verification.counts) sanitized.counts = verification.counts;
+  if (verification.auth?.counts) {
+    sanitized.auth = {
+      counts: verification.auth.counts,
+      relationsExpected: Object.keys(verification.auth.relations || {}).sort(),
+    };
+  }
+  if (verification.cliDumpProbe) {
+    sanitized.cliDumpProbe = verification.cliDumpProbe;
+  }
+  if (verification.migrationHistory?.rows) {
+    sanitized.migrationHistory = {
+      count: verification.migrationHistory.rows.length,
+      rowsSha256: hashJson(sortMigrationRows(verification.migrationHistory.rows)),
+    };
+  }
+  return sanitized;
+}
+
+function sortMigrationRows(rows = []) {
+  return [...rows]
+    .map((row) => ({
+      version: String(row.version || ""),
+      name: String(row.name || ""),
+    }))
+    .sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b)));
 }
 
 async function readBackupFiles(inputDir) {
@@ -73,10 +122,31 @@ async function buildManifest({ inputDir, sourceRef, createdAt = new Date().toISO
 
   const verificationPath = join(inputDir, "verification.json");
   if (existsSync(verificationPath)) {
-    manifest.verification = JSON.parse(await readFile(verificationPath, "utf8"));
+    const verification = JSON.parse(await readFile(verificationPath, "utf8"));
+    manifest.verification = sanitizeVerificationForManifest(verification);
   }
 
   return manifest;
+}
+
+export async function recordDumpProbe({ verificationPath, schemaPath, dataPath }) {
+  const resolvedVerification = resolve(verificationPath);
+  const verification = existsSync(resolvedVerification)
+    ? JSON.parse(await readFile(resolvedVerification, "utf8"))
+    : {};
+  const schemaText = await readFile(resolve(schemaPath), "utf8");
+  const dataText = await readFile(resolve(dataPath), "utf8");
+  verification.cliDumpProbe = {
+    supabaseCliVersion: process.env.DEEDOU_SUPABASE_CLI_VERSION || "UNKNOWN",
+    standardDumpContainsAuthSchema:
+      /CREATE TABLE\s+(auth\.|"auth"\.)?"?users"?/i.test(schemaText) ||
+      /CREATE SCHEMA\s+(auth|"auth")/i.test(schemaText),
+    standardDumpContainsAuthData:
+      /COPY\s+(auth\.|"auth"\.)?"?users"?/i.test(dataText) ||
+      /INSERT INTO\s+(auth\.|"auth"\.)?"?users"?/i.test(dataText),
+  };
+  await writeFile(resolvedVerification, `${JSON.stringify(verification, null, 2)}\n`);
+  return verification.cliDumpProbe;
 }
 
 export async function packBackupBundle({
@@ -217,7 +287,21 @@ async function main() {
     return;
   }
 
-  throw new Error("Usage: phase1a-backup-bundle.mjs <pack|unpack> ...");
+  if (command === "record-probe") {
+    const verificationPath = readFlag(args, "--verification");
+    const schemaPath = readFlag(args, "--schema");
+    const dataPath = readFlag(args, "--data");
+    if (!verificationPath || !schemaPath || !dataPath) {
+      throw new Error("Usage: phase1a-backup-bundle.mjs record-probe --verification <file> --schema <file> --data <file>");
+    }
+    const probe = await recordDumpProbe({ verificationPath, schemaPath, dataPath });
+    console.log(
+      `Recorded Supabase CLI dump probe: standardAuthSchema=${probe.standardDumpContainsAuthSchema}, standardAuthData=${probe.standardDumpContainsAuthData}`,
+    );
+    return;
+  }
+
+  throw new Error("Usage: phase1a-backup-bundle.mjs <pack|unpack|record-probe> ...");
 }
 
 if (resolve(process.argv[1] || "") === fileURLToPath(import.meta.url)) {

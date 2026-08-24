@@ -13,8 +13,18 @@ const COUNT_KEYS = [
   "orders",
   "staffProfiles",
   "workstationDevices",
-  "backendDeviceSessions",
+  "workstationDeviceSessions",
 ];
+const AUTH_COUNT_KEYS = ["users", "identities", "mfaFactors"];
+
+function canonicalMigrationRows(rows = []) {
+  return [...rows]
+    .map((row) => ({
+      version: String(row.version || ""),
+      name: String(row.name || ""),
+    }))
+    .sort((a, b) => `${a.version}\u0000${a.name}`.localeCompare(`${b.version}\u0000${b.name}`));
+}
 
 export function buildVerificationSql() {
   return `
@@ -27,8 +37,12 @@ select jsonb_build_object(
     'staff_profiles', to_regclass('public.staff_profiles') is not null,
     'staff_activation_requests', to_regclass('public.staff_activation_requests') is not null,
     'workstation_devices', to_regclass('public.workstation_devices') is not null,
-    'backend_device_sessions', to_regclass('public.backend_device_sessions') is not null,
-    'audit_events', to_regclass('public.audit_events') is not null
+    'workstation_device_sessions', to_regclass('public.workstation_device_sessions') is not null,
+    'audit_events', to_regclass('public.audit_events') is not null,
+    'auth_users', to_regclass('auth.users') is not null,
+    'auth_identities', to_regclass('auth.identities') is not null,
+    'auth_mfa_factors', to_regclass('auth.mfa_factors') is not null,
+    'schema_migrations', to_regclass('supabase_migrations.schema_migrations') is not null
   ),
   'functions', (
     select jsonb_object_agg(required.name, exists (
@@ -57,7 +71,73 @@ select jsonb_build_object(
     'orders', (select count(*) from public.orders),
     'staffProfiles', (select count(*) from public.staff_profiles),
     'workstationDevices', (select count(*) from public.workstation_devices),
-    'backendDeviceSessions', (select count(*) from public.backend_device_sessions)
+    'workstationDeviceSessions', (select count(*) from public.workstation_device_sessions)
+  ),
+  'auth', jsonb_build_object(
+    'counts', jsonb_build_object(
+      'users', (select count(*) from auth.users),
+      'identities', (select count(*) from auth.identities),
+      'mfaFactors', (select count(*) from auth.mfa_factors)
+    ),
+    'relations', jsonb_build_object(
+      'staffProfilesHaveAuthUsers', not exists (
+        select 1
+        from public.staff_profiles sp
+        left join auth.users au on au.id = sp.auth_user_id
+        where au.id is null
+      ),
+      'identitiesHaveAuthUsers', not exists (
+        select 1
+        from auth.identities ai
+        left join auth.users au on au.id = ai.user_id
+        where au.id is null
+      ),
+      'mfaFactorsHaveAuthUsers', not exists (
+        select 1
+        from auth.mfa_factors mf
+        left join auth.users au on au.id = mf.user_id
+        where au.id is null
+      ),
+      'staffAuthUsersHaveIdentity', not exists (
+        select 1
+        from public.staff_profiles sp
+        where not exists (
+          select 1 from auth.identities ai where ai.user_id = sp.auth_user_id
+        )
+      )
+    )
+  ),
+  'migrationHistory', jsonb_build_object(
+    'count', (select count(*) from supabase_migrations.schema_migrations),
+    'rows', (
+      select coalesce(
+        jsonb_agg(jsonb_build_object('version', version::text, 'name', name::text) order by version::text, name::text),
+        '[]'::jsonb
+      )
+      from supabase_migrations.schema_migrations
+    )
+  ),
+  'security', jsonb_build_object(
+    'rls', jsonb_build_object(
+      'products', (select relrowsecurity from pg_class where oid = 'public.products'::regclass),
+      'productComponents', (select relrowsecurity from pg_class where oid = 'public.product_components'::regclass),
+      'staffProfiles', (select relrowsecurity from pg_class where oid = 'public.staff_profiles'::regclass),
+      'workstationDevices', (select relrowsecurity from pg_class where oid = 'public.workstation_devices'::regclass),
+      'workstationDeviceSessions', (select relrowsecurity from pg_class where oid = 'public.workstation_device_sessions'::regclass)
+    ),
+    'privileges', jsonb_build_object(
+      'anonCanInsertProducts', has_table_privilege('anon', 'public.products', 'INSERT'),
+      'authenticatedCanInsertProducts', has_table_privilege('authenticated', 'public.products', 'INSERT'),
+      'authenticatedCanInsertWorkstationDeviceSessions', has_table_privilege('authenticated', 'public.workstation_device_sessions', 'INSERT'),
+      'serviceRoleCanMaintainWorkstationDeviceSessions', has_table_privilege('service_role', 'public.workstation_device_sessions', 'INSERT')
+    ),
+    'functionPrivileges', jsonb_build_object(
+      'anonCanAuthorizeStaffAccess', has_function_privilege('anon', 'public.authorize_staff_access(text,text,text,text)'::regprocedure, 'EXECUTE'),
+      'authenticatedCanAuthorizeStaffAccess', has_function_privilege('authenticated', 'public.authorize_staff_access(text,text,text,text)'::regprocedure, 'EXECUTE'),
+      'authenticatedCanCreateProductComponent', has_function_privilege('authenticated', 'public.dd012_create_product_component(text,text,text,text,text,text,integer,text,integer,text,text,text)'::regprocedure, 'EXECUTE'),
+      'authenticatedCannotCreatePendingStaff', not has_function_privilege('authenticated', 'public.dd011b_service_create_pending_staff(uuid,uuid,text,text,text,text)'::regprocedure, 'EXECUTE'),
+      'serviceRoleCanCreatePendingStaff', has_function_privilege('service_role', 'public.dd011b_service_create_pending_staff(uuid,uuid,text,text,text,text)'::regprocedure, 'EXECUTE')
+    )
   )
 )::text;
 `;
@@ -76,6 +156,9 @@ function runPsqlJson({ dbUrl, sql }) {
 }
 
 function assertAllTrue(groupName, values) {
+  if (!values || typeof values !== "object" || Object.keys(values).length === 0) {
+    throw new Error(`Restore verification missing ${groupName}`);
+  }
   const missing = Object.entries(values || {})
     .filter(([, ok]) => ok !== true)
     .map(([name]) => name);
@@ -85,9 +168,15 @@ function assertAllTrue(groupName, values) {
 }
 
 export function compareCounts(expectedCounts, restoredCounts) {
+  if (!expectedCounts || typeof expectedCounts !== "object" || Object.keys(expectedCounts).length === 0) {
+    throw new Error("Captured restore row counts are required");
+  }
   const mismatches = [];
   for (const key of COUNT_KEYS) {
-    if (!(key in expectedCounts)) continue;
+    if (!(key in expectedCounts)) {
+      mismatches.push(`${key}: missing captured count`);
+      continue;
+    }
     const expected = Number(expectedCounts[key]);
     const actual = Number(restoredCounts?.[key]);
     if (!Number.isFinite(expected) || !Number.isFinite(actual) || expected !== actual) {
@@ -97,6 +186,62 @@ export function compareCounts(expectedCounts, restoredCounts) {
   if (mismatches.length > 0) {
     throw new Error(`Restore row-count mismatch: ${mismatches.join("; ")}`);
   }
+}
+
+export function compareAuthRecovery(expectedAuth, restoredAuth) {
+  if (!expectedAuth?.counts || typeof expectedAuth.counts !== "object" || Object.keys(expectedAuth.counts).length === 0) {
+    throw new Error("Captured Auth recovery counts are required");
+  }
+  const mismatches = [];
+  for (const key of AUTH_COUNT_KEYS) {
+    if (!(key in expectedAuth.counts)) {
+      mismatches.push(`${key}: missing captured Auth count`);
+      continue;
+    }
+    const expected = Number(expectedAuth.counts[key]);
+    const actual = Number(restoredAuth?.counts?.[key]);
+    if (!Number.isFinite(expected) || !Number.isFinite(actual) || expected !== actual) {
+      mismatches.push(`${key}: expected ${expectedAuth.counts[key]}, restored ${restoredAuth?.counts?.[key]}`);
+    }
+  }
+  if (mismatches.length > 0) {
+    throw new Error(`Restore Auth count mismatch: ${mismatches.join("; ")}`);
+  }
+  assertAllTrue("Auth relations", restoredAuth?.relations);
+}
+
+export function compareMigrationHistory(expectedHistory, restoredHistory) {
+  if (!Array.isArray(expectedHistory?.rows)) {
+    throw new Error("Captured Supabase migration-history rows are required");
+  }
+  const expectedRows = canonicalMigrationRows(expectedHistory?.rows || []);
+  const restoredRows = canonicalMigrationRows(restoredHistory?.rows || []);
+  if (expectedRows.length !== restoredRows.length) {
+    throw new Error(`Restore migration-history count mismatch: expected ${expectedRows.length}, restored ${restoredRows.length}`);
+  }
+  const expectedJson = JSON.stringify(expectedRows);
+  const restoredJson = JSON.stringify(restoredRows);
+  if (expectedJson !== restoredJson) {
+    throw new Error("Restore migration-history rows do not match the captured Production ledger");
+  }
+}
+
+export function assertSecurityPosture(security) {
+  assertAllTrue("RLS posture", security?.rls);
+  const privileges = security?.privileges || {};
+  if (privileges.anonCanInsertProducts !== false) {
+    throw new Error("Restore security verification failed: anon can insert products");
+  }
+  if (privileges.authenticatedCanInsertProducts !== false) {
+    throw new Error("Restore security verification failed: authenticated can insert products");
+  }
+  if (privileges.authenticatedCanInsertWorkstationDeviceSessions !== false) {
+    throw new Error("Restore security verification failed: authenticated can insert workstation_device_sessions");
+  }
+  if (privileges.serviceRoleCanMaintainWorkstationDeviceSessions !== true) {
+    throw new Error("Restore security verification failed: service_role cannot maintain workstation_device_sessions");
+  }
+  assertAllTrue("function ACL posture", security?.functionPrivileges);
 }
 
 export async function verifyRestoredBackup({
@@ -120,6 +265,9 @@ export async function verifyRestoredBackup({
   assertAllTrue("tables", restored.tables);
   assertAllTrue("functions", restored.functions);
   compareCounts(expected.counts || {}, restored.counts || {});
+  compareAuthRecovery(expected.auth || {}, restored.auth || {});
+  compareMigrationHistory(expected.migrationHistory || {}, restored.migrationHistory || {});
+  assertSecurityPosture(restored.security || {});
 
   const summary = [
     "# DeeDou Phase 1A Restore Drill Summary",
@@ -130,6 +278,9 @@ export async function verifyRestoredBackup({
     `- verifiedTables: ${Object.keys(restored.tables || {}).length}`,
     `- verifiedFunctions: ${Object.keys(restored.functions || {}).length}`,
     `- countKeys: ${Object.keys(restored.counts || {}).join(", ")}`,
+    `- authCountKeys: ${Object.keys(restored.auth?.counts || {}).join(", ")}`,
+    `- migrationHistoryRows: ${restored.migrationHistory?.count ?? "NOT_RECORDED"}`,
+    `- securityAssertions: RLS, ACL and representative direct-write denial`,
     "",
   ].join("\n");
 

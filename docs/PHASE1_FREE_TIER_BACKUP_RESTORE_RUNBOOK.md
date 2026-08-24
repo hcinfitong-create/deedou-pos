@@ -11,6 +11,8 @@ Phase 1A establishes a reproducible backup artifact and a disposable restore dri
 In scope:
 
 - Supabase-supported logical export of roles, schema and data.
+- Supabase-supported logical export of the Production migration-history ledger.
+- Explicit Auth schema/data logical export for Owner identity/MFA recoverability.
 - Encrypted GitHub Actions artifact.
 - Restore drill into a disposable local Supabase/Postgres target in CI.
 - Non-sensitive manifest, checksums, row-count checks and restore timing.
@@ -47,11 +49,31 @@ supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" -f schema.sql
 supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" --data-only --use-copy -f data.sql
 ```
 
+It also preserves the Production Supabase migration ledger using the Supabase-documented migration-history path:
+
+```bash
+supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" --schema supabase_migrations -f migration_history_schema.sql
+supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" --schema supabase_migrations --data-only --use-copy -f migration_history_data.sql
+```
+
+The workflow probes whether the standard schema/data dump contains Auth records, then uses explicit Auth schema/data dumps for DD-011B Owner identity/MFA recoverability evidence:
+
+```bash
+supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" --schema auth -f auth_schema.sql
+supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" --schema auth --data-only --use-copy -f auth_data.sql
+```
+
+Auth backup material can include sensitive managed Auth database records. It must remain only inside runner temp storage and the encrypted bundle. Do not upload plaintext Auth SQL, password hashes, MFA secrets, session tokens, JWTs, cookies, device secrets or database credentials.
+
 The committed helper `scripts/phase1a-backup-bundle.mjs` then builds one encrypted `.ddbak.enc` bundle containing:
 
 - `roles.sql`;
 - `schema.sql`;
 - `data.sql`;
+- `migration_history_schema.sql`;
+- `migration_history_data.sql`;
+- `auth_schema.sql`;
+- `auth_data.sql`;
 - `verification.json`;
 - a manifest with UTC creation time, non-secret source ref, file sizes and SHA-256 checksums.
 
@@ -70,15 +92,15 @@ The workflow starts a disposable local Supabase target with the pinned CLI used 
 Restore order:
 
 1. decrypt the encrypted bundle into a temporary runner directory;
-2. restore `roles.sql`;
-3. reset only the disposable target's `public` schema;
-4. restore `schema.sql`;
-5. restore `data.sql`;
-6. verify representative schema objects, DD-011B/DD-012C functions and row counts;
+2. reset only the disposable target's `public`, `auth` and `supabase_migrations` schemas;
+3. restore `roles.sql`, `schema.sql`, `migration_history_schema.sql` and `auth_schema.sql`;
+4. set `session_replication_role = replica` for trigger-safe data import;
+5. restore `auth_data.sql`, `data.sql` and `migration_history_data.sql`;
+6. verify representative schema objects, Auth identity/MFA consistency, Production migration-history match, DD-011B/DD-012C functions, RLS/ACL posture and row counts;
 7. write a non-sensitive restore summary with elapsed restore seconds;
 8. remove decrypted SQL.
 
-The restore step uses `psql -v ON_ERROR_STOP=1` so SQL errors stop the workflow.
+The restore step uses one `psql --single-transaction --variable ON_ERROR_STOP=1` restore boundary for reset/schema/data/history/Auth restore. SQL errors stop the workflow and roll back the restore transaction. The reset is destructive only to the disposable restore target named by `RESTORE_DB_URL`.
 
 Representative object checks include the staff/device authority tables, catalog/component tables and the critical DD-011B/DD-012C functions:
 
@@ -90,6 +112,8 @@ Representative object checks include the staff/device authority tables, catalog/
 - `dd012_update_product_component`;
 - `dd012_delete_product_component`.
 
+DD-011B canonical device session authority is `public.workstation_device_sessions`. Slice 1A must not use any earlier non-canonical device-session table spelling. The DD-011B backend-session-required policy flag remains a configuration field and is not a table.
+
 Representative row-count checks compare counts captured before backup against the restored disposable target for:
 
 - locations;
@@ -99,7 +123,28 @@ Representative row-count checks compare counts captured before backup against th
 - orders;
 - staff profiles;
 - workstation devices;
-- backend device sessions.
+- workstation device sessions.
+
+Auth recovery checks compare counts only for:
+
+- `auth.users`;
+- `auth.identities`;
+- `auth.mfa_factors`.
+
+Relationship checks verify staff profiles point to restored Auth users, Auth identities/MFA factors point to restored Auth users, and each restored staff Auth user has an identity. They never print password hashes, MFA secrets, recovery tokens, refresh tokens or session cookies.
+
+Migration-history checks compare the exact captured `(version, name)` set from `supabase_migrations.schema_migrations` against the restored disposable target. The public backup summary records only a count and checksum; the exact set remains in the encrypted bundle/temporary restore workspace.
+
+Representative post-restore security checks verify:
+
+- RLS remains enabled on protected catalog/staff/device/session tables;
+- anonymous/authenticated protected-table inserts remain denied for representative tables;
+- `service_role` can still maintain workstation device sessions;
+- expected execute grants remain present for `authorize_staff_access` and DD-012C component RPCs;
+- DD-011B service-only staff provisioning functions remain unavailable to `authenticated`.
+
+Supabase-managed project configuration outside the database, including Dashboard Auth Site URL, redirect allowlist, signup posture, Auth rate-limit settings and leaked-password protection, is not recovered by this logical DB backup. Those remain separate Phase 1 operator verification steps.
+
 
 ## Interim RPO/RTO
 

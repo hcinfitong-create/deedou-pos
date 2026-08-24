@@ -40,6 +40,7 @@ jobs:
           psql --version
           docker --version
           npx supabase --version
+          echo "DEEDOU_SUPABASE_CLI_VERSION=$(npx supabase --version)" >> "$GITHUB_ENV"
 
       - name: Verify required backup secrets
         env:
@@ -76,7 +77,50 @@ jobs:
                 'orders', (select count(*) from public.orders),
                 'staffProfiles', (select count(*) from public.staff_profiles),
                 'workstationDevices', (select count(*) from public.workstation_devices),
-                'backendDeviceSessions', (select count(*) from public.backend_device_sessions)
+                'workstationDeviceSessions', (select count(*) from public.workstation_device_sessions)
+              ),
+              'auth', jsonb_build_object(
+                'counts', jsonb_build_object(
+                  'users', (select count(*) from auth.users),
+                  'identities', (select count(*) from auth.identities),
+                  'mfaFactors', (select count(*) from auth.mfa_factors)
+                ),
+                'relations', jsonb_build_object(
+                  'staffProfilesHaveAuthUsers', not exists (
+                    select 1
+                    from public.staff_profiles sp
+                    left join auth.users au on au.id = sp.auth_user_id
+                    where au.id is null
+                  ),
+                  'identitiesHaveAuthUsers', not exists (
+                    select 1
+                    from auth.identities ai
+                    left join auth.users au on au.id = ai.user_id
+                    where au.id is null
+                  ),
+                  'mfaFactorsHaveAuthUsers', not exists (
+                    select 1
+                    from auth.mfa_factors mf
+                    left join auth.users au on au.id = mf.user_id
+                    where au.id is null
+                  ),
+                  'staffAuthUsersHaveIdentity', not exists (
+                    select 1
+                    from public.staff_profiles sp
+                    where not exists (
+                      select 1 from auth.identities ai where ai.user_id = sp.auth_user_id
+                    )
+                  )
+                )
+              ),
+              'migrationHistory', jsonb_build_object(
+                'rows', (
+                  select coalesce(
+                    jsonb_agg(jsonb_build_object('version', version::text, 'name', name::text) order by version::text, name::text),
+                    '[]'::jsonb
+                  )
+                  from supabase_migrations.schema_migrations
+                )
               )
             ));
           " > "$BACKUP_ROOT/plain/verification.json"
@@ -88,6 +132,17 @@ jobs:
           npx supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" --role-only -f "$BACKUP_ROOT/plain/roles.sql"
           npx supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" -f "$BACKUP_ROOT/plain/schema.sql"
           npx supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" --data-only --use-copy -f "$BACKUP_ROOT/plain/data.sql"
+          npx supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" --schema supabase_migrations -f "$BACKUP_ROOT/plain/migration_history_schema.sql"
+          npx supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" --schema supabase_migrations --data-only --use-copy -f "$BACKUP_ROOT/plain/migration_history_data.sql"
+          npx supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" --schema auth -f "$BACKUP_ROOT/plain/auth_schema.sql"
+          npx supabase db dump --db-url "$DEEDOU_PRODUCTION_DB_URL" --schema auth --data-only --use-copy -f "$BACKUP_ROOT/plain/auth_data.sql"
+
+      - name: Record pinned CLI standard dump Auth coverage
+        run: |
+          node scripts/phase1a-backup-bundle.mjs record-probe \
+            --verification "$BACKUP_ROOT/plain/verification.json" \
+            --schema "$BACKUP_ROOT/plain/schema.sql" \
+            --data "$BACKUP_ROOT/plain/data.sql"
 
       - name: Encrypt logical backup bundle
         env:
@@ -115,16 +170,23 @@ jobs:
       - name: Restore roles, schema and data into disposable database
         run: |
           RESTORE_STARTED_AT="$(date +%s)"
-          psql "$RESTORE_DB_URL" -v ON_ERROR_STOP=1 -f "$BACKUP_ROOT/decrypted/roles.sql"
-          psql "$RESTORE_DB_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          cat > "$BACKUP_ROOT/decrypted/restore-reset.sql" <<'SQL'
           drop schema if exists public cascade;
-          create schema public;
-          grant usage on schema public to postgres, anon, authenticated, service_role;
-          grant all on schema public to postgres, service_role;
-          alter default privileges in schema public revoke all on tables from anon, authenticated;
+          drop schema if exists auth cascade;
+          drop schema if exists supabase_migrations cascade;
           SQL
-          psql "$RESTORE_DB_URL" -v ON_ERROR_STOP=1 -f "$BACKUP_ROOT/decrypted/schema.sql"
-          psql "$RESTORE_DB_URL" -v ON_ERROR_STOP=1 -f "$BACKUP_ROOT/decrypted/data.sql"
+          psql "$RESTORE_DB_URL" \
+            --single-transaction \
+            --variable ON_ERROR_STOP=1 \
+            --file "$BACKUP_ROOT/decrypted/restore-reset.sql" \
+            --file "$BACKUP_ROOT/decrypted/roles.sql" \
+            --file "$BACKUP_ROOT/decrypted/schema.sql" \
+            --file "$BACKUP_ROOT/decrypted/migration_history_schema.sql" \
+            --file "$BACKUP_ROOT/decrypted/auth_schema.sql" \
+            --command "SET session_replication_role = replica" \
+            --file "$BACKUP_ROOT/decrypted/auth_data.sql" \
+            --file "$BACKUP_ROOT/decrypted/data.sql" \
+            --file "$BACKUP_ROOT/decrypted/migration_history_data.sql"
           echo "DEEDOU_RESTORE_SECONDS=$(( $(date +%s) - RESTORE_STARTED_AT ))" >> "$GITHUB_ENV"
 
       - name: Verify restored DeeDou objects and row counts
