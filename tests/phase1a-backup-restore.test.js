@@ -12,6 +12,12 @@ import {
   unpackBackupBundle,
 } from "../scripts/phase1a-backup-bundle.mjs";
 import {
+  buildAuthRestoreAuthority,
+  detectAuthDataTables,
+  prepareAuthDataForDisposableRestore,
+  prepareRolesForDisposableRestore,
+} from "../scripts/phase1a-restore-prepare.mjs";
+import {
   assertSecurityPosture,
   buildDirectWriteDenialSql,
   compareAuthRecovery,
@@ -26,6 +32,7 @@ const SLICE_1A_FILES = [
   "docs/PHASE1_FREE_TIER_BACKUP_RESTORE_RUNBOOK.md",
   "package.json",
   "scripts/phase1a-backup-bundle.mjs",
+  "scripts/phase1a-restore-prepare.mjs",
   "scripts/phase1a-restore-verify.mjs",
   "scripts/phase1a-synthetic-e2e.mjs",
   "tests/phase1a-backup-restore.test.js",
@@ -106,6 +113,68 @@ test("Phase 1A encrypted backup bundle round-trips without plaintext artifact st
     assert.deepEqual(unpackedManifest.files, manifest.files);
     assert.equal(await readFile(join(outputDir, "schema.sql"), "utf8"), "create table public.phase1a_secret_fixture(id int);\n");
     assert.equal(await readFile(join(outputDir, "auth_schema.sql"), "utf8"), "create schema auth;\n");
+  });
+});
+
+test("Phase 1A keeps raw roles.sql unchanged while deriving restore-only managed-role compatibility SQL", async () => {
+  await withTempDir(async (dir) => {
+    const inputDir = join(dir, "plain");
+    const outputDir = join(dir, "restore");
+    await mkdir(inputDir, { recursive: true });
+    const rawRoles = [
+      "ALTER ROLE anon SET statement_timeout TO '3s';",
+      "ALTER ROLE authenticator SET log_min_messages TO 'fatal';",
+      "ALTER ROLE service_role SET statement_timeout TO '8s';",
+      "",
+    ].join("\n");
+    await writeFile(join(inputDir, "roles.sql"), rawRoles);
+    await writeFile(join(inputDir, "schema.sql"), "-- schema\n");
+    await writeFile(join(inputDir, "data.sql"), "-- data\n");
+    await writeFile(join(inputDir, "migration_history_schema.sql"), "-- migration schema\n");
+    await writeFile(join(inputDir, "migration_history_data.sql"), "-- migration data\n");
+    await writeFile(join(inputDir, "auth_schema.sql"), "-- auth schema\n");
+    await writeFile(join(inputDir, "auth_data.sql"), "-- auth data\n");
+
+    const bundlePath = join(dir, "backup.ddbak.enc");
+    await packBackupBundle({
+      inputDir,
+      outputPath: bundlePath,
+      sourceRef: "nwohsyzpmogqjbmknwbl",
+      passphrase: "unit-test-passphrase",
+      createdAt: "2026-08-24T00:00:00.000Z",
+    });
+    await unpackBackupBundle({ inputPath: bundlePath, outputDir, passphrase: "unit-test-passphrase" });
+    assert.equal(await readFile(join(outputDir, "roles.sql"), "utf8"), rawRoles);
+
+    const rolesRestorePath = join(outputDir, "roles.restore.sql");
+    const result = await prepareRolesForDisposableRestore({
+      inputPath: join(outputDir, "roles.sql"),
+      outputPath: rolesRestorePath,
+    });
+    const prepared = await readFile(rolesRestorePath, "utf8");
+    assert.deepEqual(
+      result.suppressed.map(({ role, guc }) => `${role}.${guc}`),
+      ["authenticator.log_min_messages"],
+    );
+    assert.match(prepared, /ALTER ROLE anon SET statement_timeout/);
+    assert.match(prepared, /ALTER ROLE service_role SET statement_timeout/);
+    assert.doesNotMatch(prepared, /ALTER ROLE authenticator SET log_min_messages/);
+    assert.match(prepared, /role=authenticator, guc=log_min_messages/);
+  });
+});
+
+test("Phase 1A roles restore preparation fails closed on unexpected privileged role settings", async () => {
+  await withTempDir(async (dir) => {
+    const rolesPath = join(dir, "roles.sql");
+    await writeFile(rolesPath, "ALTER ROLE deedou_custom SET log_min_messages TO 'fatal';\n");
+    await assert.rejects(
+      () =>
+        prepareRolesForDisposableRestore({
+          inputPath: rolesPath,
+          outputPath: join(dir, "roles.restore.sql"),
+        }),
+      /Unexpected restore-incompatible role setting.*role=deedou_custom, guc=log_min_messages/,
+    );
   });
 });
 
@@ -307,17 +376,114 @@ test("Phase 1A records pinned CLI standard Auth dump coverage without storing se
     const verificationPath = join(dir, "verification.json");
     const schemaPath = join(dir, "schema.sql");
     const dataPath = join(dir, "data.sql");
+    const authDataPath = join(dir, "auth_data.sql");
     await writeFile(verificationPath, JSON.stringify({ counts: {} }));
     await writeFile(schemaPath, "create table public.only_public(id int);\n");
-    await writeFile(dataPath, "copy public.only_public from stdin;\n\\.\n");
+    await writeFile(
+      dataPath,
+      [
+        "copy public.only_public from stdin;",
+        "\\.",
+        "copy auth.users from stdin;",
+        "\\.",
+        "insert into auth.identities values ('identity-fixture');",
+        "",
+      ].join("\n"),
+    );
+    await writeFile(authDataPath, "copy auth.mfa_factors from stdin;\n\\.\n");
 
-    const probe = await recordDumpProbe({ verificationPath, schemaPath, dataPath });
+    const probe = await recordDumpProbe({ verificationPath, schemaPath, dataPath, authDataPath });
     assert.equal(probe.standardDumpContainsAuthSchema, false);
-    assert.equal(probe.standardDumpContainsAuthData, false);
+    assert.equal(probe.standardDumpContainsAuthData, true);
+    assert.deepEqual(probe.standardDumpAuthTables, {
+      users: true,
+      identities: true,
+      mfaFactors: false,
+    });
+    assert.deepEqual(probe.explicitAuthDumpTables, {
+      users: false,
+      identities: false,
+      mfaFactors: true,
+    });
 
     const updated = JSON.parse(await readFile(verificationPath, "utf8"));
     assert.equal(updated.cliDumpProbe.standardDumpContainsAuthSchema, false);
-    assert.equal(updated.cliDumpProbe.standardDumpContainsAuthData, false);
+    assert.equal(updated.cliDumpProbe.standardDumpContainsAuthData, true);
+    assert.equal(updated.cliDumpProbe.standardDumpAuthTables.users, true);
+    assert.equal(updated.cliDumpProbe.explicitAuthDumpTables.mfaFactors, true);
+  });
+});
+
+test("Phase 1A derives one deterministic Auth restore authority per required table", async () => {
+  await withTempDir(async (dir) => {
+    const verificationPath = join(dir, "verification.json");
+    const dataPath = join(dir, "data.sql");
+    const authDataPath = join(dir, "auth_data.sql");
+    const outputPath = join(dir, "auth_data.restore.sql");
+    await writeFile(
+      dataPath,
+      [
+        "COPY auth.users (id) FROM stdin;",
+        "user-fixture",
+        "\\.",
+        "INSERT INTO auth.identities (id) VALUES ('identity-fixture');",
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      authDataPath,
+      [
+        "COPY auth.users (id) FROM stdin;",
+        "duplicate-user-fixture",
+        "\\.",
+        "COPY auth.mfa_factors (id) FROM stdin;",
+        "mfa-fixture",
+        "\\.",
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      verificationPath,
+      JSON.stringify({
+        cliDumpProbe: {
+          standardDumpAuthTables: { users: true, identities: true, mfaFactors: false },
+          explicitAuthDumpTables: { users: true, identities: false, mfaFactors: true },
+        },
+      }),
+    );
+
+    const result = await prepareAuthDataForDisposableRestore({
+      verificationPath,
+      dataPath,
+      authDataPath,
+      outputPath,
+    });
+    const prepared = await readFile(outputPath, "utf8");
+    assert.deepEqual(result.authority, {
+      users: "data.sql",
+      identities: "data.sql",
+      mfaFactors: "auth_data.restore.sql",
+    });
+    assert.deepEqual(result.explicitRestoreKeys, ["mfaFactors"]);
+    assert.match(prepared, /mfaFactors: auth_data\.restore\.sql/);
+    assert.match(prepared, /COPY auth\.mfa_factors/);
+    assert.doesNotMatch(prepared, /duplicate-user-fixture/);
+  });
+});
+
+test("Phase 1A Auth restore authority fails closed when a required Auth table is absent from all dumps", () => {
+  assert.throws(
+    () =>
+      buildAuthRestoreAuthority({
+        standardCoverage: { users: true, identities: false, mfaFactors: false },
+        explicitCoverage: { users: false, identities: false, mfaFactors: true },
+      }),
+    /required Auth table data: identities/,
+  );
+  assert.deepEqual(detectAuthDataTables("COPY \"auth\".\"mfa_factors\" FROM stdin;\n\\.\n"), {
+    users: false,
+    identities: false,
+    mfaFactors: true,
   });
 });
 
@@ -349,7 +515,11 @@ test("Phase 1A workflow is narrowly scoped to encrypted logical backup and safe 
   assert.equal(workflow.includes("backend" + "_device_sessions"), false);
   assert.match(workflow, /phase1a-backup-bundle\.mjs pack/);
   assert.match(workflow, /phase1a-backup-bundle\.mjs unpack/);
+  assert.match(workflow, /phase1a-restore-prepare\.mjs prepare-roles/);
+  assert.match(workflow, /phase1a-restore-prepare\.mjs prepare-auth-data/);
   assert.match(workflow, /phase1a-restore-verify\.mjs/);
+  assert.match(workflow, /roles\.restore\.sql/);
+  assert.match(workflow, /auth_data\.restore\.sql/);
   assert.match(workflow, /--single-transaction/);
   assert.match(workflow, /ON_ERROR_STOP=1/);
   assert.match(workflow, /SET session_replication_role = replica/);
@@ -361,6 +531,10 @@ test("Phase 1A workflow is narrowly scoped to encrypted logical backup and safe 
   assert.ok(
     restoreBlock.indexOf('decrypted/auth_schema.sql') < restoreBlock.indexOf('decrypted/schema.sql'),
     "Auth schema must be restored before public schema dependencies",
+  );
+  assert.ok(
+    restoreBlock.indexOf("phase1a-restore-prepare.mjs prepare-roles") < restoreBlock.indexOf('roles.restore.sql"'),
+    "Production restore must derive restore-only roles SQL before replay",
   );
 });
 
@@ -391,7 +565,11 @@ test("Phase 1A PR CI runs a local synthetic E2E drill through the real backup he
   assert.match(script, /"--schema", "supabase_migrations"/);
   assert.match(script, /scripts\/phase1a-backup-bundle\.mjs",\s*"pack"/);
   assert.match(script, /scripts\/phase1a-backup-bundle\.mjs",\s*"unpack"/);
+  assert.match(script, /scripts\/phase1a-restore-prepare\.mjs",\s*"prepare-roles"/);
+  assert.match(script, /scripts\/phase1a-restore-prepare\.mjs",\s*"prepare-auth-data"/);
   assert.match(script, /scripts\/phase1a-restore-verify\.mjs"/);
+  assert.match(script, /rolesRestorePath/);
+  assert.match(script, /authDataRestorePath/);
   assert.match(script, /SET session_replication_role = replica/);
   assert.match(script, /removed plaintext synthetic backup workspace/);
   assert.doesNotMatch(script, /DEEDOU_PRODUCTION_DB_URL/);

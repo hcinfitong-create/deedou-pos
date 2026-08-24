@@ -324,6 +324,8 @@ async function main() {
   const decryptedDir = join(root, "decrypted");
   const artifactDir = join(root, "artifact");
   const restoreResetPath = join(decryptedDir, "restore-reset.sql");
+  const rolesRestorePath = join(decryptedDir, "roles.restore.sql");
+  const authDataRestorePath = join(decryptedDir, "auth_data.restore.sql");
   const encryptedBundlePath = join(artifactDir, "synthetic.ddbak.enc");
   const summaryPath = join(artifactDir, "restore-summary.md");
   const passphrase = `phase1a-synthetic-${randomBytes(24).toString("base64url")}`;
@@ -360,6 +362,8 @@ async function main() {
       join(plainDir, "schema.sql"),
       "--data",
       join(plainDir, "data.sql"),
+      "--auth-data",
+      join(plainDir, "auth_data.sql"),
     ], "record standard dump Auth coverage", {
       env: { DEEDOU_SUPABASE_CLI_VERSION: supabaseVersion },
     });
@@ -390,6 +394,28 @@ async function main() {
       env: { DEEDOU_BACKUP_ENCRYPTION_PASSPHRASE: passphrase },
     });
 
+    run(NODE, [
+      "scripts/phase1a-restore-prepare.mjs",
+      "prepare-roles",
+      "--input",
+      join(decryptedDir, "roles.sql"),
+      "--output",
+      rolesRestorePath,
+    ], "derive restore-only roles SQL while preserving raw roles.sql");
+
+    run(NODE, [
+      "scripts/phase1a-restore-prepare.mjs",
+      "prepare-auth-data",
+      "--verification",
+      join(decryptedDir, "verification.json"),
+      "--data",
+      join(decryptedDir, "data.sql"),
+      "--auth-data",
+      join(decryptedDir, "auth_data.sql"),
+      "--output",
+      authDataRestorePath,
+    ], "derive single-authority restore-only Auth data SQL");
+
     await writeFile(restoreResetPath, [
       "drop schema if exists public cascade;",
       "drop schema if exists auth cascade;",
@@ -407,7 +433,7 @@ async function main() {
       "--file",
       restoreResetPath,
       "--file",
-      join(decryptedDir, "roles.sql"),
+      rolesRestorePath,
       "--file",
       join(decryptedDir, "auth_schema.sql"),
       "--file",
@@ -417,7 +443,7 @@ async function main() {
       "--command",
       "SET session_replication_role = replica",
       "--file",
-      join(decryptedDir, "auth_data.sql"),
+      authDataRestorePath,
       "--file",
       join(decryptedDir, "data.sql"),
       "--file",

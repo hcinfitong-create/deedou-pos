@@ -4,6 +4,7 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync, gunzipSync } from "node:zlib";
+import { detectAuthDataTables } from "./phase1a-restore-prepare.mjs";
 
 export const BACKUP_FORMAT = "deedou.phase1a.logical-backup.v1";
 export const PASSPHRASE_ENV = "DEEDOU_BACKUP_ENCRYPTION_PASSPHRASE";
@@ -185,22 +186,28 @@ async function buildManifest({ inputDir, sourceRef, createdAt = new Date().toISO
   return manifest;
 }
 
-export async function recordDumpProbe({ verificationPath, schemaPath, dataPath }) {
+export async function recordDumpProbe({ verificationPath, schemaPath, dataPath, authDataPath }) {
   const resolvedVerification = resolve(verificationPath);
   const verification = existsSync(resolvedVerification)
     ? JSON.parse(await readFile(resolvedVerification, "utf8"))
     : {};
   const schemaText = await readFile(resolve(schemaPath), "utf8");
   const dataText = await readFile(resolve(dataPath), "utf8");
+  const standardDumpAuthTables = detectAuthDataTables(dataText);
+  const explicitAuthDumpTables = authDataPath
+    ? detectAuthDataTables(await readFile(resolve(authDataPath), "utf8"))
+    : undefined;
   verification.cliDumpProbe = {
     supabaseCliVersion: process.env.DEEDOU_SUPABASE_CLI_VERSION || "UNKNOWN",
     standardDumpContainsAuthSchema:
       /CREATE TABLE\s+(auth\.|"auth"\.)?"?users"?/i.test(schemaText) ||
       /CREATE SCHEMA\s+(auth|"auth")/i.test(schemaText),
-    standardDumpContainsAuthData:
-      /COPY\s+(auth\.|"auth"\.)?"?users"?/i.test(dataText) ||
-      /INSERT INTO\s+(auth\.|"auth"\.)?"?users"?/i.test(dataText),
+    standardDumpContainsAuthData: Object.values(standardDumpAuthTables).some(Boolean),
+    standardDumpAuthTables,
   };
+  if (explicitAuthDumpTables) {
+    verification.cliDumpProbe.explicitAuthDumpTables = explicitAuthDumpTables;
+  }
   await writeFile(resolvedVerification, `${JSON.stringify(verification, null, 2)}\n`);
   return verification.cliDumpProbe;
 }
@@ -347,12 +354,13 @@ async function main() {
     const verificationPath = readFlag(args, "--verification");
     const schemaPath = readFlag(args, "--schema");
     const dataPath = readFlag(args, "--data");
+    const authDataPath = readFlag(args, "--auth-data");
     if (!verificationPath || !schemaPath || !dataPath) {
-      throw new Error("Usage: phase1a-backup-bundle.mjs record-probe --verification <file> --schema <file> --data <file>");
+      throw new Error("Usage: phase1a-backup-bundle.mjs record-probe --verification <file> --schema <file> --data <file> [--auth-data <file>]");
     }
-    const probe = await recordDumpProbe({ verificationPath, schemaPath, dataPath });
+    const probe = await recordDumpProbe({ verificationPath, schemaPath, dataPath, authDataPath });
     console.log(
-      `Recorded Supabase CLI dump probe: standardAuthSchema=${probe.standardDumpContainsAuthSchema}, standardAuthData=${probe.standardDumpContainsAuthData}`,
+      `Recorded Supabase CLI dump probe: standardAuthSchema=${probe.standardDumpContainsAuthSchema}, standardAuthData=${probe.standardDumpContainsAuthData}, standardAuthTables=${JSON.stringify(probe.standardDumpAuthTables)}, explicitAuthTables=${JSON.stringify(probe.explicitAuthDumpTables || {})}`,
     );
     return;
   }

@@ -199,7 +199,8 @@ jobs:
           node scripts/phase1a-backup-bundle.mjs record-probe \
             --verification "$BACKUP_ROOT/plain/verification.json" \
             --schema "$BACKUP_ROOT/plain/schema.sql" \
-            --data "$BACKUP_ROOT/plain/data.sql"
+            --data "$BACKUP_ROOT/plain/data.sql" \
+            --auth-data "$BACKUP_ROOT/plain/auth_data.sql"
 
       - name: Encrypt logical backup bundle
         env:
@@ -240,16 +241,24 @@ jobs:
           drop schema if exists auth cascade;
           drop schema if exists supabase_migrations cascade;
           SQL
+          node scripts/phase1a-restore-prepare.mjs prepare-roles \
+            --input "$BACKUP_ROOT/decrypted/roles.sql" \
+            --output "$BACKUP_ROOT/decrypted/roles.restore.sql"
+          node scripts/phase1a-restore-prepare.mjs prepare-auth-data \
+            --verification "$BACKUP_ROOT/decrypted/verification.json" \
+            --data "$BACKUP_ROOT/decrypted/data.sql" \
+            --auth-data "$BACKUP_ROOT/decrypted/auth_data.sql" \
+            --output "$BACKUP_ROOT/decrypted/auth_data.restore.sql"
           psql "$RESTORE_DB_URL" \
             --single-transaction \
             --variable ON_ERROR_STOP=1 \
             --file "$BACKUP_ROOT/decrypted/restore-reset.sql" \
-            --file "$BACKUP_ROOT/decrypted/roles.sql" \
+            --file "$BACKUP_ROOT/decrypted/roles.restore.sql" \
             --file "$BACKUP_ROOT/decrypted/auth_schema.sql" \
             --file "$BACKUP_ROOT/decrypted/migration_history_schema.sql" \
             --file "$BACKUP_ROOT/decrypted/schema.sql" \
             --command "SET session_replication_role = replica" \
-            --file "$BACKUP_ROOT/decrypted/auth_data.sql" \
+            --file "$BACKUP_ROOT/decrypted/auth_data.restore.sql" \
             --file "$BACKUP_ROOT/decrypted/data.sql" \
             --file "$BACKUP_ROOT/decrypted/migration_history_data.sql"
           echo "DEEDOU_RESTORE_SECONDS=$(( $(date +%s) - RESTORE_STARTED_AT ))" >> "$GITHUB_ENV"
