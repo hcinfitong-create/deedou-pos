@@ -236,9 +236,9 @@ jobs:
             --variable ON_ERROR_STOP=1 \
             --file "$BACKUP_ROOT/decrypted/restore-reset.sql" \
             --file "$BACKUP_ROOT/decrypted/roles.sql" \
-            --file "$BACKUP_ROOT/decrypted/schema.sql" \
-            --file "$BACKUP_ROOT/decrypted/migration_history_schema.sql" \
             --file "$BACKUP_ROOT/decrypted/auth_schema.sql" \
+            --file "$BACKUP_ROOT/decrypted/migration_history_schema.sql" \
+            --file "$BACKUP_ROOT/decrypted/schema.sql" \
             --command "SET session_replication_role = replica" \
             --file "$BACKUP_ROOT/decrypted/auth_data.sql" \
             --file "$BACKUP_ROOT/decrypted/data.sql" \

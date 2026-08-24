@@ -95,7 +95,7 @@ Restore order:
 
 1. decrypt the encrypted bundle into a temporary runner directory;
 2. reset only the disposable target's `public`, `auth` and `supabase_migrations` schemas;
-3. restore `roles.sql`, `schema.sql`, `migration_history_schema.sql` and `auth_schema.sql`;
+3. restore `roles.sql`, `auth_schema.sql`, `migration_history_schema.sql` and `schema.sql`;
 4. set `session_replication_role = replica` for trigger-safe data import;
 5. restore `auth_data.sql`, `data.sql` and `migration_history_data.sql`;
 6. verify representative schema objects, Auth identity/MFA consistency, Production migration-history match, DD-011B/DD-012C functions, RLS/ACL posture and row counts;
@@ -103,6 +103,8 @@ Restore order:
 8. remove decrypted SQL.
 
 The restore step uses one `psql --single-transaction --variable ON_ERROR_STOP=1` restore boundary for reset/schema/data/history/Auth restore. SQL errors stop the workflow and roll back the restore transaction. The reset is destructive only to the disposable restore target named by `RESTORE_DB_URL`.
+
+`auth_schema.sql` is restored before the normal public schema because DeeDou public tables, policies and functions may depend on restored Auth objects. Data import still loads Auth data before public data so staff-profile/Auth references are available when public rows are copied.
 
 Representative object checks include the staff/device authority tables, catalog/component tables and the critical DD-011B/DD-012C functions:
 
@@ -173,6 +175,8 @@ Triggers:
 - daily schedule at `18:17 UTC`.
 
 The workflow intentionally remains manual and scheduled only. It must not gain a pull request trigger because that would risk exposing Production database secrets to unmerged PR code.
+
+PR #54 also carries a separate PR-safe synthetic drill in the normal DeeDou CI workflow. That job uses only the GitHub-hosted local Supabase stack, local synthetic Owner/Auth/TOTP/device/session fixtures, and a generated job-local encryption passphrase. It exercises the same `supabase db dump --db-url` command shapes for roles, normal schema/data, `auth`, and `supabase_migrations`, then runs the committed `phase1a-backup-bundle.mjs pack`, `unpack`, and `phase1a-restore-verify.mjs` paths. It does not connect to Production/staging, does not require repository backup secrets, uploads no plaintext SQL/Auth artifacts, and does not replace the post-merge operational acceptance gate.
 
 GitHub Actions only receives `workflow_dispatch` events for a workflow file that already exists on the repository default branch, and scheduled workflows run from the default branch. Because this workflow is newly introduced by PR #54, the lifecycle has two gates:
 

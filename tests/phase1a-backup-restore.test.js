@@ -21,10 +21,13 @@ import {
 } from "../scripts/phase1a-restore-verify.mjs";
 
 const SLICE_1A_FILES = [
+  ".github/workflows/ci.yml",
   ".github/workflows/phase1a-free-tier-backup-restore.yml",
   "docs/PHASE1_FREE_TIER_BACKUP_RESTORE_RUNBOOK.md",
+  "package.json",
   "scripts/phase1a-backup-bundle.mjs",
   "scripts/phase1a-restore-verify.mjs",
+  "scripts/phase1a-synthetic-e2e.mjs",
   "tests/phase1a-backup-restore.test.js",
 ];
 
@@ -349,6 +352,51 @@ test("Phase 1A workflow is narrowly scoped to encrypted logical backup and safe 
   assert.match(workflow, /actions\/upload-artifact@v4/);
   assert.doesNotMatch(workflow, /set -x/);
   assert.doesNotMatch(workflow, /pull_request:/);
+
+  const restoreBlock = workflow.slice(workflow.indexOf("Restore roles, schema and data into disposable database"));
+  assert.ok(
+    restoreBlock.indexOf('decrypted/auth_schema.sql') < restoreBlock.indexOf('decrypted/schema.sql'),
+    "Auth schema must be restored before public schema dependencies",
+  );
+});
+
+test("Phase 1A PR CI runs a local synthetic E2E drill through the real backup helpers", async () => {
+  const ci = await readFile(".github/workflows/ci.yml", "utf8");
+  const productionWorkflow = await readFile(".github/workflows/phase1a-free-tier-backup-restore.yml", "utf8");
+  const script = await readFile("scripts/phase1a-synthetic-e2e.mjs", "utf8");
+  const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+
+  assert.match(ci, /phase1a-synthetic-e2e:/);
+  assert.match(ci, /npx supabase start/);
+  assert.match(ci, /npx supabase db reset/);
+  assert.match(ci, /npm run phase1a:synthetic-e2e/);
+  assert.match(ci, /if: always\(\)\s*\n\s*run: npx supabase stop --no-backup/);
+  assert.equal(packageJson.scripts["phase1a:synthetic-e2e"], "node scripts/phase1a-synthetic-e2e.mjs");
+  assert.match(packageJson.scripts.check, /scripts\/phase1a-synthetic-e2e\.mjs/);
+
+  assert.match(script, /buildSyntheticFixtureSql/);
+  assert.match(script, /auth\.users/);
+  assert.match(script, /auth\.identities/);
+  assert.match(script, /auth\.mfa_factors/);
+  assert.match(script, /workstation_device_sessions/);
+  assert.match(script, /supabase", "db", "dump", "--db-url"/);
+  assert.match(script, /"--schema", "auth"/);
+  assert.match(script, /"--schema", "supabase_migrations"/);
+  assert.match(script, /scripts\/phase1a-backup-bundle\.mjs",\s*"pack"/);
+  assert.match(script, /scripts\/phase1a-backup-bundle\.mjs",\s*"unpack"/);
+  assert.match(script, /scripts\/phase1a-restore-verify\.mjs"/);
+  assert.match(script, /SET session_replication_role = replica/);
+  assert.match(script, /removed plaintext synthetic backup workspace/);
+  assert.doesNotMatch(script, /DEEDOU_PRODUCTION_DB_URL/);
+  assert.doesNotMatch(script, /\$\{\{\s*secrets\./);
+  assert.doesNotMatch(script, /DO_NOT_USE|local-only-device-credential|local-owner-password/);
+
+  const scriptRestoreBlock = script.slice(script.indexOf('run("psql", ['));
+  assert.ok(
+    scriptRestoreBlock.indexOf('join(decryptedDir, "auth_schema.sql")') < scriptRestoreBlock.indexOf('join(decryptedDir, "schema.sql")'),
+    "Synthetic restore must restore Auth schema before public schema dependencies",
+  );
+  assert.doesNotMatch(productionWorkflow, /pull_request:/);
 });
 
 test("Phase 1A files never reintroduce the obsolete device-session table name", async () => {
