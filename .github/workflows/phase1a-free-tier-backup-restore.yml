@@ -56,6 +56,13 @@ jobs:
             exit 1
           fi
 
+      - name: Validate Production database target
+        env:
+          DEEDOU_PRODUCTION_DB_URL: ${{ secrets.DEEDOU_PRODUCTION_DB_URL }}
+        run: |
+          node scripts/phase1a-backup-bundle.mjs validate-production-url \
+            --expected-ref "$DEEDOU_BACKUP_SOURCE_REF"
+
       - name: Prepare temporary backup workspace
         run: |
           rm -rf "$BACKUP_ROOT"
@@ -109,6 +116,55 @@ jobs:
                     from public.staff_profiles sp
                     where not exists (
                       select 1 from auth.identities ai where ai.user_id = sp.auth_user_id
+                    )
+                  )
+                )
+              ),
+              'ownerRecovery', (
+                with active_owner as (
+                  select sp.auth_user_id
+                  from public.staff_role_assignments sra
+                  join public.staff_profiles sp on sp.id = sra.staff_profile_id
+                  where sra.role_id = 'OWNER'
+                    and sra.active = true
+                    and sp.active = true
+                ),
+                owner_auth as (
+                  select ao.auth_user_id
+                  from active_owner ao
+                  join auth.users au on au.id = ao.auth_user_id
+                )
+                select jsonb_build_object(
+                  'counts', jsonb_build_object(
+                    'activeOwnerAssignments', (select count(*) from active_owner),
+                    'ownerAuthUsers', (select count(*) from owner_auth),
+                    'ownerAuthIdentities', (
+                      select count(*)
+                      from auth.identities ai
+                      join owner_auth oa on oa.auth_user_id = ai.user_id
+                    ),
+                    'ownerVerifiedTotpFactors', (
+                      select count(*)
+                      from auth.mfa_factors mf
+                      join owner_auth oa on oa.auth_user_id = mf.user_id
+                      where mf.factor_type = 'totp'
+                        and mf.status = 'verified'
+                    )
+                  ),
+                  'booleans', jsonb_build_object(
+                    'singleActiveOwner', (select count(*) from active_owner) = 1,
+                    'ownerResolvesToAuthUser', (select count(*) from owner_auth) = 1,
+                    'ownerHasAuthIdentity', exists (
+                      select 1
+                      from auth.identities ai
+                      join owner_auth oa on oa.auth_user_id = ai.user_id
+                    ),
+                    'ownerHasVerifiedTotp', exists (
+                      select 1
+                      from auth.mfa_factors mf
+                      join owner_auth oa on oa.auth_user_id = mf.user_id
+                      where mf.factor_type = 'totp'
+                        and mf.status = 'verified'
                     )
                   )
                 )

@@ -39,6 +39,8 @@ Configure these secrets in GitHub before running the workflow. Never paste their
 
 The workflow records the non-secret Production project ref/name as `nwohsyzpmogqjbmknwbl` so operators can identify the source without exposing credentials.
 
+Before any verification query or dump, the workflow validates that `DEEDOU_PRODUCTION_DB_URL` targets that expected Production project ref. The guard supports Supabase direct database URLs and session-pooler URLs where the project ref appears in either the hostname or the `postgres.<project-ref>` username. It fails closed for the known staging ref, unknown refs, malformed URLs and ambiguous URLs. It never prints the configured URL, username, password, host credential or connection string.
+
 ## Backup format
 
 The workflow creates three Supabase logical dumps:
@@ -131,7 +133,7 @@ Auth recovery checks compare counts only for:
 - `auth.identities`;
 - `auth.mfa_factors`.
 
-Relationship checks verify staff profiles point to restored Auth users, Auth identities/MFA factors point to restored Auth users, and each restored staff Auth user has an identity. They never print password hashes, MFA secrets, recovery tokens, refresh tokens or session cookies.
+Relationship checks verify staff profiles point to restored Auth users, Auth identities/MFA factors point to restored Auth users, and each restored staff Auth user has an identity. Owner-specific recovery checks also verify the accepted DD-011B invariant without selecting or logging IDs: exactly one active `OWNER` assignment, that active Owner resolves to a restored Auth user, that Owner has at least one restored Auth identity, and that Owner has at least one verified TOTP MFA factor. They never print IDs, email addresses, password hashes, MFA secrets, recovery tokens, refresh tokens or session cookies.
 
 Migration-history checks compare the exact captured `(version, name)` set from `supabase_migrations.schema_migrations` against the restored disposable target. The public backup summary records only a count and checksum; the exact set remains in the encrypted bundle/temporary restore workspace.
 
@@ -142,6 +144,8 @@ Representative post-restore security checks verify:
 - `service_role` can still maintain workstation device sessions;
 - expected execute grants remain present for `authorize_staff_access` and DD-012C component RPCs;
 - DD-011B service-only staff provisioning functions remain unavailable to `authenticated`.
+
+The restore verifier also performs one executable disposable-target denial proof: it temporarily switches the restore connection to `authenticated`, attempts a harmless direct insert into `public.staff_role_assignments`, and requires an `insufficient_privilege`/RLS-style failure. If that direct protected-table write succeeds, or if it fails for an unrelated constraint/data-shape reason, the restore drill fails closed. This assertion runs only against the disposable restore database named by `RESTORE_DB_URL`, never against Production or staging.
 
 Supabase-managed project configuration outside the database, including Dashboard Auth Site URL, redirect allowlist, signup posture, Auth rate-limit settings and leaked-password protection, is not recovered by this logical DB backup. Those remain separate Phase 1 operator verification steps.
 
@@ -168,16 +172,35 @@ Triggers:
 - manual `workflow_dispatch`;
 - daily schedule at `18:17 UTC`.
 
-The workflow fails closed if either required secret is absent. Do not run the real Production backup workflow until the PR/source has been reviewed and the GitHub secrets are configured through the GitHub UI.
+The workflow intentionally remains manual and scheduled only. It must not gain a pull request trigger because that would risk exposing Production database secrets to unmerged PR code.
+
+GitHub Actions only receives `workflow_dispatch` events for a workflow file that already exists on the repository default branch, and scheduled workflows run from the default branch. Because this workflow is newly introduced by PR #54, the lifecycle has two gates:
+
+### Implementation merge gate
+
+Source review plus exact-head CI may allow the PR #54 tooling to merge into `main`, but Slice 1A is still explicitly NOT ACCEPTED at this gate. No real Production drill evidence or measured restore duration exists merely because the implementation PR is green.
+
+### Post-merge operational acceptance gate
+
+After the workflow exists on `main`, an operator confirms the two GitHub secret names are configured, manually dispatches `.github/workflows/phase1a-free-tier-backup-restore.yml` from `main`, and verifies the sanitized encrypted-backup/disposable-restore evidence. Only that successful post-merge drill can close Slice 1A and provide measured RTO evidence.
+
+If the first post-merge drill fails, Phase 1A remains open and a follow-up remediation PR is required before Slice 1B starts.
 
 ## Operator review checklist
 
-Before enabling the daily schedule on `main`:
+Before merging the implementation PR:
+
+- confirm source review is complete;
+- confirm exact-head CI for the PR is green;
+- confirm the workflow has no PR trigger;
+- confirm no Production/staging mutation is required for implementation validation.
+
+After the workflow is on `main`, before accepting Slice 1A:
 
 - confirm both required GitHub secrets are configured;
 - confirm artifact retention is acceptable for encrypted backup bundles;
 - confirm the encryption passphrase is stored outside GitHub in an operator-controlled secret manager;
-- run one manual workflow dispatch and verify the restore drill summary;
+- manually dispatch the workflow from `main` and verify the restore drill summary;
 - record the measured restore duration after the first successful safe drill;
 - verify no plaintext SQL artifact was uploaded.
 

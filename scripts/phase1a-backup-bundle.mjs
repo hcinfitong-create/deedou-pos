@@ -7,6 +7,9 @@ import { gzipSync, gunzipSync } from "node:zlib";
 
 export const BACKUP_FORMAT = "deedou.phase1a.logical-backup.v1";
 export const PASSPHRASE_ENV = "DEEDOU_BACKUP_ENCRYPTION_PASSPHRASE";
+export const PRODUCTION_DB_URL_ENV = "DEEDOU_PRODUCTION_DB_URL";
+export const EXPECTED_PRODUCTION_REF = "nwohsyzpmogqjbmknwbl";
+export const KNOWN_NON_PRODUCTION_REFS = new Set(["nwyhxdcslxxjirsmqnxo"]);
 export const REQUIRED_SQL_FILES = [
   "roles.sql",
   "schema.sql",
@@ -18,6 +21,7 @@ export const REQUIRED_SQL_FILES = [
 ];
 const OPTIONAL_FILES = ["verification.json"];
 const PBKDF2_ITERATIONS = 210000;
+const SUPABASE_PROJECT_REF_PATTERN = /[a-z0-9]{20}/g;
 
 function sha256(buffer) {
   return createHash("sha256").update(buffer).digest("hex");
@@ -42,6 +46,55 @@ function hashJson(value) {
   return sha256(Buffer.from(JSON.stringify(value), "utf8"));
 }
 
+function decodeUrlPart(value) {
+  try {
+    return decodeURIComponent(value || "");
+  } catch {
+    return value || "";
+  }
+}
+
+export function collectSupabaseProjectRefsFromDbUrl(dbUrl) {
+  let parsed;
+  try {
+    parsed = new URL(dbUrl);
+  } catch {
+    throw new Error("Configured Production DB URL is malformed or unsupported");
+  }
+
+  if (!["postgres:", "postgresql:"].includes(parsed.protocol) || !parsed.hostname) {
+    throw new Error("Configured Production DB URL is malformed or unsupported");
+  }
+
+  const refs = new Set();
+  for (const part of [parsed.hostname, decodeUrlPart(parsed.username)]) {
+    const matches = String(part || "").toLowerCase().match(SUPABASE_PROJECT_REF_PATTERN) || [];
+    for (const match of matches) refs.add(match);
+  }
+  return [...refs].sort();
+}
+
+export function validateProductionDbUrl({
+  dbUrl = process.env[PRODUCTION_DB_URL_ENV],
+  expectedRef = EXPECTED_PRODUCTION_REF,
+  forbiddenRefs = KNOWN_NON_PRODUCTION_REFS,
+} = {}) {
+  if (!dbUrl) {
+    throw new Error(`${PRODUCTION_DB_URL_ENV} is required`);
+  }
+  const refs = collectSupabaseProjectRefsFromDbUrl(dbUrl);
+  if (refs.length === 0) {
+    throw new Error("Configured Production DB URL does not target the expected Production project ref");
+  }
+  if (refs.length > 1) {
+    throw new Error("Configured Production DB URL is ambiguous; multiple Supabase project refs were detected");
+  }
+  if (forbiddenRefs.has(refs[0]) || refs[0] !== expectedRef) {
+    throw new Error("Configured Production DB URL does not target the expected Production project ref");
+  }
+  return { ok: true, projectRef: expectedRef };
+}
+
 function sanitizeVerificationForManifest(verification) {
   if (!verification || typeof verification !== "object") return undefined;
   const sanitized = {};
@@ -53,6 +106,9 @@ function sanitizeVerificationForManifest(verification) {
       counts: verification.auth.counts,
       relationsExpected: Object.keys(verification.auth.relations || {}).sort(),
     };
+  }
+  if (verification.ownerRecovery) {
+    sanitized.ownerRecovery = verification.ownerRecovery;
   }
   if (verification.cliDumpProbe) {
     sanitized.cliDumpProbe = verification.cliDumpProbe;
@@ -301,7 +357,14 @@ async function main() {
     return;
   }
 
-  throw new Error("Usage: phase1a-backup-bundle.mjs <pack|unpack|record-probe> ...");
+  if (command === "validate-production-url") {
+    const expectedRef = readFlag(args, "--expected-ref") || EXPECTED_PRODUCTION_REF;
+    validateProductionDbUrl({ expectedRef });
+    console.log("Validated configured Production DB target ref.");
+    return;
+  }
+
+  throw new Error("Usage: phase1a-backup-bundle.mjs <pack|unpack|record-probe|validate-production-url> ...");
 }
 
 if (resolve(process.argv[1] || "") === fileURLToPath(import.meta.url)) {

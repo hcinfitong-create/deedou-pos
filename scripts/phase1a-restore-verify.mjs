@@ -16,6 +16,18 @@ const COUNT_KEYS = [
   "workstationDeviceSessions",
 ];
 const AUTH_COUNT_KEYS = ["users", "identities", "mfaFactors"];
+const OWNER_COUNT_KEYS = [
+  "activeOwnerAssignments",
+  "ownerAuthUsers",
+  "ownerAuthIdentities",
+  "ownerVerifiedTotpFactors",
+];
+const OWNER_BOOLEAN_KEYS = [
+  "singleActiveOwner",
+  "ownerResolvesToAuthUser",
+  "ownerHasAuthIdentity",
+  "ownerHasVerifiedTotp",
+];
 
 function canonicalMigrationRows(rows = []) {
   return [...rows]
@@ -107,6 +119,55 @@ select jsonb_build_object(
       )
     )
   ),
+  'ownerRecovery', (
+    with active_owner as (
+      select sp.auth_user_id
+      from public.staff_role_assignments sra
+      join public.staff_profiles sp on sp.id = sra.staff_profile_id
+      where sra.role_id = 'OWNER'
+        and sra.active = true
+        and sp.active = true
+    ),
+    owner_auth as (
+      select ao.auth_user_id
+      from active_owner ao
+      join auth.users au on au.id = ao.auth_user_id
+    )
+    select jsonb_build_object(
+      'counts', jsonb_build_object(
+        'activeOwnerAssignments', (select count(*) from active_owner),
+        'ownerAuthUsers', (select count(*) from owner_auth),
+        'ownerAuthIdentities', (
+          select count(*)
+          from auth.identities ai
+          join owner_auth oa on oa.auth_user_id = ai.user_id
+        ),
+        'ownerVerifiedTotpFactors', (
+          select count(*)
+          from auth.mfa_factors mf
+          join owner_auth oa on oa.auth_user_id = mf.user_id
+          where mf.factor_type = 'totp'
+            and mf.status = 'verified'
+        )
+      ),
+      'booleans', jsonb_build_object(
+        'singleActiveOwner', (select count(*) from active_owner) = 1,
+        'ownerResolvesToAuthUser', (select count(*) from owner_auth) = 1,
+        'ownerHasAuthIdentity', exists (
+          select 1
+          from auth.identities ai
+          join owner_auth oa on oa.auth_user_id = ai.user_id
+        ),
+        'ownerHasVerifiedTotp', exists (
+          select 1
+          from auth.mfa_factors mf
+          join owner_auth oa on oa.auth_user_id = mf.user_id
+          where mf.factor_type = 'totp'
+            and mf.status = 'verified'
+        )
+      )
+    )
+  ),
   'migrationHistory', jsonb_build_object(
     'count', (select count(*) from supabase_migrations.schema_migrations),
     'rows', (
@@ -143,16 +204,44 @@ select jsonb_build_object(
 `;
 }
 
-function runPsqlJson({ dbUrl, sql }) {
+export function buildDirectWriteDenialSql() {
+  return `
+do $$
+declare
+  v_sqlstate text;
+begin
+  execute 'set local role authenticated';
+  begin
+    insert into public.staff_role_assignments(staff_profile_id, location_id, role_id, active)
+    values ('phase1a-direct-write-denial-staff', 'phase1a-direct-write-denial-location', 'OWNER', true);
+    raise exception 'PHASE1A_DIRECT_WRITE_UNEXPECTEDLY_SUCCEEDED';
+  exception
+    when insufficient_privilege then
+      execute 'reset role';
+      return;
+    when others then
+      v_sqlstate := SQLSTATE;
+      execute 'reset role';
+      raise exception 'PHASE1A_DIRECT_WRITE_EXPECTED_PRIVILEGE_DENIAL got SQLSTATE %', v_sqlstate;
+  end;
+end $$;
+`;
+}
+
+function runPsql({ dbUrl, sql, label }) {
   const result = spawnSync("psql", [dbUrl, "-v", "ON_ERROR_STOP=1", "-tA", "-c", sql], {
     encoding: "utf8",
     windowsHide: true,
   });
   if (result.status !== 0) {
     const stderr = (result.stderr || "").trim();
-    throw new Error(`Restore verification query failed${stderr ? `: ${stderr}` : ""}`);
+    throw new Error(`${label} failed${stderr ? `: ${stderr}` : ""}`);
   }
-  return JSON.parse((result.stdout || "").trim());
+  return result.stdout || "";
+}
+
+function runPsqlJson({ dbUrl, sql }) {
+  return JSON.parse(runPsql({ dbUrl, sql, label: "Restore verification query" }).trim());
 }
 
 function assertAllTrue(groupName, values) {
@@ -208,6 +297,58 @@ export function compareAuthRecovery(expectedAuth, restoredAuth) {
     throw new Error(`Restore Auth count mismatch: ${mismatches.join("; ")}`);
   }
   assertAllTrue("Auth relations", restoredAuth?.relations);
+}
+
+export function compareOwnerRecovery(expectedOwner, restoredOwner) {
+  if (!expectedOwner?.counts || typeof expectedOwner.counts !== "object") {
+    throw new Error("Captured Owner recovery counts are required");
+  }
+  if (!expectedOwner?.booleans || typeof expectedOwner.booleans !== "object") {
+    throw new Error("Captured Owner recovery booleans are required");
+  }
+
+  const mismatches = [];
+  const ownerInvariantChecks = [
+    ["captured", expectedOwner],
+    ["restored", restoredOwner],
+  ];
+  for (const [label, owner] of ownerInvariantChecks) {
+    if (Number(owner?.counts?.activeOwnerAssignments) !== 1) {
+      mismatches.push(`${label} activeOwnerAssignments must be exactly 1`);
+    }
+    if (Number(owner?.counts?.ownerAuthUsers) !== 1) {
+      mismatches.push(`${label} ownerAuthUsers must be exactly 1`);
+    }
+    if (Number(owner?.counts?.ownerAuthIdentities) < 1) {
+      mismatches.push(`${label} ownerAuthIdentities must be at least 1`);
+    }
+    if (Number(owner?.counts?.ownerVerifiedTotpFactors) < 1) {
+      mismatches.push(`${label} ownerVerifiedTotpFactors must be at least 1`);
+    }
+  }
+  for (const key of OWNER_COUNT_KEYS) {
+    if (!(key in expectedOwner.counts)) {
+      mismatches.push(`${key}: missing captured Owner recovery count`);
+      continue;
+    }
+    const expected = Number(expectedOwner.counts[key]);
+    const actual = Number(restoredOwner?.counts?.[key]);
+    if (!Number.isFinite(expected) || !Number.isFinite(actual) || expected !== actual) {
+      mismatches.push(`${key}: expected ${expectedOwner.counts[key]}, restored ${restoredOwner?.counts?.[key]}`);
+    }
+  }
+  for (const key of OWNER_BOOLEAN_KEYS) {
+    if (expectedOwner.booleans[key] !== true) {
+      mismatches.push(`${key}: captured Owner recovery invariant failed`);
+      continue;
+    }
+    if (restoredOwner?.booleans?.[key] !== true) {
+      mismatches.push(`${key}: restored Owner recovery invariant failed`);
+    }
+  }
+  if (mismatches.length > 0) {
+    throw new Error(`Restore Owner recovery mismatch: ${mismatches.join("; ")}`);
+  }
 }
 
 export function compareMigrationHistory(expectedHistory, restoredHistory) {
@@ -266,8 +407,10 @@ export async function verifyRestoredBackup({
   assertAllTrue("functions", restored.functions);
   compareCounts(expected.counts || {}, restored.counts || {});
   compareAuthRecovery(expected.auth || {}, restored.auth || {});
+  compareOwnerRecovery(expected.ownerRecovery || {}, restored.ownerRecovery || {});
   compareMigrationHistory(expected.migrationHistory || {}, restored.migrationHistory || {});
   assertSecurityPosture(restored.security || {});
+  runPsql({ dbUrl, sql: buildDirectWriteDenialSql(), label: "Restore direct-write denial assertion" });
 
   const summary = [
     "# DeeDou Phase 1A Restore Drill Summary",
@@ -279,8 +422,9 @@ export async function verifyRestoredBackup({
     `- verifiedFunctions: ${Object.keys(restored.functions || {}).length}`,
     `- countKeys: ${Object.keys(restored.counts || {}).join(", ")}`,
     `- authCountKeys: ${Object.keys(restored.auth?.counts || {}).join(", ")}`,
+    `- ownerRecovery: activeOwnerAssignments=${restored.ownerRecovery?.counts?.activeOwnerAssignments ?? "NOT_RECORDED"}, verifiedTotpFactors=${restored.ownerRecovery?.counts?.ownerVerifiedTotpFactors ?? "NOT_RECORDED"}`,
     `- migrationHistoryRows: ${restored.migrationHistory?.count ?? "NOT_RECORDED"}`,
-    `- securityAssertions: RLS, ACL and representative direct-write denial`,
+    `- securityAssertions: RLS, ACL and runtime direct-write denial`,
     "",
   ].join("\n");
 
