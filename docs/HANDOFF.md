@@ -17,93 +17,28 @@ Before implementing anything:
 
 ## Current repository state
 
-Current `main` source review: `b282a0cd859b122fc6df4d065e5b9c496a5af537`.
+Current `main` source review: `0639d829f2645ce5efed2338550352583d526e63`.
 
-DD-011B and DD-012C are both merged, deployed and Production-verified.
+DD-011B and DD-012C are merged, deployed and Production-verified.
 
 Recent completion sequence:
 
-- PR #48 — `DD-011B: single Owner and backend-managed device activation`
-  - merged as `834049bb89a08968e5f69d77f9bb3718ba908d5b`;
-- PR #49 — `Hotfix DD-011B: allow Owner AAL2 re-challenge with active device`
-  - merged as `ff615b5874c0ad1ff9379c0eb2c6b8a9b98b7675`;
-- PR #46 — `DD-012C: authoritative combo component management`
-  - accepted head `27fa5c8219ad066bf21e3e02a33b1e803768535f`;
-  - merged as `b282a0cd859b122fc6df4d065e5b9c496a5af537`.
-
-Issue #47 remains open as tracking metadata; its DD-011B implementation and Production acceptance are complete. Do not close it unless a fresh check confirms no follow-up acceptance item is intentionally retained.
-
-## DD-011B protected production behavior
-
-Current implementation and Production rollout provide:
-
-- exactly one active OWNER globally;
-- Owner TOTP MFA/AAL2 for accepted privileged security paths;
-- staff `display_name` plus case-insensitive unique `username`;
-- Owner-created pending staff accounts;
-- six-digit first-login/new-device activation challenge with explicit Owner approval;
-- backend-managed trusted device sessions;
-- Secure/HttpOnly/SameSite cookie transport for device-session proof;
-- no workstation/device secret authority in frontend JS-readable storage;
-- immediate device revoke and staff/location/role disable semantics;
-- sole-Owner protection against normal application deactivation/revoke flows;
-- public QR remains outside staff security gating;
-- an Owner whose Auth session returns to AAL1 is offered the TOTP re-challenge path even when the workstation device/session is already active.
+- PR #48 — `DD-011B: single Owner and backend-managed device activation` → merge `834049bb89a08968e5f69d77f9bb3718ba908d5b`;
+- PR #49 — `Hotfix DD-011B: allow Owner AAL2 re-challenge with active device` → merge `ff615b5874c0ad1ff9379c0eb2c6b8a9b98b7675`;
+- PR #46 — `DD-012C: authoritative combo component management` → accepted head `27fa5c8219ad066bf21e3e02a33b1e803768535f`, merge `b282a0cd859b122fc6df4d065e5b9c496a5af537`;
+- PR #51 — final DD-012C docs sync → merge `0639d829f2645ce5efed2338550352583d526e63`.
 
 Production Supabase project: `nwohsyzpmogqjbmknwbl`.
 
-Current Production security baseline verified after DD-012C rollout:
+Current verified baseline:
 
 - one active OWNER assignment;
 - one active ADMIN workstation device;
 - one active backend workstation-device session;
-- `dd011b_security_policy.backend_device_sessions_required = true`.
-
-## DD-012C production-complete behavior
-
-Parent issue: #41
-PR: #46 `DD-012C: authoritative combo component management`
-Status: **production-complete**.
-
-Implemented contracts:
-
-- reuse canonical `product_components`; no parallel combo model;
-- `product_components.updated_at` optimistic concurrency;
-- Admin menu snapshot includes components;
-- authoritative component create/update/delete RPCs;
-- DD-011B HttpOnly backend device-session authority works with component mutations;
-- no browser-readable workstation credential is required or accepted as authority;
-- direct protected-table writes remain denied;
-- component mutations preserve `menu.manage`, registered workstation authority, idempotency, audit and realtime refresh hints;
-- combo order submission expands parent products into non-billable routed component lines;
-- historical submitted order-line component/configuration snapshots remain immutable after later catalog edits;
-- Admin component UI cache is invalidated across auth/location/workstation context changes;
-- failed component-menu loads stop automatic retry loops and require an explicit retry/refresh.
-
-Hosted staging acceptance passed at exact head:
-
-- Owner password login + TOTP/AAL2;
-- backend HttpOnly ADMIN device session;
-- Admin catalog mount;
-- product-create prerequisite;
-- direct component-table write denial;
-- component Create / Update / Delete;
-- public component projection;
-- initial / updated / post-delete QR order behavior;
-- final staging cleanup to zero.
-
-Final DD-012C hosted acceptance: run `32673729910`, job `97278777585` — PASS.
-
-Production rollout evidence:
-
-- Vercel Production deployment for merge commit `b282a0cd859b122fc6df4d065e5b9c496a5af537`: success;
-- Production migration `dd012c_combo_components` applied as migration history version `20260823235316`;
-- `product_components.updated_at` present;
-- `dd012_create_product_component`, `dd012_update_product_component`, `dd012_delete_product_component` present;
-- anon EXECUTE denied on DD-012C mutation RPCs;
-- unauthenticated Admin menu snapshot remains fail-closed with `FORBIDDEN / SIGN_IN_REQUIRED`;
-- real Production baseline preserved: one location, one staff profile, zero products, zero components, zero orders;
-- no Production menu/combo fixture data was invented or left behind.
+- `backend_device_sessions_required = true`;
+- DD-012C schema/RPCs present;
+- zero real Production products/components/orders;
+- no hosted-smoke fixtures retained.
 
 ## Protected behavior — do not regress
 
@@ -117,26 +52,80 @@ Production rollout evidence:
 - immutable historical configured-order/component snapshots.
 - sole OWNER and Owner AAL2 requirements.
 - no JS-readable device secret.
-- backend-device-session enforcement remains authoritative after cutover.
-- DD-012C must keep `product_components` as the canonical component model rather than creating a second combo graph.
+- backend-device-session enforcement remains authoritative.
+- an Owner whose Auth session returns to AAL1 must receive the TOTP re-challenge path.
+- `product_components` remains the canonical component graph; do not introduce a parallel combo/menu model.
 
-## Current working state
+## Current working phase — Phase 1
 
-There is no open DD-012C implementation/rollout blocker at this handoff.
+**Production operational hardening — Issue #40.**
 
-Do not resume from the old PR #46 branch as active work; PR #46 is merged and its Production migration is complete.
+This is the active priority. Before feature implementation, inspect current Production evidence for:
 
-Real DeeDou menu provisioning is not yet represented by Production product/component rows. Any real product/menu provisioning must use user-supplied source data; do not invent catalog data.
+1. backup posture;
+2. RPO/RTO;
+3. restore drill;
+4. final Auth Site URL / redirect allowlist;
+5. public-signup posture;
+6. leaked-password protection;
+7. rate-limit policy/enforcement for public QR, Auth and privileged Admin surfaces;
+8. audit/log retention/access/redaction.
 
-UI/UX redesign may reuse the current backend/API contracts without changing them unless a verified UI requirement exposes a genuine backend capability gap. Keep UI-only work separate from backend/schema changes.
+Do not claim a control is missing or complete until current Supabase/Vercel/repository evidence is inspected.
+
+If a required control needs a paid plan, provider choice, irreversible policy choice or credential, surface that decision to the user rather than inventing it.
+
+Real menu/business-data provisioning is a later go-live/data phase and does not replace the Phase 1 operational controls.
+
+## Phase 2 — accepted next functional work
+
+After Phase 1, create/execute a dedicated billing/VAT/service-fee/e-invoice milestone.
+
+Binding product direction:
+
+- VAT/e-invoice is an explicit Cashier option when the customer requests it;
+- it is not automatically applied to every bill;
+- current intent is +8% VAT and +2% service fee when the option is selected;
+- do not hard-code the rates/treatment until current Vietnamese tax/e-invoice law, tax base, rounding, accounting and provider/API contracts are verified;
+- preserve append-only payment history and existing KDS/order/table-session history.
+
+Provider-specific e-invoice integration requires an explicit provider/API contract.
+
+## Phase 3 — accepted future scope
+
+Confirmed for future implementation through separate issues/contracts:
+
+- inventory / recipe / COGS authority;
+- accounting export/integration and eventual Accounting Agent boundary;
+- e-invoice provider integration after the billing contract/provider choice;
+- discounts/promotions/loyalty;
+- real PSP integration after provider selection;
+- richer reports/operations analytics;
+- bounded technical decomposition justified by accepted feature work;
+- wider DeeDou AI/system integrations once cross-system contracts exist.
+
+## Real menu provisioning is coupled to inventory/recipe/cost
+
+Do **not** proceed from the current empty Production catalog directly to real menu entry as a standalone task.
+
+Accepted requirement:
+
+- menu provisioning must include the recipe/cost/inventory authority required for sold items to deduct stock correctly;
+- the exact BOM/recipe model, ingredient units, yield/waste, direct-stock handling, costing method and consumption timing are not yet specified and must be decided in the inventory milestone;
+- real business data must come from the user;
+- DD-012 catalog authority should be extended/reused, not replaced.
+
+## UI/UX sequencing
+
+Broad Admin/POS/QR UI/UX redesign is deferred until the confirmed backend/business phases stabilize. UI may reuse existing contracts; backend/schema changes need a proven capability gap.
 
 ## Next concrete action
 
-1. Merge the docs-only DD-012C final-state sync after confirming it changes documentation only.
-2. Choose/scope the next DeeDou issue/PR from the current roadmap rather than extending merged PR #46.
-3. If the next task is real menu provisioning, require user-supplied menu/product/component data and use the existing Admin/API authority.
-4. If the next task is UI/UX redesign, first audit current screens and map proposed interactions to existing backend capabilities before requesting backend changes.
-5. Optionally close Issue #47 only after confirming no intentional DD-011B tracking item remains.
+1. Merge the docs-only roadmap/decision confirmation after verifying the diff is documentation only.
+2. Audit current Production against Issue #40 and classify every checkbox as already satisfied, missing, or requiring user/provider/cost decision.
+3. Implement/verify Phase 1 controls sequentially; do not mix Phase 2 code into the same PR.
+4. After Phase 1 closes, perform current legal/tax/accounting/provider research and open the dedicated Phase 2 implementation issue/PR plan.
+5. Do not populate real menu data or start broad UI/UX redesign in the meantime.
 
 ## Handoff template for future sessions
 
