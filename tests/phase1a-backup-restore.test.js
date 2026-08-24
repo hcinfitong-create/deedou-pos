@@ -327,6 +327,10 @@ test("Phase 1A workflow is narrowly scoped to encrypted logical backup and safe 
   assert.match(workflow, /schedule:/);
   assert.match(workflow, /DEEDOU_PRODUCTION_DB_URL/);
   assert.match(workflow, /DEEDOU_BACKUP_ENCRYPTION_PASSPHRASE/);
+  assert.match(workflow, /RESTORE_ADMIN_DB_URL/);
+  assert.match(workflow, /Create fresh disposable restore database/);
+  assert.match(workflow, /drop database if exists \\"\$\{RESTORE_DB_NAME\}\\" with \(force\)/);
+  assert.match(workflow, /Drop disposable restore database/);
   assert.match(workflow, /validate-production-url/);
   assert.ok(
     workflow.indexOf("Validate Production database target") < workflow.indexOf("Capture non-sensitive source verification counts"),
@@ -379,6 +383,9 @@ test("Phase 1A PR CI runs a local synthetic E2E drill through the real backup he
   assert.match(script, /auth\.identities/);
   assert.match(script, /auth\.mfa_factors/);
   assert.match(script, /workstation_device_sessions/);
+  assert.match(script, /createDisposableRestoreDatabase/);
+  assert.match(script, /dropDisposableRestoreDatabase/);
+  assert.match(script, /drop database if exists \$\{restoreDb\} with \(force\)/);
   assert.match(script, /supabase", "db", "dump", "--db-url"/);
   assert.match(script, /"--schema", "auth"/);
   assert.match(script, /"--schema", "supabase_migrations"/);

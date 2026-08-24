@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 import { buildVerificationSql } from "./phase1a-restore-verify.mjs";
 
 const DEFAULT_DB_URL = "postgresql://postgres:postgres@127.0.0.1:54322/postgres";
-const DB_URL = process.env.DB_URL || process.env.RESTORE_DB_URL || DEFAULT_DB_URL;
+const SOURCE_DB_URL = process.env.DB_URL || DEFAULT_DB_URL;
+const RESTORE_DB_NAME = process.env.PHASE1A_E2E_RESTORE_DB_NAME || `deedou_phase1a_restore_${randomBytes(5).toString("hex")}`;
+const RESTORE_DB_URL = process.env.PHASE1A_E2E_RESTORE_DB_URL || buildDatabaseUrl(SOURCE_DB_URL, RESTORE_DB_NAME);
 const SOURCE_REF = "local-synthetic-phase1a";
 const NPX = process.platform === "win32" ? "npx.cmd" : "npx";
 const NODE = process.execPath;
@@ -21,38 +23,90 @@ function sqlText(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
+function sqlIdentifier(value) {
+  const text = String(value || "");
+  if (!/^[a-z][a-z0-9_]{2,62}$/.test(text)) {
+    throw new Error("Unsafe SQL identifier for disposable restore database");
+  }
+  return `"${text}"`;
+}
+
+function buildDatabaseUrl(dbUrl, databaseName) {
+  const parsed = new URL(dbUrl);
+  parsed.pathname = `/${databaseName}`;
+  return parsed.toString();
+}
+
 function run(command, args, label, options = {}) {
   console.log(`[phase1a-e2e] ${label}`);
-  execFileSync(command, args, {
-    cwd: process.cwd(),
-    env: { ...process.env, ...options.env },
-    stdio: options.stdio || "inherit",
-    encoding: options.encoding,
-    windowsHide: true,
-  });
+  try {
+    execFileSync(command, args, {
+      cwd: process.cwd(),
+      env: { ...process.env, ...options.env },
+      stdio: options.stdio || "inherit",
+      encoding: options.encoding,
+      windowsHide: true,
+    });
+  } catch (error) {
+    throw new Error(`${label} failed with exit code ${error.status ?? error.signal ?? "UNKNOWN"}`);
+  }
 }
 
 function capture(command, args, label, options = {}) {
   console.log(`[phase1a-e2e] ${label}`);
-  return execFileSync(command, args, {
-    cwd: process.cwd(),
-    env: { ...process.env, ...options.env },
-    stdio: ["ignore", "pipe", "pipe"],
-    encoding: "utf8",
-    windowsHide: true,
-  });
+  try {
+    return execFileSync(command, args, {
+      cwd: process.cwd(),
+      env: { ...process.env, ...options.env },
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
+      windowsHide: true,
+    });
+  } catch (error) {
+    const stderr = String(error.stderr || "").trim();
+    throw new Error(`${label} failed${stderr ? `: ${stderr}` : ""}`);
+  }
 }
 
-function psqlArgs(extraArgs) {
-  return [DB_URL, "-v", "ON_ERROR_STOP=1", ...extraArgs];
+function psqlArgs(dbUrl, extraArgs) {
+  return [dbUrl, "-v", "ON_ERROR_STOP=1", ...extraArgs];
 }
 
-function runPsql(sql, label) {
-  run("psql", psqlArgs(["-c", sql]), label);
+function runPsql(sql, label, dbUrl = SOURCE_DB_URL) {
+  run("psql", psqlArgs(dbUrl, ["-c", sql]), label);
 }
 
-function capturePsql(sql, label) {
-  return capture("psql", psqlArgs(["-tA", "-c", sql]), label).trim();
+function capturePsql(sql, label, dbUrl = SOURCE_DB_URL) {
+  return capture("psql", psqlArgs(dbUrl, ["-tA", "-c", sql]), label).trim();
+}
+
+function createDisposableRestoreDatabase() {
+  const restoreDb = sqlIdentifier(RESTORE_DB_NAME);
+  run("psql", [
+    SOURCE_DB_URL,
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-c",
+    `drop database if exists ${restoreDb} with (force);`,
+    "-c",
+    `create database ${restoreDb};`,
+  ], "create fresh disposable restore database");
+}
+
+function dropDisposableRestoreDatabase({ required = false } = {}) {
+  const restoreDb = sqlIdentifier(RESTORE_DB_NAME);
+  try {
+    run("psql", [
+      SOURCE_DB_URL,
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-c",
+      `drop database if exists ${restoreDb} with (force);`,
+    ], "drop disposable restore database");
+  } catch (error) {
+    if (required) throw error;
+    console.error(`[phase1a-e2e] cleanup warning: ${error.message}`);
+  }
 }
 
 function buildSyntheticFixtureSql() {
@@ -289,13 +343,13 @@ async function main() {
     runPsql(buildSyntheticFixtureSql(), "create local-only Owner/Auth/TOTP/device/session/migration fixtures");
     await writeSourceVerification(plainDir);
 
-    run(NPX, ["supabase", "db", "dump", "--db-url", DB_URL, "--role-only", "-f", join(plainDir, "roles.sql")], "dump roles with Supabase CLI");
-    run(NPX, ["supabase", "db", "dump", "--db-url", DB_URL, "-f", join(plainDir, "schema.sql")], "dump normal schema with Supabase CLI");
-    run(NPX, ["supabase", "db", "dump", "--db-url", DB_URL, "--data-only", "--use-copy", "-f", join(plainDir, "data.sql")], "dump normal data with Supabase CLI");
-    run(NPX, ["supabase", "db", "dump", "--db-url", DB_URL, "--schema", "supabase_migrations", "-f", join(plainDir, "migration_history_schema.sql")], "dump migration-history schema with Supabase CLI");
-    run(NPX, ["supabase", "db", "dump", "--db-url", DB_URL, "--schema", "supabase_migrations", "--data-only", "--use-copy", "-f", join(plainDir, "migration_history_data.sql")], "dump migration-history data with Supabase CLI");
-    run(NPX, ["supabase", "db", "dump", "--db-url", DB_URL, "--schema", "auth", "-f", join(plainDir, "auth_schema.sql")], "dump Auth schema with Supabase CLI");
-    run(NPX, ["supabase", "db", "dump", "--db-url", DB_URL, "--schema", "auth", "--data-only", "--use-copy", "-f", join(plainDir, "auth_data.sql")], "dump Auth data with Supabase CLI");
+    run(NPX, ["supabase", "db", "dump", "--db-url", SOURCE_DB_URL, "--role-only", "-f", join(plainDir, "roles.sql")], "dump roles with Supabase CLI");
+    run(NPX, ["supabase", "db", "dump", "--db-url", SOURCE_DB_URL, "-f", join(plainDir, "schema.sql")], "dump normal schema with Supabase CLI");
+    run(NPX, ["supabase", "db", "dump", "--db-url", SOURCE_DB_URL, "--data-only", "--use-copy", "-f", join(plainDir, "data.sql")], "dump normal data with Supabase CLI");
+    run(NPX, ["supabase", "db", "dump", "--db-url", SOURCE_DB_URL, "--schema", "supabase_migrations", "-f", join(plainDir, "migration_history_schema.sql")], "dump migration-history schema with Supabase CLI");
+    run(NPX, ["supabase", "db", "dump", "--db-url", SOURCE_DB_URL, "--schema", "supabase_migrations", "--data-only", "--use-copy", "-f", join(plainDir, "migration_history_data.sql")], "dump migration-history data with Supabase CLI");
+    run(NPX, ["supabase", "db", "dump", "--db-url", SOURCE_DB_URL, "--schema", "auth", "-f", join(plainDir, "auth_schema.sql")], "dump Auth schema with Supabase CLI");
+    run(NPX, ["supabase", "db", "dump", "--db-url", SOURCE_DB_URL, "--schema", "auth", "--data-only", "--use-copy", "-f", join(plainDir, "auth_data.sql")], "dump Auth data with Supabase CLI");
 
     run(NODE, [
       "scripts/phase1a-backup-bundle.mjs",
@@ -343,9 +397,10 @@ async function main() {
       "",
     ].join("\n"));
 
+    createDisposableRestoreDatabase();
     const restoreStartedAt = Date.now();
     run("psql", [
-      DB_URL,
+      RESTORE_DB_URL,
       "--single-transaction",
       "--variable",
       "ON_ERROR_STOP=1",
@@ -379,12 +434,13 @@ async function main() {
       "--restore-seconds",
       String(restoreSeconds),
     ], "run real Phase 1A restore verifier including runtime direct-write denial", {
-      env: { RESTORE_DB_URL: DB_URL },
+      env: { RESTORE_DB_URL },
     });
 
     console.log("[phase1a-e2e] synthetic PR-safe backup/restore drill passed");
     console.log("[phase1a-e2e] verified: local fixtures, auth dump, migration dump, pack, unpack, restore, Owner TOTP recovery, direct-write denial");
   } finally {
+    dropDisposableRestoreDatabase();
     if (keepWorkspace) {
       console.log(`[phase1a-e2e] retained workspace for diagnostics: ${root}`);
     } else {

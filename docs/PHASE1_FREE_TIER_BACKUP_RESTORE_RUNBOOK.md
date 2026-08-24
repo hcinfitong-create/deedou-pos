@@ -94,15 +94,16 @@ The workflow starts a disposable local Supabase target with the pinned CLI used 
 Restore order:
 
 1. decrypt the encrypted bundle into a temporary runner directory;
-2. reset only the disposable target's `public`, `auth` and `supabase_migrations` schemas;
-3. restore `roles.sql`, `auth_schema.sql`, `migration_history_schema.sql` and `schema.sql`;
-4. set `session_replication_role = replica` for trigger-safe data import;
-5. restore `auth_data.sql`, `data.sql` and `migration_history_data.sql`;
-6. verify representative schema objects, Auth identity/MFA consistency, Production migration-history match, DD-011B/DD-012C functions, RLS/ACL posture and row counts;
-7. write a non-sensitive restore summary with elapsed restore seconds;
-8. remove decrypted SQL.
+2. create a fresh disposable restore database inside the local Supabase Postgres cluster;
+3. reset only that disposable database's `public`, `auth` and `supabase_migrations` schemas;
+4. restore `roles.sql`, `auth_schema.sql`, `migration_history_schema.sql` and `schema.sql`;
+5. set `session_replication_role = replica` for trigger-safe data import;
+6. restore `auth_data.sql`, `data.sql` and `migration_history_data.sql`;
+7. verify representative schema objects, Auth identity/MFA consistency, Production migration-history match, DD-011B/DD-012C functions, RLS/ACL posture and row counts;
+8. write a non-sensitive restore summary with elapsed restore seconds;
+9. remove decrypted SQL and drop the disposable restore database.
 
-The restore step uses one `psql --single-transaction --variable ON_ERROR_STOP=1` restore boundary for reset/schema/data/history/Auth restore. SQL errors stop the workflow and roll back the restore transaction. The reset is destructive only to the disposable restore target named by `RESTORE_DB_URL`.
+The restore step uses one `psql --single-transaction --variable ON_ERROR_STOP=1` restore boundary for reset/schema/data/history/Auth restore. SQL errors stop the workflow and roll back the restore transaction. The destructive reset is scoped only to the fresh disposable restore database named by `RESTORE_DB_URL`, not to the local Supabase default `postgres` database.
 
 `auth_schema.sql` is restored before the normal public schema because DeeDou public tables, policies and functions may depend on restored Auth objects. Data import still loads Auth data before public data so staff-profile/Auth references are available when public rows are copied.
 
@@ -176,7 +177,7 @@ Triggers:
 
 The workflow intentionally remains manual and scheduled only. It must not gain a pull request trigger because that would risk exposing Production database secrets to unmerged PR code.
 
-PR #54 also carries a separate PR-safe synthetic drill in the normal DeeDou CI workflow. That job uses only the GitHub-hosted local Supabase stack, local synthetic Owner/Auth/TOTP/device/session fixtures, and a generated job-local encryption passphrase. It exercises the same `supabase db dump --db-url` command shapes for roles, normal schema/data, `auth`, and `supabase_migrations`, then runs the committed `phase1a-backup-bundle.mjs pack`, `unpack`, and `phase1a-restore-verify.mjs` paths. It does not connect to Production/staging, does not require repository backup secrets, uploads no plaintext SQL/Auth artifacts, and does not replace the post-merge operational acceptance gate.
+PR #54 also carries a separate PR-safe synthetic drill in the normal DeeDou CI workflow. That job uses only the GitHub-hosted local Supabase stack, local synthetic Owner/Auth/TOTP/device/session fixtures, a generated job-local encryption passphrase, and a fresh disposable restore database that is dropped during cleanup. It exercises the same `supabase db dump --db-url` command shapes for roles, normal schema/data, `auth`, and `supabase_migrations`, then runs the committed `phase1a-backup-bundle.mjs pack`, `unpack`, and `phase1a-restore-verify.mjs` paths. It does not connect to Production/staging, does not require repository backup secrets, uploads no plaintext SQL/Auth artifacts, and does not replace the post-merge operational acceptance gate.
 
 GitHub Actions only receives `workflow_dispatch` events for a workflow file that already exists on the repository default branch, and scheduled workflows run from the default branch. Because this workflow is newly introduced by PR #54, the lifecycle has two gates:
 

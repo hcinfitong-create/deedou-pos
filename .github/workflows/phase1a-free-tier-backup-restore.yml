@@ -20,7 +20,8 @@ jobs:
       DEEDOU_BACKUP_SOURCE_REF: nwohsyzpmogqjbmknwbl
       BACKUP_ROOT: ${{ runner.temp }}/deedou-phase1a-backup
       ARTIFACT_DIR: artifacts/phase1a-backup
-      RESTORE_DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+      RESTORE_ADMIN_DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+      RESTORE_DB_NAME: deedou_phase1a_restore_${{ github.run_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -223,6 +224,14 @@ jobs:
             --input "$ARTIFACT_DIR/deedou-production-logical-backup-${GITHUB_RUN_ID}.ddbak.enc" \
             --output-dir "$BACKUP_ROOT/decrypted"
 
+      - name: Create fresh disposable restore database
+        run: |
+          echo "RESTORE_DB_URL=postgresql://postgres:postgres@127.0.0.1:54322/${RESTORE_DB_NAME}" >> "$GITHUB_ENV"
+          psql "$RESTORE_ADMIN_DB_URL" \
+            --variable ON_ERROR_STOP=1 \
+            --command "drop database if exists \"${RESTORE_DB_NAME}\" with (force);" \
+            --command "create database \"${RESTORE_DB_NAME}\";"
+
       - name: Restore roles, schema and data into disposable database
         run: |
           RESTORE_STARTED_AT="$(date +%s)"
@@ -255,6 +264,13 @@ jobs:
       - name: Remove plaintext backup workspaces
         if: always()
         run: rm -rf "$BACKUP_ROOT/plain" "$BACKUP_ROOT/decrypted"
+
+      - name: Drop disposable restore database
+        if: always()
+        run: |
+          psql "$RESTORE_ADMIN_DB_URL" \
+            --variable ON_ERROR_STOP=1 \
+            --command "drop database if exists \"${RESTORE_DB_NAME}\" with (force);"
 
       - name: Stop disposable local Supabase restore target
         if: always()
