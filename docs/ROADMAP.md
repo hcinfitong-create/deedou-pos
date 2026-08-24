@@ -89,18 +89,21 @@ Complete the operational controls required for a production service:
 
 Real tables/menu/business data are a later go-live provisioning gate and do not replace these operational controls.
 
-### Phase 2 — Billing, VAT, service fee and e-invoice checkout contract
+### Phase 2 — Billing, VAT, service fee and e-invoice checkout authority
 
 Status: ⏭ **accepted next functional phase after Phase 1**.
+Tracking issue: #52 / DD-013.
 
-Accepted product direction:
+Accepted product intent and legal gate:
 
-- VAT/e-invoice is an explicit Cashier option when the customer requests it; it is not automatically applied to every bill;
-- current intended calculation is +8% VAT and +2% service fee when that option is selected;
-- current Vietnamese tax/e-invoice law, tax base, rounding, accounting treatment and provider contract must be verified before hard-coding the rates/flow;
-- implementation must preserve the append-only payment ledger and existing order/KDS/table-session history.
+- Cashier needs an explicit customer invoice-information/request workflow;
+- that customer-request workflow must **not** be interpreted as permission to suppress an electronic invoice that current law requires the seller to create;
+- invoice obligation/type/timing, required buyer information and cash-register e-invoice applicability must be reconciled against the current legal/accounting contract before code semantics are fixed;
+- the previously discussed +8% VAT and +2% service-fee calculation remains product intent only, not a universal permanent rule;
+- current VAT eligibility, effective period, tax base, service-fee treatment, rounding and provider contract must be verified before hard-coding;
+- implementation must preserve the append-only payment ledger and existing immutable order/KDS/table-session history.
 
-A dedicated issue/contract is required before implementation. Provider-specific e-invoice integration may only be implemented after the provider/API and legal/accounting contract are confirmed.
+Phase 2 may perform research/specification while Phase 1 runs, but Production implementation begins only after Phase 1 closes and DD-013 contract questions are approved.
 
 ### Phase 3 — Accepted wider POS/back-office capabilities
 
@@ -110,7 +113,7 @@ Accepted scope includes:
 
 - inventory / recipe / COGS authority;
 - accounting export/integration and eventual Accounting Agent boundary;
-- e-invoice provider integration after the Phase 2 billing contract/provider selection;
+- provider-specific e-invoice integration after the Phase 2 billing contract/provider selection;
 - discounts/promotions/loyalty;
 - real PSP integrations such as VNPAY/MoMo/ZaloPay after payment-provider contracts are selected;
 - richer reports/operations analytics;
